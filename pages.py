@@ -13,18 +13,21 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice
+from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
     QPushButton, QSizePolicy, QSpinBox, QTabWidget,
-    QTableWidgetItem, QTextEdit,
+    QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 
 import excel_io
 from core import (
@@ -40,6 +43,18 @@ from widgets import (
 )
 
 logger = logging.getLogger("QuoteApp")
+
+
+def _make_plain_table(cols: int, headers: List[str]) -> QTableWidget:
+    t = QTableWidget(0, cols)
+    t.setHorizontalHeaderLabels(headers)
+    t.verticalHeader().setVisible(False)
+    t.setEditTriggers(QTableWidget.NoEditTriggers)
+    t.setSelectionBehavior(QAbstractItemView.SelectRows)
+    t.setSelectionMode(QAbstractItemView.SingleSelection)
+    t.setWordWrap(False)
+    return t
+
 
 PROCESS_CHOICES = ["", "CVD", "DIFF", "IMP", "ETCH", "METAL", "CLEAN", "GCS"]
 VENDOR_CHOICES  = [
@@ -125,17 +140,9 @@ class OptionsDialog(QDialog):
         root.addWidget(bb)
         self.tabs.setCurrentIndex({"credit": 0, "cn": 1, "us": 2}.get(focus, 0))
 
-    @staticmethod
-    def _money(text: str) -> float:
-        t = (text or "").strip().replace(",", "")
-        try:
-            return float(t) if t else 0.0
-        except ValueError:
-            return 0.0
-
     def apply(self) -> None:
-        self.state.pump_credit = self._money(self._pump.text())
-        self.state.rack_credit = self._money(self._rack.text())
+        self.state.pump_credit = to_float(self._pump.text())
+        self.state.rack_credit = to_float(self._rack.text())
         self.state.cn_info = {
             "maker": self._cn_maker.text().strip(), "process": self._cn_process.text().strip(),
             "tool":  self._cn_tool.text().strip(),  "line":    self._cn_line.text().strip(),
@@ -447,7 +454,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         top = QHBoxLayout()
         self.chk_req_all = QCheckBox("전체선택"); self.chk_req_all.clicked.connect(self._on_req_select_all)
         top.addWidget(self.chk_req_all); top.addStretch(1); v.addLayout(top)
-        self.req_table = self._plain_table(3, ["선택", "설비호기(Z)", "견적서작성여부"])
+        self.req_table = _make_plain_table(3, ["선택", "설비호기(Z)", "견적서작성여부"])
         self.req_table.setColumnWidth(0, 42)
         self.req_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
@@ -565,14 +572,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         for lbl in (self.lbl_pr, self.lbl_item, self.lbl_line, self.lbl_investor): v.addWidget(lbl)
         v.addStretch(1); v.addWidget(self.lbl_more); return frame
 
-    @staticmethod
-    def _plain_table(cols: int, headers: List[str]):
-        from PySide6.QtWidgets import QTableWidget
-        t = QTableWidget(0, cols); t.setHorizontalHeaderLabels(headers)
-        t.verticalHeader().setVisible(False); t.setEditTriggers(QTableWidget.NoEditTriggers)
-        t.setSelectionBehavior(QAbstractItemView.SelectRows)
-        t.setSelectionMode(QAbstractItemView.SingleSelection); t.setWordWrap(False); return t
-
     def _style_req_table(self) -> None:
         self.req_table.setAlternatingRowColors(False)
         self.req_table.setStyleSheet(
@@ -588,7 +587,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "통합양식 선택", "", "Excel Files (*.xlsx)")
         if not path: return
         try:
-            from openpyxl import load_workbook
             wb = load_workbook(path, data_only=False)
         except Exception as e:
             QMessageBox.critical(self, "오류", f"파일을 열 수 없습니다.\n{e}"); return
@@ -848,13 +846,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         lbl_before = QLabel(); lbl_after = QLabel(); lbl_after.setStyleSheet("font-weight:bold;")
         v.addWidget(lbl_before); v.addWidget(lbl_after)
 
-        def _money(t: str) -> float:
-            try: return float(t.strip().replace(",","")) if t.strip() else 0.0
-            except ValueError: return 0.0
-
         def _refresh() -> None:
             base   = sum(self._get_float(r,5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
-            credit = _money(ed_pump.text()) + _money(ed_rack.text())
+            credit = to_float(ed_pump.text()) + to_float(ed_rack.text())
             lbl_before.setText(f"현재 총금액: {fmt_krw(base)} 원")
             lbl_after.setText(f"Credit 반영: {fmt_krw(base-credit)} 원  (감액: {fmt_krw(credit)} 원)")
 
@@ -862,7 +856,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); v.addWidget(bb)
 
         def _ok() -> None:
-            self.state.pump_credit = _money(ed_pump.text()); self.state.rack_credit = _money(ed_rack.text())
+            self.state.pump_credit = to_float(ed_pump.text()); self.state.rack_credit = to_float(ed_rack.text())
             self._refresh_credits(); self._recalc_totals(); dlg.accept()
 
         bb.accepted.connect(_ok); bb.rejected.connect(dlg.reject); _refresh(); dlg.exec()
@@ -1004,7 +998,6 @@ class ESignPage(QWidget):
         top.addStretch(1); top.addWidget(self.lbl_status); outer.addLayout(top)
         mid = QHBoxLayout()
         self.file_list = QListWidget(); self.file_list.setFixedWidth(360); mid.addWidget(self.file_list)
-        from PySide6.QtWidgets import QGraphicsScene
         self.scene = QGraphicsScene(self)
         self.view  = PdfView(self); self.view.setScene(self.scene); self.view.setAlignment(Qt.AlignCenter)
         self.view.setFocusPolicy(Qt.StrongFocus); self.view.setFocus(); mid.addWidget(self.view, 1)
@@ -1019,8 +1012,12 @@ class ESignPage(QWidget):
     def _load_code(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "승인코드 TXT", "", "Text Files (*.txt)")
         if not path: return
-        try: self._code = open(path, encoding="utf-8").read().strip()
-        except Exception as e: QMessageBox.critical(self, "오류", str(e)); return
+        try:
+            with open(path, encoding="utf-8") as f:
+                self._code = f.read().strip()
+        except Exception as e:
+            QMessageBox.critical(self, "오류", str(e))
+            return
         folder = os.path.dirname(path); exts = (".png",".jpg",".jpeg",".bmp",".webp")
         imgs = sorted([os.path.join(folder,f) for f in os.listdir(folder) if f.lower().endswith(exts)],
                        key=lambda p: os.path.basename(p).lower())
@@ -1029,7 +1026,6 @@ class ESignPage(QWidget):
                 for p in imgs:
                     if kw in os.path.basename(p).lower(): return p
             return None
-        from PySide6.QtGui import QPixmap
         p1 = _pick(["서명1","sign1","signature1","stamp1"]); p2 = _pick(["서명2","sign2","signature2","stamp2"])
         if not p1 or not p2:
             p1 = p1 or (imgs[0] if imgs else None); p2 = p2 or (imgs[1] if len(imgs)>1 else None)
@@ -1076,14 +1072,14 @@ class ESignPage(QWidget):
         if not pdf_path or not os.path.exists(pdf_path):
             self.lbl_status.setText("표시할 시트 없음(스킵)"); self.scene.clear(); return
         try:
-            import fitz; self._pdf_doc = fitz.open(pdf_path)
+            import fitz
+            self._pdf_doc = fitz.open(pdf_path)
         except Exception as e: QMessageBox.critical(self, "오류", f"PDF 열기 실패\n{e}")
 
     def _render(self) -> None:
         if not self._pdf_doc: return
         self._cur_page = max(0, min(self._cur_page, len(self._pdf_doc)-1))
         import fitz
-        from PySide6.QtGui import QImage, QPixmap
         page = self._pdf_doc.load_page(self._cur_page)
         vp_w = max(1, self.view.viewport().width())
         zoom = max(2.0, min(4.0, vp_w*2 / max(1.0, float(page.rect.width))))
@@ -1100,7 +1096,6 @@ class ESignPage(QWidget):
             try:
                 if self._bg_item.scene() is self.scene: self.scene.removeItem(self._bg_item)
             except Exception: pass
-        from PySide6.QtWidgets import QGraphicsPixmapItem
         bg = QGraphicsPixmapItem(pm); bg.setZValue(0); bg.setAcceptedMouseButtons(Qt.NoButton)
         self.scene.addItem(bg); self._bg_item = bg; self._shown_key = (self._cur_file, self._cur_page)
         for it in list(self._sign_items.get(self._shown_key, [])):
@@ -1129,8 +1124,7 @@ class ESignPage(QWidget):
         if not self._pdf_doc: return
         dlg = PasswordDialog(self, self._code)
         if dlg.exec() != QDialog.Accepted or not dlg.verified: return
-        from PySide6.QtWidgets import QApplication as _App
-        idx = min(1 if (_App.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs)-1)
+        idx = min(1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs)-1)
         item = SignatureItem(self._signs[idx], self._cur_page); item.setZValue(10)
         item.setPos(QPointF(scene_pos.x()-self.SIGN_W/2, scene_pos.y()-self.SIGN_H/2))
         self.scene.addItem(item)
@@ -1151,7 +1145,6 @@ class ESignPage(QWidget):
 
     def _build_pdf(self, out: str) -> None:
         import fitz
-        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
         final = fitz.open()
         for fi, pdf_path in enumerate(self._pdfs):
             if not pdf_path or not os.path.exists(pdf_path): continue
@@ -1204,13 +1197,13 @@ class LogPage(QWidget):
         for lbl, w in [("PR",self.ed_pr),("설비호기",self.ed_tool),("품목",self.ed_item),("견적타입",self.cb_qtype),("분류(합산)",self.cb_cat)]:
             bar.addWidget(QLabel(lbl)); bar.addWidget(w); bar.addSpacing(6)
         bar.addWidget(self.btn_export); bar.addStretch(1); outer.addLayout(bar)
-        self.tbl_logs = self._make_table(8, self._COL_HEADERS)
+        self.tbl_logs = _make_plain_table(8, self._COL_HEADERS)
         h = self.tbl_logs.horizontalHeader()
         for i in range(7): h.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(7, QHeaderView.Stretch)
         outer.addWidget(self.tbl_logs, 3)
         outer.addWidget(bold_label("체크된 견적서 품목 합산 (금액 내림차순)", size=10))
-        self.tbl_items = self._make_table(5, ["분류","품목(규격)","총수량","단가(추정)","총금액"])
+        self.tbl_items = _make_plain_table(5, ["분류","품목(규격)","총수량","단가(추정)","총금액"])
         hi = self.tbl_items.horizontalHeader(); hi.setStretchLastSection(False); hi.setSectionResizeMode(QHeaderView.Fixed)
         for col, w in enumerate([90,820,90,120,505]): self.tbl_items.setColumnWidth(col, w)
         outer.addWidget(self.tbl_items, 2)
@@ -1221,14 +1214,6 @@ class LogPage(QWidget):
         self.cb_qtype.currentIndexChanged.connect(self.reload)
         self.cb_cat.currentIndexChanged.connect(self._refresh_items)
         self.tbl_logs.cellDoubleClicked.connect(self._open_file)
-
-    @staticmethod
-    def _make_table(cols: int, headers: List[str]):
-        from PySide6.QtWidgets import QTableWidget
-        t = QTableWidget(0, cols); t.setHorizontalHeaderLabels(headers)
-        t.verticalHeader().setVisible(False); t.setEditTriggers(QTableWidget.NoEditTriggers)
-        t.setSelectionBehavior(QAbstractItemView.SelectRows)
-        t.setSelectionMode(QAbstractItemView.SingleSelection); t.setWordWrap(False); return t
 
     def reload(self) -> None:
         logs = sorted(
@@ -1306,7 +1291,6 @@ class LogPage(QWidget):
         if not path: return
         if not path.lower().endswith(".xlsx"): path += ".xlsx"
         try:
-            from openpyxl import Workbook; from openpyxl.utils import get_column_letter
             wb = Workbook(); ws = wb.active; ws.title = "품목합산"
             ws.append(["분류","품목(규격)","총수량","단가(추정)","총금액"])
             for r in range(self.tbl_items.rowCount()):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -161,54 +162,60 @@ class _ExcelLoaderThread(QThread):
 
 
 # ══════════════════════════════════════════════
-# 옵션 다이얼로그 (Credit / 중국 / 미국)
+# ══════════════════════════════════════════════
+# 중국 옵션 다이얼로그
 # ══════════════════════════════════════════════
 
-class OptionsDialog(QDialog):
-    def __init__(self, parent, state: QuoteState, focus: str = "credit") -> None:
+class ChinaOptionsDialog(QDialog):
+    def __init__(self, parent, state: QuoteState) -> None:
         super().__init__(parent)
-        self.setWindowTitle("옵션 입력")
+        self.setWindowTitle("중국 옵션 입력")
         self.state = state
         self.setModal(True)
-        self.resize(520, 340)
+        self.setFixedWidth(380)
 
-        root = QVBoxLayout(self)
-        self.tabs = QTabWidget()
-        root.addWidget(self.tabs, 1)
-
-        # Credit 탭
-        tab_cr = QWidget()
-        f1 = QFormLayout(tab_cr)
-        self._pump = QLineEdit(str(int(state.pump_credit)) if state.pump_credit else "")
-        self._rack = QLineEdit(str(int(state.rack_credit)) if state.rack_credit else "")
-        for ed in (self._pump, self._rack):
-            ed.setPlaceholderText("미입력 시 0(무시)")
-        f1.addRow("Pump Credit(원)", self._pump)
-        f1.addRow("Rack Credit(원)", self._rack)
-        self.tabs.addTab(tab_cr, "Credit")
-
-        # 중국 탭
-        tab_cn = QWidget()
-        f2 = QFormLayout(tab_cn)
         cn = state.cn_info or {}
-        self._cn_maker   = QLineEdit(cn.get("maker", ""))
-        self._cn_process = QLineEdit(cn.get("process", ""))
-        self._cn_tool    = QLineEdit(cn.get("tool", ""))
-        self._cn_line    = QLineEdit(cn.get("line", ""))
-        f2.addRow("Maker",    self._cn_maker)
-        f2.addRow("Process",  self._cn_process)
-        f2.addRow("설비호기", self._cn_tool)
-        f2.addRow("라인",     self._cn_line)
-        self.tabs.addTab(tab_cn, "중국")
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self._maker   = QLineEdit(cn.get("maker", ""))
+        self._process = QLineEdit(cn.get("process", ""))
+        self._tool    = QLineEdit(cn.get("tool", ""))
+        self._line    = QLineEdit(cn.get("line", ""))
+        form.addRow("Maker",    self._maker)
+        form.addRow("Process",  self._process)
+        form.addRow("설비호기", self._tool)
+        form.addRow("라인",     self._line)
+        root.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        root.addWidget(bb)
 
-        # 미국 탭
-        tab_us = QWidget()
-        f3 = QFormLayout(tab_us)
+    def apply(self) -> None:
+        self.state.cn_info = {
+            "maker": self._maker.text().strip(), "process": self._process.text().strip(),
+            "tool":  self._tool.text().strip(),  "line":    self._line.text().strip(),
+        }
+
+
+# ══════════════════════════════════════════════
+# 미국 옵션 다이얼로그
+# ══════════════════════════════════════════════
+
+class USOptionsDialog(QDialog):
+    def __init__(self, parent, state: QuoteState) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("미국 옵션 입력")
+        self.state = state
+        self.setModal(True)
+        self.setFixedWidth(420)
+
         us = state.us_info or {}
-        self._us_maker   = QLineEdit(us.get("maker", ""))
-        self._us_process = QLineEdit(us.get("process", ""))
-        self._us_tool    = QLineEdit(us.get("tool", ""))
-        self._exchange   = QDoubleSpinBox()
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self._maker   = QLineEdit(us.get("maker", ""))
+        self._process = QLineEdit(us.get("process", ""))
+        self._tool    = QLineEdit(us.get("tool", ""))
+        self._exchange = QDoubleSpinBox()
         self._exchange.setRange(0, 1e9); self._exchange.setDecimals(2)
         self._exchange.setValue(float(us.get("exchange", 0) or 0))
         now = datetime.now()
@@ -220,33 +227,24 @@ class OptionsDialog(QDialog):
         self._site.setCurrentText(site if site in ("Taylor", "Austin") else "Taylor")
         ym_row = QWidget()
         ym_h = QHBoxLayout(ym_row); ym_h.setContentsMargins(0,0,0,0)
-        ym_h.addWidget(self._year);  ym_h.addWidget(QLabel("년"))
+        ym_h.addWidget(self._year); ym_h.addWidget(QLabel("년"))
         ym_h.addWidget(self._month); ym_h.addWidget(QLabel("월"))
         ym_h.addStretch(1)
-        f3.addRow("Maker",         self._us_maker)
-        f3.addRow("Process",       self._us_process)
-        f3.addRow("설비호기",      self._us_tool)
-        f3.addRow("환율",          self._exchange)
-        f3.addRow("기준일(년/월)", ym_row)
-        f3.addRow("Site",          self._site)
-        self.tabs.addTab(tab_us, "미국")
-
+        form.addRow("Maker",         self._maker)
+        form.addRow("Process",       self._process)
+        form.addRow("설비호기",      self._tool)
+        form.addRow("환율",          self._exchange)
+        form.addRow("기준일(년/월)", ym_row)
+        form.addRow("Site",          self._site)
+        root.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         root.addWidget(bb)
-        self.tabs.setCurrentIndex({"credit": 0, "cn": 1, "us": 2}.get(focus, 0))
 
     def apply(self) -> None:
-        self.state.pump_credit = to_float(self._pump.text())
-        self.state.rack_credit = to_float(self._rack.text())
-        self.state.cn_info = {
-            "maker": self._cn_maker.text().strip(), "process": self._cn_process.text().strip(),
-            "tool":  self._cn_tool.text().strip(),  "line":    self._cn_line.text().strip(),
-        }
         self.state.us_info = {
-            "maker": self._us_maker.text().strip(), "process": self._us_process.text().strip(),
-            "tool":  self._us_tool.text().strip(),  "exchange": float(self._exchange.value()),
+            "maker": self._maker.text().strip(), "process": self._process.text().strip(),
+            "tool":  self._tool.text().strip(),  "exchange": float(self._exchange.value()),
             "base_ym": (int(self._year.value()), int(self._month.value())),
             "site": self._site.currentText(),
         }
@@ -551,18 +549,19 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # ── 의뢰파일 패널 ─────────────────────────
     def _build_req_panel(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2)
-        frame.setMinimumHeight(420); frame.setFixedWidth(330)
+        frame.setMinimumHeight(420); frame.setFixedWidth(400)
         v = QVBoxLayout(frame); v.setContentsMargins(12,12,12,12); v.setSpacing(8)
         v.addWidget(bold_label("의뢰파일DATA", size=12))
         top = QHBoxLayout()
         self.chk_req_all = QCheckBox("전체선택"); self.chk_req_all.clicked.connect(self._on_req_select_all)
         top.addWidget(self.chk_req_all); top.addStretch(1); v.addLayout(top)
-        self.req_table = _make_plain_table(3, ["선택", "설비호기(Z)", "투자정보"])
+        self.req_table = _make_plain_table(4, ["선택", "설비호기(Z)", "투자정보", "수량"])
         self.req_table.setColumnWidth(0, 42)
         _rh = self.req_table.horizontalHeader()
         _rh.setSectionResizeMode(0, QHeaderView.Fixed)
         _rh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         _rh.setSectionResizeMode(2, QHeaderView.Stretch)
+        _rh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
         self._style_req_table()
         v.addWidget(self.req_table, 1)
@@ -765,11 +764,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             host = centered_checkbox(lambda _s, _r=i: self._on_req_check())
             self.req_table.setCellWidget(i, 0, host)
             invest_info = parse_invest_info(rd.get("G"))
-            for col, val in [(1, s(rd.get("Z"))), (2, invest_info)]:
+            h_val = rd.get("H")
+            qty_str = fmt_qty(to_float(h_val)) if h_val is not None else ""
+            for col, val in [(1, s(rd.get("Z"))), (2, invest_info), (3, qty_str)]:
                 it = QTableWidgetItem(val); it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.req_table.setItem(i, col, it)
         self.req_table.setColumnWidth(0, 42)
         self.req_table.resizeColumnToContents(1)
+        self.req_table.resizeColumnToContents(3)
         self._style_req_table(); self._update_quote_info()
 
     def _is_req_checked(self, row: int) -> bool:
@@ -967,7 +969,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if selected in ("중국", "미국"): self._open_options(focus={"중국": "cn", "미국": "us"}[selected])
 
     def _open_options(self, focus: str = "credit") -> None:
-        dlg = OptionsDialog(self, self.state, focus=focus)
+        if focus == "cn":
+            dlg = ChinaOptionsDialog(self, self.state)
+        elif focus == "us":
+            dlg = USOptionsDialog(self, self.state)
+        else:
+            return
         if dlg.exec() == QDialog.Accepted:
             dlg.apply(); self._refresh_credits(); self._recalc_totals()
             self._sync_step4_highlight(scroll_top=False); self._log("[옵션] 입력값 반영")
@@ -982,28 +989,63 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self._log(f"투자자: {self.state.investor_name}")
 
     def _open_credit_dialog(self) -> None:
-        dlg = QDialog(self); dlg.setWindowTitle("Credit 입력"); dlg.setFixedWidth(420)
-        v = QVBoxLayout(dlg)
-        form = QFormLayout()
+        dlg = QDialog(self); dlg.setWindowTitle("Credit 입력"); dlg.setFixedWidth(460)
+        v = QVBoxLayout(dlg); v.setSpacing(8)
+
+        # ── Credit 직접 입력 ──
+        v.addWidget(bold_label("Credit 직접 입력", size=10))
+        form1 = QFormLayout()
         ed_pump = QLineEdit("" if not self.state.pump_credit else fmt_krw(self.state.pump_credit))
         ed_rack = QLineEdit("" if not self.state.rack_credit else fmt_krw(self.state.rack_credit))
         for ed in (ed_pump, ed_rack): ed.setPlaceholderText("미입력 시 0(무시)")
-        form.addRow("Pump Credit(원)", ed_pump); form.addRow("Rack Credit(원)", ed_rack)
-        v.addLayout(form)
-        lbl_before = QLabel(); lbl_after = QLabel(); lbl_after.setStyleSheet("font-weight:bold;")
-        v.addWidget(lbl_before); v.addWidget(lbl_after)
+        form1.addRow("Pump Credit(원)", ed_pump); form1.addRow("Rack Credit(원)", ed_rack)
+        v.addLayout(form1)
+
+        # ── 목표가 설정 ──
+        sep1 = QFrame(); sep1.setFrameShape(QFrame.HLine); sep1.setFrameShadow(QFrame.Sunken); v.addWidget(sep1)
+        v.addWidget(bold_label("목표가 설정 (입력 시 Pump Credit 자동조정)", size=10))
+        form2 = QFormLayout()
+        ed_target = QLineEdit(); ed_target.setPlaceholderText("목표 총금액(원) 입력")
+        form2.addRow("목표가(원)", ed_target)
+        v.addLayout(form2)
+
+        # ── 자동계산 결과 ──
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine); sep2.setFrameShadow(QFrame.Sunken); v.addWidget(sep2)
+        lbl_base   = QLabel(); lbl_result = QLabel(); lbl_result.setStyleSheet("font-weight:bold;")
+        lbl_ch     = QLabel()
+        v.addWidget(lbl_base); v.addWidget(lbl_result); v.addWidget(lbl_ch)
+
+        h_val = to_float(self._pick_rd().get("H")) if self.state.request_rows else 0.0
 
         def _refresh() -> None:
-            base   = sum(self._get_float(r,5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
+            base   = sum(self._get_float(r, 5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
             credit = to_float(ed_pump.text()) + to_float(ed_rack.text())
-            lbl_before.setText(f"현재 총금액: {fmt_krw(base)} 원")
-            lbl_after.setText(f"Credit 반영: {fmt_krw(base-credit)} 원  (감액: {fmt_krw(credit)} 원)")
+            after  = base - credit
+            lbl_base.setText(f"현재 총금액: {fmt_krw(base)} 원")
+            lbl_result.setText(f"Credit 반영: {fmt_krw(after)} 원  (감액: {fmt_krw(credit)} 원)")
+            if h_val > 0:
+                lbl_ch.setText(f"CH당 단가: {fmt_krw(after / h_val)} 원/CH  (H열: {fmt_qty(h_val)} CH)")
+            else:
+                lbl_ch.setText("CH당 단가: H열 값 없음")
 
-        ed_pump.textChanged.connect(_refresh); ed_rack.textChanged.connect(_refresh)
+        def _on_target_changed() -> None:
+            target = to_float(ed_target.text())
+            if target <= 0:
+                _refresh(); return
+            base   = sum(self._get_float(r, 5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
+            needed = max(0.0, base - to_float(ed_rack.text()) - target)
+            ed_pump.blockSignals(True); ed_pump.setText(fmt_krw(needed)); ed_pump.blockSignals(False)
+            _refresh()
+
+        ed_pump.textChanged.connect(_refresh)
+        ed_rack.textChanged.connect(_refresh)
+        ed_target.textChanged.connect(_on_target_changed)
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); v.addWidget(bb)
 
         def _ok() -> None:
-            self.state.pump_credit = to_float(ed_pump.text()); self.state.rack_credit = to_float(ed_rack.text())
+            self.state.pump_credit = to_float(ed_pump.text())
+            self.state.rack_credit = to_float(ed_rack.text())
             self._refresh_credits(); self._recalc_totals(); dlg.accept()
 
         bb.accepted.connect(_ok); bb.rejected.connect(dlg.reject); _refresh(); dlg.exec()
@@ -1136,6 +1178,7 @@ class ESignPage(QWidget):
         self._shown_key     : Optional[Tuple[int,int]] = None
         self._loader_thread : Optional[_ExcelLoaderThread] = None
         self._load_progress : Optional[QProgressDialog]   = None
+        self._tmp_dir       : Optional[str]               = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1217,7 +1260,9 @@ class ESignPage(QWidget):
             self.file_list.addItem(it)
         self.file_list.blockSignals(False)
 
+        self._cleanup_tmp()
         tmp = ensure_dir(os.path.join(base, "_esign_tmp_pdf"))
+        self._tmp_dir = tmp
 
         self._load_progress = QProgressDialog("변환 준비 중...", "취소", 0, len(paths), self)
         self._load_progress.setWindowTitle("엑셀 → PDF 변환")
@@ -1327,6 +1372,18 @@ class ESignPage(QWidget):
         self._sign_items.setdefault((self._cur_file, self._cur_page), []).append(item)
         self.scene.update()
 
+    def _cleanup_tmp(self) -> None:
+        if self._pdf_doc:
+            try: self._pdf_doc.close()
+            except Exception: pass
+            self._pdf_doc = None
+        if self._tmp_dir and os.path.isdir(self._tmp_dir):
+            try:
+                shutil.rmtree(self._tmp_dir)
+            except Exception as e:
+                logger.warning("tmp 폴더 삭제 실패: %s", e)
+            self._tmp_dir = None
+
     def _save_pdf(self) -> None:
         if not self._pdf_doc or not self._files:
             QMessageBox.information(self, "안내", "먼저 엑셀을 LOAD 하세요."); return
@@ -1334,6 +1391,7 @@ class ESignPage(QWidget):
         out = unique_path(os.path.join(self._base_folder, f"{folder_name}.pdf"))
         try:
             self._build_pdf(out)
+            self._cleanup_tmp()
             QMessageBox.information(self, "완료", f"저장 완료:\n{out}"); self.lbl_status.setText("PDF 저장 완료")
         except Exception as e:
             logger.error("PDF 저장 실패", exc_info=True)

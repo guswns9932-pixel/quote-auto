@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
@@ -490,14 +490,17 @@ def generate_quote_multi(
     state           : QuoteState,
     items           : List[Dict[str, Any]],
     request_rows    : List[Dict[str, Any]],
+    progress_cb     : Optional[Callable[[int, int, str], None]] = None,
 ) -> List[Tuple[Dict[str, Any], str]]:
     """
     국내 견적서 여러 건을 COM 인스턴스 1개로 순서대로 생성.
     반환: [(rd, saved_path), ...]  (실패하면 path="")
+    progress_cb(done, total, basename)
     """
     results: List[Tuple[Dict[str, Any], str]] = []
+    total = len(request_rows)
     with ExcelCOM() as xl:
-        for rd in request_rows:
+        for i, rd in enumerate(request_rows):
             wb = None
             try:
                 wb = xl.open(state.template_path)
@@ -508,9 +511,13 @@ def generate_quote_multi(
                 wb.SaveAs(path)
                 results.append((rd, path))
                 logger.info("멀티 생성: %s", path)
+                if progress_cb:
+                    progress_cb(i + 1, total, os.path.basename(path))
             except Exception as e:
                 logger.error("멀티 생성 실패: %s", e, exc_info=True)
                 results.append((rd, ""))
+                if progress_cb:
+                    progress_cb(i + 1, total, f"[실패] {e}")
             finally:
                 if wb is not None:
                     try:
@@ -525,6 +532,7 @@ def generate_cover(
     folder          : str,
     source_files    : List[str],
     investor_name   : str = "채승철",
+    progress_cb     : Optional[Callable[[int, int, str], None]] = None,
 ) -> str:
     """
     갑지 생성.
@@ -559,9 +567,12 @@ def generate_cover(
                 pass
 
             write_row = 2
-            for path in clean:
+            total_src = len(clean)
+            for idx, path in enumerate(clean):
                 src = None
                 try:
+                    if progress_cb:
+                        progress_cb(idx + 1, total_src, os.path.basename(path))
                     src = xl.open(path, read_only=True)
                     vals = src.Worksheets(SheetName.REQ_COPY).Range("A2:AA2").Value
                     ws_data.Range(f"A{write_row}:AA{write_row}").Value = vals

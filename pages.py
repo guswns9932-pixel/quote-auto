@@ -82,6 +82,56 @@ class _TemplateLoaderThread(QThread):
             self.done.emit(e)
 
 
+class _GenQuoteThread(QThread):
+    """견적서 생성을 백그라운드에서 실행."""
+    progress = Signal(str)          # 로그 메시지
+    done     = Signal(object)       # List[(rd, path)] 또는 Exception
+
+    def __init__(self, state, qtype: str, items, rds: list, parent=None) -> None:
+        super().__init__(parent)
+        self.state = state; self.qtype = qtype
+        self.items = items; self.rds   = rds
+
+    def run(self) -> None:
+        try:
+            if self.qtype == "국내" and len(self.rds) >= 2:
+                def _cb(done, total, name):
+                    self.progress.emit(f"[{done}/{total}] 저장: {name}")
+                results = excel_io.generate_quote_multi(
+                    self.state, self.items, self.rds, progress_cb=_cb)
+            else:
+                rd   = self.rds[0] if self.rds else {}
+                path = excel_io.generate_quote(self.state, self.qtype, self.items, rd)
+                self.progress.emit(f"저장: {os.path.basename(path)}")
+                results = [(rd, path)]
+            self.done.emit(results)
+        except Exception as e:
+            self.done.emit(e)
+
+
+class _GenCoverThread(QThread):
+    """갑지 생성을 백그라운드에서 실행."""
+    progress = Signal(str)   # 로그 메시지
+    done     = Signal(object)  # 저장 경로(str) 또는 Exception
+
+    def __init__(self, template_path: str, folder: str, paths: list,
+                 investor_name: str, parent=None) -> None:
+        super().__init__(parent)
+        self.template_path = template_path; self.folder = folder
+        self.paths = paths; self.investor_name = investor_name
+
+    def run(self) -> None:
+        try:
+            def _cb(done, total, name):
+                self.progress.emit(f"[{done}/{total}] 읽는 중: {name}")
+            out = excel_io.generate_cover(
+                self.template_path, self.folder, self.paths,
+                investor_name=self.investor_name, progress_cb=_cb)
+            self.done.emit(out)
+        except Exception as e:
+            self.done.emit(e)
+
+
 class _ExcelLoaderThread(QThread):
     """전자서명 페이지용: Excel 파일을 백그라운드에서 PDF로 변환."""
     progress = Signal(int, int, str)   # (완료수, 전체수, 현재파일명)
@@ -413,10 +463,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._filtered_items  : List[Tuple[str, float]] = []
         self._spec_order      : Dict[str, int]          = {}
 
-        self._filter_timer : QTimer                          = QTimer(self)
+        self._filter_timer  : QTimer                          = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.timeout.connect(self._do_filter)
-        self._tpl_thread   : Optional[_TemplateLoaderThread] = None
+        self._tpl_thread    : Optional[_TemplateLoaderThread] = None
+        self._gen_qt_thread : Optional[_GenQuoteThread]       = None
+        self._gen_cv_thread : Optional[_GenCoverThread]       = None
 
         self._build_ui()
         self._ensure_total()
@@ -507,7 +559,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         top.addWidget(self.chk_req_all); top.addStretch(1); v.addLayout(top)
         self.req_table = _make_plain_table(3, ["선택", "설비호기(Z)", "투자정보"])
         self.req_table.setColumnWidth(0, 42)
-        self.req_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        _rh = self.req_table.horizontalHeader()
+        _rh.setSectionResizeMode(0, QHeaderView.Fixed)
+        _rh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        _rh.setSectionResizeMode(2, QHeaderView.Stretch)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
         self._style_req_table()
         v.addWidget(self.req_table, 1)
@@ -573,8 +628,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _build_generate_panel(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(110)
         h = QHBoxLayout(frame); h.setContentsMargins(6,6,6,6); h.setSpacing(6)
-        for label, slot in [("견적서 생성", self._generate_quote), ("갑지 생성", self._generate_cover)]:
-            btn = QPushButton(label); btn.setMinimumHeight(90)
+        self.btn_gen_quote = QPushButton("견적서 생성"); self.btn_gen_quote.setMinimumHeight(90)
+        self.btn_gen_cover = QPushButton("갑지 생성");   self.btn_gen_cover.setMinimumHeight(90)
+        for btn, slot in [(self.btn_gen_quote, self._generate_quote), (self.btn_gen_cover, self._generate_cover)]:
             f = btn.font(); f.setPointSize(12); f.setBold(True); btn.setFont(f)
             btn.clicked.connect(slot); h.addWidget(btn, 1)
         return frame
@@ -712,7 +768,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             for col, val in [(1, s(rd.get("Z"))), (2, invest_info)]:
                 it = QTableWidgetItem(val); it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.req_table.setItem(i, col, it)
-        self.req_table.resizeColumnsToContents(); self.req_table.setColumnWidth(0, 42)
+        self.req_table.setColumnWidth(0, 42)
+        self.req_table.resizeColumnToContents(1)
         self._style_req_table(); self._update_quote_info()
 
     def _is_req_checked(self, row: int) -> bool:
@@ -899,11 +956,15 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _on_qt_checked(self, selected: str, checked: bool) -> None:
         chk_map = {"국내": self.chk_qt_kr, "중국": self.chk_qt_cn, "미국": self.chk_qt_us}
         if not checked:
-            chk = chk_map[selected]; chk.blockSignals(True); chk.setChecked(True); chk.blockSignals(False); return
+            # 이미 선택된 항목 재클릭 → 체크 복원 후 옵션창
+            chk = chk_map[selected]; chk.blockSignals(True); chk.setChecked(True); chk.blockSignals(False)
+            if selected in ("중국", "미국"):
+                self._open_options(focus={"중국": "cn", "미국": "us"}[selected])
+            return
         for name, chk in chk_map.items():
             chk.blockSignals(True); chk.setChecked(name == selected); chk.blockSignals(False)
         self.state.quote_type = selected; self._log(f"견적서 타입 = {selected}")
-        if selected in ("중국","미국"): self._open_options(focus={"중국":"cn","미국":"us"}[selected])
+        if selected in ("중국", "미국"): self._open_options(focus={"중국": "cn", "미국": "us"}[selected])
 
     def _open_options(self, focus: str = "credit") -> None:
         dlg = OptionsDialog(self, self.state, focus=focus)
@@ -951,53 +1012,78 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # STEP6 – 생성
     # ══════════════════════════════════════════
 
+    def _set_gen_buttons(self, enabled: bool) -> None:
+        self.btn_gen_quote.setEnabled(enabled)
+        self.btn_gen_cover.setEnabled(enabled)
+
     def _generate_quote(self) -> None:
         if not self.state.template_path:
             QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
         if not excel_io.COM_AVAILABLE:
             QMessageBox.critical(self, "오류", "Excel COM(win32)이 없습니다."); return
+        if self._gen_qt_thread and self._gen_qt_thread.isRunning():
+            QMessageBox.warning(self, "진행 중", "이미 생성 작업이 진행 중입니다."); return
         self._refresh_credits(); self._recalc_totals()
         items = self._snapshot_items(); qtype = self.state.quote_type or "국내"
         if qtype == "중국" and not self.state.cn_info.get("tool"): self._open_options("cn")
-        if qtype == "미국"  and not self.state.us_info.get("tool"):  self._open_options("us")
-        try:
-            checked = self._checked_req_rows()
-            if qtype == "국내" and self.state.request_rows and len(checked) >= 2:
-                rds = [self.state.request_rows[i] for i in checked if i < len(self.state.request_rows)]
-                results = excel_io.generate_quote_multi(self.state, items, rds)
-                for rd, path in results:
-                    if path:
-                        self._add_done(path); self._log(f"저장: {path}")
-                        self.state.last_output_dir = os.path.dirname(path)
-                QMessageBox.information(self, "완료", f"국내 견적서 {len(results)}건 생성 완료"); return
-            rd   = self._pick_rd()
-            path = excel_io.generate_quote(self.state, qtype, items, rd)
-            self._add_done(path); self._log(f"저장: {path}")
-            self.state.last_output_dir = os.path.dirname(path)
-            QMessageBox.information(self, "완료", f"견적서 생성 완료\n{os.path.basename(path)}")
-        except Exception as e:
-            logger.error("견적서 생성 실패", exc_info=True)
-            QMessageBox.critical(self, "생성 오류", f"{e}\n\n{traceback.format_exc()}")
+        if qtype == "미국"  and not self.state.us_info.get("tool"): self._open_options("us")
+        checked = self._checked_req_rows()
+        if qtype == "국내" and self.state.request_rows and len(checked) >= 2:
+            rds = [self.state.request_rows[i] for i in checked if i < len(self.state.request_rows)]
+        else:
+            rds = [self._pick_rd()]
+        self._log(f"견적서 생성 시작 ({qtype}, {len(rds)}건) …")
+        self._set_gen_buttons(False)
+        self._gen_qt_thread = _GenQuoteThread(self.state, qtype, items, rds, self)
+        self._gen_qt_thread.progress.connect(self._log)
+        self._gen_qt_thread.done.connect(self._on_gen_quote_done)
+        self._gen_qt_thread.start()
+
+    def _on_gen_quote_done(self, result) -> None:
+        self._set_gen_buttons(True)
+        if isinstance(result, Exception):
+            logger.error("견적서 생성 실패", exc_info=result)
+            QMessageBox.critical(self, "생성 오류", f"{result}\n\n{traceback.format_exc()}")
+            return
+        for _rd, path in result:
+            if path:
+                self._add_done(path)
+                self.state.last_output_dir = os.path.dirname(path)
+        ok = sum(1 for _, p in result if p)
+        self._log(f"견적서 생성 완료: {ok}/{len(result)}건")
+        QMessageBox.information(self, "완료", f"견적서 {ok}건 생성 완료")
 
     def _generate_cover(self) -> None:
         if not self.state.template_path:
             QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
         if not excel_io.COM_AVAILABLE:
             QMessageBox.critical(self, "오류", "Excel COM(win32)이 없습니다."); return
-        start  = self.state.last_output_dir or exe_dir()
+        if self._gen_cv_thread and self._gen_cv_thread.isRunning():
+            QMessageBox.warning(self, "진행 중", "이미 갑지 생성 작업이 진행 중입니다."); return
+        start = self.state.last_output_dir or exe_dir()
         paths, _ = QFileDialog.getOpenFileNames(self, "갑지 생성 대상 엑셀파일 (다중)", start, "Excel Files (*.xlsx)")
         if not paths: return
         folder = os.path.commonpath(paths)
         if os.path.isfile(folder): folder = os.path.dirname(folder)
-        try:
-            out = excel_io.generate_cover(
-                self.state.template_path, folder, paths,
-                investor_name=self.state.investor_name,
-            )
-            QMessageBox.information(self, "완료", f"갑지 생성 완료\n{out}")
-        except Exception as e:
-            logger.error("갑지 생성 실패", exc_info=True)
-            QMessageBox.critical(self, "오류", f"{e}\n\n{traceback.format_exc()}")
+        self._log(f"갑지 생성 시작 ({len(paths)}건) …")
+        self._set_gen_buttons(False)
+        self._gen_cv_thread = _GenCoverThread(
+            self.state.template_path, folder, paths, self.state.investor_name, self)
+        self._gen_cv_thread.progress.connect(self._log)
+        self._gen_cv_thread.done.connect(self._on_gen_cover_done)
+        self._gen_cv_thread.start()
+
+    def _on_gen_cover_done(self, result) -> None:
+        self._set_gen_buttons(True)
+        if isinstance(result, Exception):
+            logger.error("갑지 생성 실패", exc_info=result)
+            QMessageBox.critical(self, "오류", f"{result}\n\n{traceback.format_exc()}")
+            return
+        out = result
+        self.state.last_output_dir = os.path.dirname(out)
+        self._add_done_cover(out)
+        self._log(f"갑지 생성 완료: {out}")
+        QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
 
     def _pick_rd(self) -> Dict[str, Any]:
         checked = self._checked_req_rows()
@@ -1007,6 +1093,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _add_done(self, path: str) -> None:
         it = QListWidgetItem(os.path.basename(path)); it.setData(Qt.UserRole, path); self.list_done.addItem(it)
+
+    def _add_done_cover(self, path: str) -> None:
+        it = QListWidgetItem(os.path.basename(path))
+        it.setData(Qt.UserRole, path)
+        it.setBackground(QBrush(QColor(255, 180, 180)))
+        self.list_done.addItem(it)
+        self.list_done.scrollToItem(it)
 
     def _open_done(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)

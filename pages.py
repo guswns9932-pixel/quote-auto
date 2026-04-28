@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice, QThread, Signal
+from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
@@ -66,6 +66,22 @@ VENDOR_CHOICES  = [
 # ──────────────────────────────────────────────
 # 백그라운드 Excel → PDF 변환 스레드
 # ──────────────────────────────────────────────
+class _TemplateLoaderThread(QThread):
+    """STEP1용: 통합양식 Excel을 백그라운드에서 파싱."""
+    done    = Signal(object)   # (rows, by_class, price_by_spec, order, cmap) 또는 Exception
+    def __init__(self, path: str, parent=None) -> None:
+        super().__init__(parent)
+        self.path = path
+    def run(self) -> None:
+        try:
+            wb = load_workbook(self.path, data_only=False)
+            rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(wb[SheetName.ITEMS])
+            cmap = excel_io.parse_code_map_sheet(wb[SheetName.CODE_MAP])
+            self.done.emit((rows, by_class, price_by_spec, order, cmap))
+        except Exception as e:
+            self.done.emit(e)
+
+
 class _ExcelLoaderThread(QThread):
     """전자서명 페이지용: Excel 파일을 백그라운드에서 PDF로 변환."""
     progress = Signal(int, int, str)   # (완료수, 전체수, 현재파일명)
@@ -397,6 +413,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._filtered_items  : List[Tuple[str, float]] = []
         self._spec_order      : Dict[str, int]          = {}
 
+        self._filter_timer : QTimer                          = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self._do_filter)
+        self._tpl_thread   : Optional[_TemplateLoaderThread] = None
+
         self._build_ui()
         self._ensure_total()
         self._log("준비: STEP1 → STEP2 → STEP4/드래그 → STEP5 → 생성")
@@ -618,24 +639,43 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _load_template(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "통합양식 선택", "", "Excel Files (*.xlsx)")
-        if not path: return
+        if not path:
+            return
+        # 시트명 사전 검증 (빠름 — 메타만 읽음)
         try:
-            wb = load_workbook(path, data_only=False)
+            wb_meta = load_workbook(path, read_only=True, data_only=False)
+            missing = [n for n in SheetName.REQUIRED if n not in wb_meta.sheetnames]
+            wb_meta.close()
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"파일을 열 수 없습니다.\n{e}"); return
-        missing = [n for n in SheetName.REQUIRED if n not in wb.sheetnames]
+            QMessageBox.critical(self, "오류", f"파일을 열 수 없습니다.\n{e}")
+            return
         if missing:
-            QMessageBox.warning(self, "통합양식 오류", "필수 시트 없음:\n" + "\n".join(missing)); return
-        try:
-            rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(wb[SheetName.ITEMS])
-            cmap = excel_io.parse_code_map_sheet(wb[SheetName.CODE_MAP])
-        except Exception as e:
-            logger.error("통합양식 파싱 오류", exc_info=True)
-            QMessageBox.critical(self, "파싱 오류", str(e)); return
-        self.state.template_path = path; self.state.items_rows = rows
-        self.state.items_by_class = by_class; self.state.price_by_spec = price_by_spec
-        self.state.code_map = cmap; self._spec_order = order
-        self._apply_filter(); self.btn_step2.setEnabled(True); self._step3_frame.setEnabled(True)
+            QMessageBox.warning(self, "통합양식 오류", "필수 시트 없음:\n" + "\n".join(missing))
+            return
+
+        self.btn_step1.setEnabled(False)
+        self.btn_step1.setText("STEP 1\n로딩 중…")
+        self._tpl_thread = _TemplateLoaderThread(path, self)
+        self._tpl_thread.done.connect(lambda result: self._on_template_loaded(path, result))
+        self._tpl_thread.start()
+
+    def _on_template_loaded(self, path: str, result) -> None:
+        self.btn_step1.setEnabled(True)
+        self.btn_step1.setText("STEP 1\n통합양식 LOAD")
+        if isinstance(result, Exception):
+            logger.error("통합양식 파싱 오류", exc_info=result)
+            QMessageBox.critical(self, "파싱 오류", str(result))
+            return
+        rows, by_class, price_by_spec, order, cmap = result
+        self.state.template_path = path
+        self.state.items_rows = rows
+        self.state.items_by_class = by_class
+        self.state.price_by_spec = price_by_spec
+        self.state.code_map = cmap
+        self._spec_order = order
+        self._apply_filter()
+        self.btn_step2.setEnabled(True)
+        self._step3_frame.setEnabled(True)
         self._log(f"STEP1 완료: {path}  (품목 {len(rows)}건, 코드매핑 키 {len(cmap)}개)")
         QMessageBox.information(self, "완료", "통합양식 LOAD 완료")
 
@@ -770,6 +810,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # ══════════════════════════════════════════
 
     def _apply_filter(self) -> None:
+        self._filter_timer.start(200)
+
+    def _do_filter(self) -> None:
         key = s(self.ed_filter.text()).lower()
         self._filtered_items = [
             (s(r.get("B")), float(r.get("C", 0)))

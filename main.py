@@ -7,7 +7,6 @@ main.py
 from __future__ import annotations
 
 import logging
-import os
 import sys
 
 from PySide6.QtWidgets import (
@@ -15,8 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from core import LogDB, ensure_dir, exe_dir, migrate_db
-from pages import ESignPage, LogPage, QuoteBuilderPage
+from pages import ESignPage, QuoteBuilderPage
 
 
 # ──────────────────────────────────────────────
@@ -49,7 +47,6 @@ class LeftNav(QWidget):
         buttons = [
             ("견적서작성", lambda: stack.setCurrentIndex(0)),
             ("전자서명",   lambda: stack.setCurrentIndex(1)),
-            ("견적LOG",    lambda: stack.setCurrentIndex(2)),
         ]
         for label, slot in buttons:
             btn = self._nav_btn(label, slot)
@@ -81,16 +78,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("견적/전자서명 통합 시스템")
 
-        # DB 초기화 (마이그레이션 포함)
-        log_dir = ensure_dir(os.path.join(exe_dir(), "quote_log"))
-        status, src = migrate_db(log_dir, exe_dir())
-        logger.info("DB migrate: status=%s src=%s", status, src)
-
-        self.db = LogDB(os.path.join(log_dir, "quote_log.db"))
-        logger.debug("DB tables: %s", self.db.table_names())
-        logger.debug("DB counts: logs=%d items=%d", self.db.count_logs(), self.db.count_items())
-
-        # 레이아웃
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
@@ -106,9 +93,8 @@ class MainWindow(QMainWindow):
 
     # ── 페이지 채우기 ────────────────────────────
     def _populate_stack(self) -> None:
-        self.stack.addWidget(QuoteBuilderPage(db=self.db))
+        self.stack.addWidget(QuoteBuilderPage())
         self.stack.addWidget(ESignPage())
-        self.stack.addWidget(LogPage(db=self.db))
 
     # ── 초기화 ───────────────────────────────────
     def reset(self) -> None:

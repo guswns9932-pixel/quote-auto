@@ -31,7 +31,7 @@ from openpyxl.utils import get_column_letter
 
 import excel_io
 from core import (
-    LogDB, LogEntry, QuoteState, SheetName,
+    QuoteState, SheetName,
     ensure_dir, exe_dir, fmt_krw, fmt_qty,
     normalize_token, parse_invest_info, s, safe_filename, to_float, unique_path,
 )
@@ -389,9 +389,8 @@ class Step5Manager:
 
 class QuoteBuilderPage(Step5Manager, QWidget):
 
-    def __init__(self, db: LogDB) -> None:
+    def __init__(self) -> None:
         QWidget.__init__(self)
-        self.db    = db
         self.state = QuoteState()
 
         self._step4_highlight : set                     = set()
@@ -479,8 +478,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # ── 의뢰파일 패널 ─────────────────────────
     def _build_req_panel(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2)
-        frame.setMinimumHeight(420); frame.setFixedWidth(230)
-        v = QVBoxLayout(frame); v.setContentsMargins(12,12,12,12); v.setSpacing(8); v.setAlignment(Qt.AlignTop)
+        frame.setMinimumHeight(420); frame.setFixedWidth(330)
+        v = QVBoxLayout(frame); v.setContentsMargins(12,12,12,12); v.setSpacing(8)
         v.addWidget(bold_label("의뢰파일DATA", size=12))
         top = QHBoxLayout()
         self.chk_req_all = QCheckBox("전체선택"); self.chk_req_all.clicked.connect(self._on_req_select_all)
@@ -490,7 +489,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.req_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
         self._style_req_table()
-        v.addWidget(self.req_table, 0, Qt.AlignTop); v.addStretch(1)
+        v.addWidget(self.req_table, 1)
         return frame
 
     # ── STEP4 패널 ────────────────────────────
@@ -560,7 +559,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         return frame
 
     def _build_step7(self) -> QFrame:
-        frame = labeled_frame("STEP 7\n완성된 견적서 List", min_h=260)
+        frame = labeled_frame("견적서LIST", min_h=260)
         self.list_done = QListWidget()
         self.list_done.itemDoubleClicked.connect(self._open_done)
         frame.layout().addWidget(self.list_done, 1); return frame
@@ -927,17 +926,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                     if path:
                         self._add_done(path); self._log(f"저장: {path}")
                         self.state.last_output_dir = os.path.dirname(path)
-                        self._save_log(qtype, rd, path, items, "국내 멀티")
                 QMessageBox.information(self, "완료", f"국내 견적서 {len(results)}건 생성 완료"); return
             rd   = self._pick_rd()
             path = excel_io.generate_quote(self.state, qtype, items, rd)
             self._add_done(path); self._log(f"저장: {path}")
             self.state.last_output_dir = os.path.dirname(path)
-            self._save_log(qtype, rd, path, items, "단건")
             QMessageBox.information(self, "완료", f"견적서 생성 완료\n{os.path.basename(path)}")
         except Exception as e:
             logger.error("견적서 생성 실패", exc_info=True)
-            self._save_error_log(qtype, f"{e}\n\n{traceback.format_exc()}")
             QMessageBox.critical(self, "생성 오류", f"{e}\n\n{traceback.format_exc()}")
 
     def _generate_cover(self) -> None:
@@ -955,35 +951,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 self.state.template_path, folder, paths,
                 investor_name=self.state.investor_name,
             )
-            self.db.insert_simple(LogEntry(
-                created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                action="COVER", quote_type="", template_path=s(self.state.template_path),
-                output_path=out, message=f"갑지 생성: {len(paths)}개"))
             QMessageBox.information(self, "완료", f"갑지 생성 완료\n{out}")
         except Exception as e:
             logger.error("갑지 생성 실패", exc_info=True)
-            self._save_error_log("", f"{e}\n\n{traceback.format_exc()}")
             QMessageBox.critical(self, "오류", f"{e}\n\n{traceback.format_exc()}")
-
-    def _save_log(self, qtype, rd, path, items, msg) -> None:
-        try:
-            self.db.insert(LogEntry(
-                created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                action="QUOTE", quote_type=qtype,
-                pr=s(rd.get("D")), itemno=s(rd.get("E")), lineproc=s(rd.get("K")),
-                investor=s(rd.get("J")), tool=s(rd.get("Z")),
-                template_path=s(self.state.template_path), request_path=s(self.state.request_path),
-                output_path=path, message=msg), items)
-        except Exception as e: logger.error("로그 저장 실패: %s", e)
-
-    def _save_error_log(self, qtype, msg) -> None:
-        try:
-            self.db.insert_simple(LogEntry(
-                created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                action="ERROR", quote_type=qtype,
-                template_path=s(self.state.template_path), request_path=s(self.state.request_path),
-                message=msg))
-        except Exception as e: logger.error("에러 로그 저장 실패: %s", e)
 
     def _pick_rd(self) -> Dict[str, Any]:
         checked = self._checked_req_rows()
@@ -1258,146 +1229,3 @@ class ESignPage(QWidget):
             finally: src.close()
         final.save(out); final.close()
 
-
-# ══════════════════════════════════════════════
-# 견적 LOG 페이지
-# ══════════════════════════════════════════════
-
-class LogPage(QWidget):
-
-    _COL_HEADERS = ["", "ID", "생성일", "견적타입", "PR", "항번", "설비호기", "파일"]
-
-    def __init__(self, db: LogDB) -> None:
-        super().__init__(); self.db = db; self._build_ui(); self.reload()
-
-    def _build_ui(self) -> None:
-        outer = QVBoxLayout(self); outer.setContentsMargins(14,14,14,14); outer.setSpacing(10)
-        bar = QHBoxLayout()
-        self.btn_all    = QPushButton("전체선택")
-        self.btn_none   = QPushButton("전체해제")
-        self.btn_reload = QPushButton("새로고침")
-        bar.addWidget(self.btn_all); bar.addWidget(self.btn_none); bar.addWidget(self.btn_reload); bar.addSpacing(12)
-        self.ed_pr    = QLineEdit(); self.ed_pr.setPlaceholderText("PR 검색");  self.ed_pr.setFixedWidth(140)
-        self.ed_tool  = QLineEdit(); self.ed_tool.setPlaceholderText("설비호기"); self.ed_tool.setFixedWidth(160)
-        self.ed_item  = QLineEdit(); self.ed_item.setPlaceholderText("품목(규격)")
-        self.cb_qtype = QComboBox(); self.cb_qtype.addItems(["","국내","중국","미국"]); self.cb_qtype.setFixedWidth(90)
-        self.cb_cat   = QComboBox(); self.cb_cat.addItems([""]); self.cb_cat.setFixedWidth(110)
-        self.btn_export = QPushButton("합산 Export")
-        for lbl, w in [("PR",self.ed_pr),("설비호기",self.ed_tool),("품목",self.ed_item),("견적타입",self.cb_qtype),("분류(합산)",self.cb_cat)]:
-            bar.addWidget(QLabel(lbl)); bar.addWidget(w); bar.addSpacing(6)
-        bar.addWidget(self.btn_export); bar.addStretch(1); outer.addLayout(bar)
-        self.tbl_logs = _make_plain_table(8, self._COL_HEADERS)
-        h = self.tbl_logs.horizontalHeader()
-        for i in range(7): h.setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(7, QHeaderView.Stretch)
-        outer.addWidget(self.tbl_logs, 3)
-        outer.addWidget(bold_label("체크된 견적서 품목 합산 (금액 내림차순)", size=10))
-        self.tbl_items = _make_plain_table(5, ["분류","품목(규격)","총수량","단가(추정)","총금액"])
-        hi = self.tbl_items.horizontalHeader(); hi.setStretchLastSection(False); hi.setSectionResizeMode(QHeaderView.Fixed)
-        for col, w in enumerate([90,820,90,120,505]): self.tbl_items.setColumnWidth(col, w)
-        outer.addWidget(self.tbl_items, 2)
-        self.btn_all.clicked.connect(lambda: self._set_all(True))
-        self.btn_none.clicked.connect(lambda: self._set_all(False))
-        self.btn_reload.clicked.connect(self.reload); self.btn_export.clicked.connect(self._export)
-        for w in (self.ed_pr, self.ed_tool, self.ed_item): w.textChanged.connect(self.reload)
-        self.cb_qtype.currentIndexChanged.connect(self.reload)
-        self.cb_cat.currentIndexChanged.connect(self._refresh_items)
-        self.tbl_logs.cellDoubleClicked.connect(self._open_file)
-
-    def reload(self) -> None:
-        logs = sorted(
-            self.db.fetch_logs(pr_kw=self.ed_pr.text().strip(), tool_kw=self.ed_tool.text().strip(),
-                               item_kw=self.ed_item.text().strip(), quote_type=self.cb_qtype.currentText().strip()),
-            key=lambda x: (s(x.get("pr")), s(x.get("itemno")), s(x.get("created_at"))))
-        self.tbl_logs.blockSignals(True); self.tbl_logs.setRowCount(len(logs))
-        for r, lg in enumerate(logs):
-            log_id = int(lg["id"]); cb = QCheckBox(); cb.stateChanged.connect(self._refresh_items)
-            self.tbl_logs.setCellWidget(r, 0, cb)
-            it_id = QTableWidgetItem(str(log_id)); it_id.setData(Qt.UserRole, log_id)
-            self.tbl_logs.setItem(r, 1, it_id)
-            for col, key in [(2,"created_at"),(3,"quote_type"),(4,"pr"),(5,"itemno"),(6,"tool"),(7,"output_path")]:
-                self.tbl_logs.setItem(r, col, QTableWidgetItem(s(lg.get(key))))
-        self.tbl_logs.blockSignals(False); self._refresh_cat_combo(); self._refresh_items()
-
-    def _refresh_cat_combo(self) -> None:
-        all_ids = [self._log_id(r) for r in range(self.tbl_logs.rowCount())]
-        all_ids = [i for i in all_ids if i is not None]
-        cats = set(self.db.fetch_categories(all_ids)) if all_ids else set()
-        cur = self.cb_cat.currentText()
-        self.cb_cat.blockSignals(True); self.cb_cat.clear(); self.cb_cat.addItem("")
-        for c in sorted(cats): self.cb_cat.addItem(c)
-        if cur in cats: self.cb_cat.setCurrentText(cur)
-        self.cb_cat.blockSignals(False)
-
-    def _log_id(self, row: int) -> Optional[int]:
-        it = self.tbl_logs.item(row, 1)
-        if not it: return None
-        try: return int(it.data(Qt.UserRole) or it.text())
-        except Exception: return None
-
-    def _checked_ids(self) -> List[int]:
-        ids = []
-        for r in range(self.tbl_logs.rowCount()):
-            cb = self.tbl_logs.cellWidget(r, 0)
-            if isinstance(cb, QCheckBox) and cb.isChecked():
-                lid = self._log_id(r)
-                if lid is not None: ids.append(lid)
-        return ids
-
-    def _set_all(self, checked: bool) -> None:
-        self.tbl_logs.blockSignals(True)
-        for r in range(self.tbl_logs.rowCount()):
-            cb = self.tbl_logs.cellWidget(r, 0)
-            if isinstance(cb, QCheckBox): cb.blockSignals(True); cb.setChecked(checked); cb.blockSignals(False)
-        self.tbl_logs.blockSignals(False); self._refresh_items()
-
-    def _refresh_items(self) -> None:
-        ids = self._checked_ids()
-        if not ids: self.tbl_items.setRowCount(0); return
-        items = self.db.fetch_items(ids)
-        cat_f = self.cb_cat.currentText().strip()
-        if cat_f: items = [it for it in items if s(it.get("cat")) == cat_f]
-        agg: Dict[Tuple[str,str], Dict] = {}
-        for it in items:
-            cat = s(it.get("cat")); spec = s(it.get("spec"))
-            if not spec: continue
-            qty = to_float(it.get("qty")); price = to_float(it.get("price"))
-            amt = to_float(it.get("amt"), qty*price); key = (cat, spec)
-            a = agg.setdefault(key, {"qty":0.0,"amt":0.0,"pn":0.0,"pd":0.0})
-            a["qty"] += qty; a["amt"] += amt
-            if qty > 0: a["pn"] += price*qty; a["pd"] += qty
-        rows = [(cat, spec, a["qty"], a["pn"]/a["pd"] if a["pd"] else 0.0, a["amt"]) for (cat,spec),a in agg.items()]
-        rows.sort(key=lambda x: x[4], reverse=True)
-        self.tbl_items.setRowCount(len(rows))
-        for r, (cat,spec,qty,pe,amt) in enumerate(rows):
-            for col, val in [(0,cat),(1,spec),(2,fmt_qty(qty)),(3,fmt_krw(pe) if pe else ""),(4,fmt_krw(amt))]:
-                self.tbl_items.setItem(r, col, QTableWidgetItem(val))
-
-    def _export(self) -> None:
-        if self.tbl_items.rowCount() == 0: QMessageBox.information(self,"안내","체크된 로그가 없습니다."); return
-        default = f"품목합산_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        path, _ = QFileDialog.getSaveFileName(self, "저장", default, "Excel Files (*.xlsx)")
-        if not path: return
-        if not path.lower().endswith(".xlsx"): path += ".xlsx"
-        try:
-            wb = Workbook(); ws = wb.active; ws.title = "품목합산"
-            ws.append(["분류","품목(규격)","총수량","단가(추정)","총금액"])
-            for r in range(self.tbl_items.rowCount()):
-                ws.append([(self.tbl_items.item(r,c).text() if self.tbl_items.item(r,c) else "") for c in range(5)])
-            for col in range(1,6):
-                max_len = max((len(str(ws.cell(row=rr,column=col).value or "")) for rr in range(1,ws.max_row+1)), default=10)
-                ws.column_dimensions[get_column_letter(col)].width = min(max_len+2, 80)
-            wb.save(path); QMessageBox.information(self, "완료", f"저장 완료:\n{path}")
-        except Exception as e: logger.error("Export 실패", exc_info=True); QMessageBox.critical(self,"오류",str(e))
-
-    def _open_file(self, row: int, _col: int) -> None:
-        it = self.tbl_logs.item(row, 7)
-        if not it: return
-        path = it.text().strip()
-        if not path: return
-        try: os.startfile(path)
-        except Exception:
-            d = os.path.dirname(path)
-            if d and os.path.isdir(d):
-                try: os.startfile(d)
-                except Exception as e: logger.warning("파일 열기 실패: %s", e)

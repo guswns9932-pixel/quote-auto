@@ -19,8 +19,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from core import (
-    CN, DOM, US, SheetName,
-    QuoteState, LogEntry,
+    CN, DOM, US, SheetName, QuoteState,
     ensure_dir, safe_filename, s, to_float, unique_path,
     exe_dir, parse_invest_info,
 )
@@ -308,7 +307,7 @@ def _fill_domestic(xl: ExcelCOM, wb, state: QuoteState,
     _write_req_row(xl, wb, state, rd)
 
     investor = s(state.investor_name) or "채승철"
-    ws_spec.Range("B4").Value = f" {investor} 님 / 설비구매그룹"
+    ws_spec.Range("B4").Value = f"{investor} 님 / 설비구매그룹"
 
     rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
     credits    = [r for r in items if r["role"] == "CREDIT"]
@@ -578,7 +577,7 @@ def generate_cover(
 
             xl.recalc()
 
-            ws_cover.Range("B7").Value = f" 삼성전자 ㈜ / {investor_name} 님"
+            ws_cover.Range("B7").Value = f"삼성전자 ㈜ / {investor_name} 님"
 
             for r in range(20, 50):
                 try:

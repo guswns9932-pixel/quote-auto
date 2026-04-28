@@ -22,7 +22,7 @@ from core import (
     CN, DOM, US, SheetName,
     QuoteState, LogEntry,
     ensure_dir, safe_filename, s, to_float, unique_path,
-    exe_dir,
+    exe_dir, parse_invest_info,
 )
 
 logger = logging.getLogger("QuoteApp")
@@ -142,6 +142,7 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
             "D": ws.cell(r,  4).value,
             "E": ws.cell(r,  5).value,
             "F": ws.cell(r,  6).value,
+            "G": ws.cell(r,  7).value,
             "H": ws.cell(r,  8).value,
             "J": ws.cell(r, 10).value,
             "K": ws.cell(r, 11).value,
@@ -305,6 +306,9 @@ def _fill_domestic(xl: ExcelCOM, wb, state: QuoteState,
     ws_sign = wb.Worksheets(SheetName.SIGN_SPEC)
 
     _write_req_row(xl, wb, state, rd)
+
+    investor = s(state.investor_name) or "채승철"
+    ws_spec.Range("B4").Value = f" {investor} 님 / 설비구매그룹"
 
     rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
     credits    = [r for r in items if r["role"] == "CREDIT"]
@@ -521,6 +525,7 @@ def generate_cover(
     template_path   : str,
     folder          : str,
     source_files    : List[str],
+    investor_name   : str = "채승철",
 ) -> str:
     """
     갑지 생성.
@@ -572,6 +577,8 @@ def generate_cover(
                             pass
 
             xl.recalc()
+
+            ws_cover.Range("B7").Value = f" 삼성전자 ㈜ / {investor_name} 님"
 
             for r in range(20, 50):
                 try:

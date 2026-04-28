@@ -91,6 +91,23 @@ def normalize_token(t: str) -> str:
     return s(t).upper().replace(" ", "")
 
 
+def parse_invest_info(g_val: Any) -> str:
+    """G열 값에서 '투자형태_모델명' 형식을 추출한다.
+
+    예) 'DRY_PUMP;EQ,LOT,XD1200' → 'EQ_XD1200'
+    세미콜론이 있으면 뒤 부분만 사용, 쉼표로 분리해 첫·마지막 토큰을 '_'로 결합.
+    """
+    t = s(g_val).strip()
+    if not t:
+        return ""
+    if ";" in t:
+        t = t.split(";", 1)[1].strip()
+    parts = [p.strip() for p in t.split(",") if p.strip()]
+    if not parts:
+        return ""
+    return parts[0] if len(parts) == 1 else f"{parts[0]}_{parts[-1]}"
+
+
 # ──────────────────────────────────────────────
 # 시트 / 셀 상수
 # ──────────────────────────────────────────────
@@ -195,6 +212,7 @@ class QuoteState:
     us_info : Dict[str, Any]  = field(default_factory=dict)
 
     last_output_dir : Optional[str] = None
+    investor_name   : str            = "채승철"
 
 
 # ──────────────────────────────────────────────

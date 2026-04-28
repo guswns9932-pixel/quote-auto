@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice
+from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QSizePolicy, QSpinBox, QTabWidget,
+    QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -33,7 +33,7 @@ import excel_io
 from core import (
     LogDB, LogEntry, QuoteState, SheetName,
     ensure_dir, exe_dir, fmt_krw, fmt_qty,
-    normalize_token, s, safe_filename, to_float, unique_path,
+    normalize_token, parse_invest_info, s, safe_filename, to_float, unique_path,
 )
 from widgets import (
     DraggableItemsTable, DroppableQuoteTable, PdfView,
@@ -61,6 +61,37 @@ VENDOR_CHOICES  = [
     "", "AMAT", "ASM", "AXCELIS", "EUGENETECH", "WONIK_IPS",
     "KOKUSAI", "LAM", "SEMES", "TEL", "TES", "ULVAC", "GCS",
 ]
+
+
+# ──────────────────────────────────────────────
+# 백그라운드 Excel → PDF 변환 스레드
+# ──────────────────────────────────────────────
+class _ExcelLoaderThread(QThread):
+    """전자서명 페이지용: Excel 파일을 백그라운드에서 PDF로 변환."""
+    progress = Signal(int, int, str)   # (완료수, 전체수, 현재파일명)
+
+    def __init__(self, paths: List[str], tmp_dir: str, parent=None) -> None:
+        super().__init__(parent)
+        self.paths    = paths
+        self.tmp_dir  = tmp_dir
+        self.pdfs     : List[str] = []
+        self._cancel  = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        total = len(self.paths)
+        for i, xlsx in enumerate(self.paths):
+            if self._cancel:
+                break
+            self.progress.emit(i, total, os.path.basename(xlsx))
+            try:
+                self.pdfs.append(excel_io.excel_to_merged_pdf(xlsx, self.tmp_dir, i + 1))
+            except Exception as e:
+                logger.error("임시 PDF 실패 (%s): %s", xlsx, e, exc_info=True)
+                self.pdfs.append("")
+        self.progress.emit(len(self.pdfs), total, "완료")
 
 
 # ══════════════════════════════════════════════
@@ -454,7 +485,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         top = QHBoxLayout()
         self.chk_req_all = QCheckBox("전체선택"); self.chk_req_all.clicked.connect(self._on_req_select_all)
         top.addWidget(self.chk_req_all); top.addStretch(1); v.addLayout(top)
-        self.req_table = _make_plain_table(3, ["선택", "설비호기(Z)", "견적서작성여부"])
+        self.req_table = _make_plain_table(3, ["선택", "설비호기(Z)", "투자정보"])
         self.req_table.setColumnWidth(0, 42)
         self.req_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
@@ -553,11 +584,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         row = QHBoxLayout()
         self.btn_credit = QPushButton("Credit"); self.btn_credit.setMinimumHeight(32)
         self.btn_credit.clicked.connect(self._open_credit_dialog)
+        self.btn_investor = QPushButton("투자자 변경"); self.btn_investor.setMinimumHeight(32)
+        self.btn_investor.clicked.connect(self._change_investor)
         self.chk_qt_kr = QCheckBox("국내"); self.chk_qt_cn = QCheckBox("중국"); self.chk_qt_us = QCheckBox("미국")
         self.chk_qt_kr.setChecked(True)
         for chk, qt in [(self.chk_qt_kr,"국내"),(self.chk_qt_cn,"중국"),(self.chk_qt_us,"미국")]:
             chk.clicked.connect(lambda checked, t=qt: self._on_qt_checked(t, checked))
-        row.addWidget(self.btn_credit); row.addSpacing(10); row.addWidget(QLabel("견적서 타입"))
+        row.addWidget(self.btn_credit); row.addWidget(self.btn_investor); row.addSpacing(10)
+        row.addWidget(QLabel("견적서 타입"))
         row.addWidget(self.chk_qt_kr); row.addWidget(self.chk_qt_cn); row.addWidget(self.chk_qt_us)
         row.addStretch(1); frame.layout().addLayout(row); return frame
 
@@ -635,7 +669,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self.req_table.insertRow(i)
             host = centered_checkbox(lambda _s, _r=i: self._on_req_check())
             self.req_table.setCellWidget(i, 0, host)
-            for col, val in [(1, s(rd.get("Z"))), (2, "미작성")]:
+            invest_info = parse_invest_info(rd.get("G"))
+            for col, val in [(1, s(rd.get("Z"))), (2, invest_info)]:
                 it = QTableWidgetItem(val); it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.req_table.setItem(i, col, it)
         self.req_table.resizeColumnsToContents(); self.req_table.setColumnWidth(0, 42)
@@ -834,6 +869,15 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             dlg.apply(); self._refresh_credits(); self._recalc_totals()
             self._sync_step4_highlight(scroll_top=False); self._log("[옵션] 입력값 반영")
 
+    def _change_investor(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "투자자 변경", "투자자 이름:",
+            text=self.state.investor_name or "채승철",
+        )
+        if ok:
+            self.state.investor_name = name.strip() or "채승철"
+            self._log(f"투자자: {self.state.investor_name}")
+
     def _open_credit_dialog(self) -> None:
         dlg = QDialog(self); dlg.setWindowTitle("Credit 입력"); dlg.setFixedWidth(420)
         v = QVBoxLayout(dlg)
@@ -884,11 +928,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                         self._add_done(path); self._log(f"저장: {path}")
                         self.state.last_output_dir = os.path.dirname(path)
                         self._save_log(qtype, rd, path, items, "국내 멀티")
-                        try:
-                            idx = self.state.request_rows.index(rd)
-                            it  = self.req_table.item(idx, 2)
-                            if it: it.setText("작성완료")
-                        except (ValueError, AttributeError): pass
                 QMessageBox.information(self, "완료", f"국내 견적서 {len(results)}건 생성 완료"); return
             rd   = self._pick_rd()
             path = excel_io.generate_quote(self.state, qtype, items, rd)
@@ -912,7 +951,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         folder = os.path.commonpath(paths)
         if os.path.isfile(folder): folder = os.path.dirname(folder)
         try:
-            out = excel_io.generate_cover(self.state.template_path, folder, paths)
+            out = excel_io.generate_cover(
+                self.state.template_path, folder, paths,
+                investor_name=self.state.investor_name,
+            )
             self.db.insert_simple(LogEntry(
                 created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 action="COVER", quote_type="", template_path=s(self.state.template_path),
@@ -981,10 +1023,12 @@ class ESignPage(QWidget):
         self._cur_file    : int  = 0
         self._cur_page    : int  = 0
         self._pdf_doc            = None
-        self._sign_items  : Dict[Tuple[int,int], List[SignatureItem]] = {}
-        self._render_sz   : Dict[Tuple[int,int], Tuple[int,int]]     = {}
-        self._bg_item            = None
-        self._shown_key   : Optional[Tuple[int,int]] = None
+        self._sign_items    : Dict[Tuple[int,int], List[SignatureItem]] = {}
+        self._render_sz     : Dict[Tuple[int,int], Tuple[int,int]]     = {}
+        self._bg_item              = None
+        self._shown_key     : Optional[Tuple[int,int]] = None
+        self._loader_thread : Optional[_ExcelLoaderThread] = None
+        self._load_progress : Optional[QProgressDialog]   = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1040,23 +1084,68 @@ class ESignPage(QWidget):
         QMessageBox.information(self, "완료", "승인코드 LOAD 완료\n전자서명 ON")
 
     def _load_excels(self) -> None:
-        if not excel_io.COM_AVAILABLE: QMessageBox.critical(self,"오류","Excel COM이 없습니다."); return
+        if not excel_io.COM_AVAILABLE:
+            QMessageBox.critical(self, "오류", "Excel COM이 없습니다.")
+            return
+        if self._loader_thread and self._loader_thread.isRunning():
+            QMessageBox.information(self, "안내", "이미 로딩 중입니다.")
+            return
         paths, _ = QFileDialog.getOpenFileNames(self, "엑셀 선택(다중)", "", "Excel Files (*.xlsx)")
-        if not paths: return
-        paths = sorted(paths, key=lambda p:(0 if "갑지" in os.path.basename(p).lower() else 1, os.path.basename(p).lower()))
+        if not paths:
+            return
+        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, os.path.basename(p).lower()))
         base = os.path.commonpath(paths)
-        if os.path.isfile(base): base = os.path.dirname(base)
-        self._base_folder = base; self._files = paths; self._pdfs = []; self._sign_items.clear()
-        self.file_list.blockSignals(True); self.file_list.clear()
+        if os.path.isfile(base):
+            base = os.path.dirname(base)
+        self._base_folder = base
+        self._files = paths
+        self._pdfs = []
+        self._sign_items.clear()
+
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
         for p in paths:
-            it = QListWidgetItem(os.path.basename(p)); it.setData(Qt.UserRole, p); self.file_list.addItem(it)
+            it = QListWidgetItem(os.path.basename(p))
+            it.setData(Qt.UserRole, p)
+            self.file_list.addItem(it)
         self.file_list.blockSignals(False)
+
         tmp = ensure_dir(os.path.join(base, "_esign_tmp_pdf"))
-        for i, xlsx in enumerate(paths):
-            try: self._pdfs.append(excel_io.excel_to_merged_pdf(xlsx, tmp, i+1))
-            except Exception as e: logger.error("임시 PDF 실패 (%s): %s", xlsx, e, exc_info=True); self._pdfs.append("")
-        self.lbl_status.setText(f"{len(paths)}개 로드 완료")
-        if self.file_list.count() > 0: self.file_list.setCurrentRow(0)
+
+        self._load_progress = QProgressDialog("변환 준비 중...", "취소", 0, len(paths), self)
+        self._load_progress.setWindowTitle("엑셀 → PDF 변환")
+        self._load_progress.setWindowModality(Qt.WindowModal)
+        self._load_progress.setMinimumDuration(0)
+        self._load_progress.setValue(0)
+
+        self._loader_thread = _ExcelLoaderThread(paths, tmp, self)
+        self._loader_thread.progress.connect(self._on_load_progress)
+        self._loader_thread.finished.connect(self._on_load_finished)
+        self._load_progress.canceled.connect(self._loader_thread.cancel)
+
+        self.btn_excel.setEnabled(False)
+        self._loader_thread.start()
+
+    def _on_load_progress(self, done: int, total: int, fname: str) -> None:
+        if not self._load_progress:
+            return
+        self._load_progress.setValue(done)
+        if done < total:
+            self._load_progress.setLabelText(f"변환 중 ({done + 1}/{total}): {fname}")
+        else:
+            self._load_progress.setLabelText("변환 완료")
+
+    def _on_load_finished(self) -> None:
+        if self._load_progress:
+            self._load_progress.close()
+            self._load_progress = None
+        self._pdfs = self._loader_thread.pdfs
+        while len(self._pdfs) < len(self._files):
+            self._pdfs.append("")
+        self.btn_excel.setEnabled(True)
+        self.lbl_status.setText(f"{len(self._files)}개 로드 완료")
+        if self.file_list.count() > 0:
+            self.file_list.setCurrentRow(0)
 
     def _on_select_file(self, row: int) -> None:
         if row < 0 or row >= len(self._files): return

@@ -75,13 +75,13 @@ if "--run" in sys.argv:
 # GUI 런처 모드  (기본)
 # ════════════════════════════════════════════════
 
-from PySide6.QtCore import Qt, QSize, QThread, Signal
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPushButton, QSizePolicy,
-    QStyledItemDelegate, QStyleOptionViewItem,
+    QStyle, QStyledItemDelegate,
     QVBoxLayout, QWidget,
 )
 
@@ -157,7 +157,7 @@ class _AppDelegate(QStyledItemDelegate):
         painter.save()
 
         # 선택 배경
-        if option.state & 0x0020:   # State_Selected
+        if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, QColor("#BBDEFB"))
         elif index.row() % 2 == 1:
             painter.fillRect(option.rect, QColor("#F9F9F9"))

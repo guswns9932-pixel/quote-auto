@@ -17,7 +17,7 @@
 #           └── app_v1.0.1.pyz
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 BASE = Path(SPEC).parent  # launcher/ 폴더
 
@@ -25,6 +25,8 @@ BASE = Path(SPEC).parent  # launcher/ 폴더
 # hiddenimports=["openpyxl"] 만으로는 서브모듈이 누락될 수 있음
 openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
 fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
+openpyxl_submods = collect_submodules("openpyxl")
+openpyxl_meta = copy_metadata("openpyxl")
 
 a = Analysis(
     [str(BASE / "launcher.py")],
@@ -38,12 +40,14 @@ a = Analysis(
         (str(BASE / "App"), "App"),
         *openpyxl_d,
         *fitz_d,
+        *openpyxl_meta,
     ],
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
         *openpyxl_h,
+        *openpyxl_submods,
         *fitz_h,
         "pythoncom",
         "pywintypes",

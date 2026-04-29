@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QPointF
+from PySide6.QtCore import Qt, QTimer, QPointF, QMimeData
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QDrag, QKeySequence, QPixmap, QShortcut,
 )
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog,
     QDialogButtonBox, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QMessageBox, QMimeData, QPushButton, QScrollBar,
+    QMessageBox, QPushButton, QScrollBar,
     QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget, QFrame,
 )

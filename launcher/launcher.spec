@@ -14,31 +14,44 @@
 #   └── App/
 #       └── 견적자동화/
 #           ├── manifest.json
-#           └── app_v1.0.0.pyz
+#           └── app_v1.0.1.pyz
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
 
 BASE = Path(SPEC).parent  # launcher/ 폴더
+
+# collect_all: 서브모듈 + 데이터파일 + 바이너리 전체 수집
+# hiddenimports=["openpyxl"] 만으로는 서브모듈이 누락될 수 있음
+openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
+fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
 
 a = Analysis(
     [str(BASE / "launcher.py")],
     pathex=[str(BASE.parent)],
-    binaries=[],
+    binaries=[
+        *openpyxl_b,
+        *fitz_b,
+    ],
     datas=[
         # App 폴더 전체를 배포물에 포함
         (str(BASE / "App"), "App"),
+        *openpyxl_d,
+        *fitz_d,
     ],
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
-        "openpyxl",
-        "openpyxl.styles",
-        "openpyxl.utils",
-        "fitz",
+        *openpyxl_h,
+        *fitz_h,
         "pythoncom",
+        "pywintypes",
+        "win32api",
         "win32com",
         "win32com.client",
+        "win32com.server",
+        "win32con",
     ],
     hookspath=[],
     runtime_hooks=[],

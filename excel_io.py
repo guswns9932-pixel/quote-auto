@@ -344,7 +344,7 @@ def _fill_domestic(xl: ExcelCOM, wb, state: QuoteState,
     lineproc = safe_filename(s(rd.get("K")))
     investor = safe_filename(s(rd.get("J")))
     tool     = safe_filename(s(rd.get("Z")))
-    folder   = ensure_dir(os.path.join(exe_dir(), f"{ymd}_LOT베큠_{lineproc}_{investor}"))
+    folder   = ensure_dir(os.path.join(exe_dir(), "견적서", f"{ymd}_LOT베큠_{lineproc}_{investor}"))
     return os.path.join(folder, f"{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor}_{tool}.xlsx")
 
 
@@ -395,7 +395,7 @@ def _fill_china(xl: ExcelCOM, wb, state: QuoteState, items: List[Dict[str, Any]]
     ymd    = datetime.now().strftime("%y%m%d")
     line   = safe_filename(info.get("line", ""))
     tool   = safe_filename(info.get("tool", ""))
-    folder = ensure_dir(os.path.join(exe_dir(), f"{ymd}_중국_SCS_{line}"))
+    folder = ensure_dir(os.path.join(exe_dir(), "견적서", f"{ymd}_중국_SCS_{line}"))
     return os.path.join(folder, f"{ymd}_중국_SCS_{line}_{tool}.xlsx")
 
 
@@ -446,7 +446,7 @@ def _fill_us(xl: ExcelCOM, wb, state: QuoteState, items: List[Dict[str, Any]]) -
     ymd    = datetime.now().strftime("%y%m%d")
     site   = safe_filename(info.get("site", ""))
     tool   = safe_filename(info.get("tool", ""))
-    folder = ensure_dir(os.path.join(exe_dir(), f"{ymd}_미국_{site}"))
+    folder = ensure_dir(os.path.join(exe_dir(), "견적서", f"{ymd}_미국_{site}"))
     return os.path.join(folder, f"{ymd}_{site}_{tool}_Quotation.xlsx")
 
 

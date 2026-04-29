@@ -64,6 +64,19 @@ def bold_label(text: str, size: int = 12) -> QLabel:
     return lbl
 
 
+def tint_button(btn: QPushButton, bg: str) -> None:
+    """버튼에 파스텔 배경색 + hover 어둡게 + disabled 회색 적용."""
+    r = max(0, int(bg[1:3], 16) - 28)
+    g = max(0, int(bg[3:5], 16) - 28)
+    b = max(0, int(bg[5:7], 16) - 28)
+    hover = f"#{r:02X}{g:02X}{b:02X}"
+    btn.setStyleSheet(
+        f"QPushButton {{ background-color: {bg}; border: 1px solid #bbb; border-radius: 4px; padding: 2px 6px; }}"
+        f"QPushButton:hover {{ background-color: {hover}; }}"
+        f"QPushButton:disabled {{ background-color: #E0E0E0; color: #999; }}"
+    )
+
+
 def info_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setTextFormat(Qt.PlainText)

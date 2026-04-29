@@ -40,7 +40,7 @@ from widgets import (
     DraggableItemsTable, DroppableQuoteTable, PdfView,
     SignatureItem, bold_label, centered_checkbox,
     get_checkbox_from_cell, info_label, labeled_frame,
-    PasswordDialog,
+    PasswordDialog, tint_button,
 )
 
 logger = logging.getLogger("QuoteApp")
@@ -492,6 +492,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         # Row 0: 버튼 4개
         self.btn_step1 = self._action_btn("STEP 1\n통합양식 LOAD", self._load_template)
         self.btn_step2 = self._action_btn("STEP 2\n의뢰파일 LOAD", self._load_request)
+        tint_button(self.btn_step1, "#C8E6C9")   # 연초록
+        tint_button(self.btn_step2, "#BBDEFB")   # 연파랑
         self.btn_step2.setEnabled(False)
         self._step3_frame = self._build_step3()
         self._step3_frame.setEnabled(False)
@@ -538,6 +540,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         row2 = QHBoxLayout()
         self.ed_code = QLineEdit(); self.ed_code.setPlaceholderText("5D")
         self.btn_apply_map = QPushButton("코드매핑 적용 → STEP5(RACK)"); self.btn_apply_map.setEnabled(False)
+        tint_button(self.btn_apply_map, "#FFE0B2")  # 연주황
         row2.addWidget(QLabel("5D")); row2.addWidget(self.ed_code, 1); row2.addWidget(self.btn_apply_map)
         v.addLayout(row1); v.addLayout(row2)
         self.cb_process.currentTextChanged.connect(self._on_step3_changed)
@@ -629,6 +632,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         h = QHBoxLayout(frame); h.setContentsMargins(6,6,6,6); h.setSpacing(6)
         self.btn_gen_quote = QPushButton("견적서 생성"); self.btn_gen_quote.setMinimumHeight(90)
         self.btn_gen_cover = QPushButton("갑지 생성");   self.btn_gen_cover.setMinimumHeight(90)
+        tint_button(self.btn_gen_quote, "#B3E5FC")   # 연하늘
+        tint_button(self.btn_gen_cover, "#F8BBD0")   # 연분홍
         for btn, slot in [(self.btn_gen_quote, self._generate_quote), (self.btn_gen_cover, self._generate_cover)]:
             f = btn.font(); f.setPointSize(12); f.setBold(True); btn.setFont(f)
             btn.clicked.connect(slot); h.addWidget(btn, 1)
@@ -661,6 +666,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.btn_credit.clicked.connect(self._open_credit_dialog)
         self.btn_investor = QPushButton("투자자 변경"); self.btn_investor.setMinimumHeight(32)
         self.btn_investor.clicked.connect(self._change_investor)
+        tint_button(self.btn_credit,   "#FFF9C4")   # 연노랑
+        tint_button(self.btn_investor, "#E8EAF6")   # 연라벤더
         self.chk_qt_kr = QCheckBox("국내"); self.chk_qt_cn = QCheckBox("중국"); self.chk_qt_us = QCheckBox("미국")
         self.chk_qt_kr.setChecked(True)
         for chk, qt in [(self.chk_qt_kr,"국내"),(self.chk_qt_cn,"중국"),(self.chk_qt_us,"미국")]:
@@ -1003,10 +1010,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         # ── 목표가 설정 ──
         sep1 = QFrame(); sep1.setFrameShape(QFrame.HLine); sep1.setFrameShadow(QFrame.Sunken); v.addWidget(sep1)
-        v.addWidget(bold_label("목표가 설정 (입력 시 Pump Credit 자동조정)", size=10))
+        v.addWidget(bold_label("목표가 설정 (입력 시 Credit 자동조정 / 공란 시 Credit 초기화)", size=10))
         form2 = QFormLayout()
-        ed_target = QLineEdit(); ed_target.setPlaceholderText("목표 총금액(원) 입력")
-        form2.addRow("목표가(원)", ed_target)
+        ed_target_pump = QLineEdit(); ed_target_pump.setPlaceholderText("Pump 목표가(원)")
+        ed_target_rack = QLineEdit(); ed_target_rack.setPlaceholderText("Rack 목표가(원)")
+        form2.addRow("Pump 목표가(원)", ed_target_pump)
+        form2.addRow("Rack 목표가(원)", ed_target_rack)
         v.addLayout(form2)
 
         # ── 자동계산 결과 ──
@@ -1017,8 +1026,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         h_val = to_float(self._pick_rd().get("H")) if self.state.request_rows else 0.0
 
+        def _base_amount() -> float:
+            return sum(self._get_float(r, 5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
+
         def _refresh() -> None:
-            base   = sum(self._get_float(r, 5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
+            base   = _base_amount()
             credit = to_float(ed_pump.text()) + to_float(ed_rack.text())
             after  = base - credit
             lbl_base.setText(f"현재 총금액: {fmt_krw(base)} 원")
@@ -1028,18 +1040,32 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             else:
                 lbl_ch.setText("CH당 단가: H열 값 없음")
 
-        def _on_target_changed() -> None:
-            target = to_float(ed_target.text())
-            if target <= 0:
-                _refresh(); return
-            base   = sum(self._get_float(r, 5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
-            needed = max(0.0, base - to_float(ed_rack.text()) - target)
-            ed_pump.blockSignals(True); ed_pump.setText(fmt_krw(needed)); ed_pump.blockSignals(False)
+        def _on_pump_target_changed() -> None:
+            txt = ed_target_pump.text().strip()
+            if not txt:
+                ed_pump.blockSignals(True); ed_pump.setText(""); ed_pump.blockSignals(False)
+            else:
+                target = to_float(txt)
+                if target > 0:
+                    needed = max(0.0, _base_amount() - to_float(ed_rack.text()) - target)
+                    ed_pump.blockSignals(True); ed_pump.setText(fmt_krw(needed)); ed_pump.blockSignals(False)
+            _refresh()
+
+        def _on_rack_target_changed() -> None:
+            txt = ed_target_rack.text().strip()
+            if not txt:
+                ed_rack.blockSignals(True); ed_rack.setText(""); ed_rack.blockSignals(False)
+            else:
+                target = to_float(txt)
+                if target > 0:
+                    needed = max(0.0, _base_amount() - to_float(ed_pump.text()) - target)
+                    ed_rack.blockSignals(True); ed_rack.setText(fmt_krw(needed)); ed_rack.blockSignals(False)
             _refresh()
 
         ed_pump.textChanged.connect(_refresh)
         ed_rack.textChanged.connect(_refresh)
-        ed_target.textChanged.connect(_on_target_changed)
+        ed_target_pump.textChanged.connect(_on_pump_target_changed)
+        ed_target_rack.textChanged.connect(_on_rack_target_changed)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); v.addWidget(bb)
 
@@ -1187,6 +1213,9 @@ class ESignPage(QWidget):
         self.btn_code   = QPushButton("승인코드 LOAD")
         self.btn_excel  = QPushButton("엑셀 LOAD")
         self.btn_save   = QPushButton("PDF 저장")
+        tint_button(self.btn_code,  "#DCEDC8")   # 연초록
+        tint_button(self.btn_excel, "#B3E5FC")   # 연하늘
+        tint_button(self.btn_save,  "#FFE0B2")   # 연주황
         self.lbl_status = QLabel("준비")
         for b in (self.btn_code, self.btn_excel, self.btn_save): top.addWidget(b); top.addSpacing(8)
         top.addStretch(1); top.addWidget(self.lbl_status); outer.addLayout(top)

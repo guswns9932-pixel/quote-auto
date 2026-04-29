@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from pages import ESignPage, QuoteBuilderPage
+from widgets import tint_button
 
 
 # ──────────────────────────────────────────────
@@ -45,16 +46,18 @@ class LeftNav(QWidget):
         v.setSpacing(12)
 
         buttons = [
-            ("견적서작성", lambda: stack.setCurrentIndex(0)),
-            ("전자서명",   lambda: stack.setCurrentIndex(1)),
+            ("견적서작성", lambda: stack.setCurrentIndex(0), "#BBDEFB"),   # 연파랑
+            ("전자서명",   lambda: stack.setCurrentIndex(1), "#C8E6C9"),   # 연초록
         ]
-        for label, slot in buttons:
+        for label, slot, color in buttons:
             btn = self._nav_btn(label, slot)
+            tint_button(btn, color)
             v.addWidget(btn)
 
         v.addStretch(1)
 
         reset_btn = self._nav_btn("초기화", on_reset)
+        tint_button(reset_btn, "#FFCCBC")   # 연주황(리셋 강조)
         v.addWidget(reset_btn)
 
     @staticmethod

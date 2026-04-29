@@ -20,6 +20,25 @@ import os
 import subprocess
 import sys
 
+# ────────────────────────────────────────────────────────────────────
+# PyInstaller 번들링 힌트
+# launcher.py 자체는 아래 패키지를 직접 사용하지 않지만,
+# --run 모드에서 pyz 앱이 런타임에 import한다.
+# 이 import 구문이 있어야 PyInstaller 정적 분석기가 패키지를 감지해
+# EXE에 자동으로 포함시킨다. (collect_all 단독으로는 누락될 수 있음)
+# ────────────────────────────────────────────────────────────────────
+try:
+    import openpyxl            # noqa: F401
+    import openpyxl.styles     # noqa: F401
+    import openpyxl.utils      # noqa: F401
+    import openpyxl.reader     # noqa: F401
+    import openpyxl.writer     # noqa: F401
+    import fitz                # noqa: F401
+    import pythoncom           # noqa: F401
+    import win32com.client     # noqa: F401
+except ImportError:
+    pass
+
 
 # ════════════════════════════════════════════════
 # 앱 실행 모드  (subprocess에서 --run <folder> 로 호출)

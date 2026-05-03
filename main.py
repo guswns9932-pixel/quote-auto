@@ -117,16 +117,33 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────
 def main() -> None:
     _setup_logging()
-    app = QApplication(sys.argv)
 
-    # 한글 폰트
+    # 런처에서 in-process로 호출되면 QApplication이 이미 존재한다.
+    # 그 경우 새로 생성하지 않고 기존 인스턴스를 재사용한다.
+    _standalone = QApplication.instance() is None
+    app = QApplication(sys.argv) if _standalone else QApplication.instance()
+
     f = app.font()
     f.setFamily("Malgun Gothic")
     app.setFont(f)
 
     window = MainWindow()
     window.showMaximized()
-    sys.exit(app.exec())
+
+    if _standalone:
+        sys.exit(app.exec())
+    else:
+        # 런처 내부 실행: 독립 QEventLoop 사용.
+        # 앱 창이 모두 닫히면(lastWindowClosed) 루프를 종료하고
+        # 제어를 런처로 반환한다.
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        app.lastWindowClosed.connect(loop.quit)
+        loop.exec()
+        try:
+            app.lastWindowClosed.disconnect(loop.quit)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

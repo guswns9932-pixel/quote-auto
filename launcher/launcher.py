@@ -1,14 +1,15 @@
 """
 launcher.py
 ===========
-모드 1 (기본 실행): GUI 앱 목록
-  - 실행 위치의 App/ 폴더를 스캔
-  - 발견된 프로그램을 리스트로 표시
-  - 더블클릭 / 실행 버튼 → subprocess로 앱 기동
+모드 1 (기본 실행 / GUI): App/ 폴더를 스캔해 프로그램 목록 표시.
+  더블클릭 / 실행 버튼 → 같은 프로세스 내에서 pyz 앱을 직접 로드·실행.
+  앱 종료 후 런처 창이 다시 나타난다.
 
-모드 2 (--run <folder>): 특정 앱 직접 실행
-  - launcher.exe --run App/견적자동화
-  - manifest.json 읽기 → pyz 로드 → entry.main() 실행
+※ subprocess를 쓰지 않는 이유
+  EXE 내부에서 subprocess로 같은 EXE를 재실행하면 PyInstaller의
+  모듈 탐색 경로(sys.path)가 재구성되면서 openpyxl 등 의존성이
+  사라지는 문제가 발생한다.  같은 프로세스에서 직접 import하면
+  이미 초기화된 Python 환경을 그대로 공유하므로 이 문제가 없다.
 """
 
 from __future__ import annotations
@@ -17,15 +18,14 @@ import hashlib
 import importlib
 import json
 import os
-import subprocess
 import sys
 
 # ────────────────────────────────────────────────────────────────────
 # PyInstaller 번들링 힌트
 # launcher.py 자체는 아래 패키지를 직접 사용하지 않지만,
-# --run 모드에서 pyz 앱이 런타임에 import한다.
-# 이 import 구문이 있어야 PyInstaller 정적 분석기가 패키지를 감지해
-# EXE에 자동으로 포함시킨다. (collect_all 단독으로는 누락될 수 있음)
+# 런타임에 pyz 앱(pages.py 등)이 import하므로 EXE에 반드시 포함해야 함.
+# 이 import 문이 있어야 PyInstaller 정적 분석기가 패키지를 감지해
+# EXE 빌드 시 자동으로 번들링한다.
 # ────────────────────────────────────────────────────────────────────
 try:
     import openpyxl            # noqa: F401
@@ -38,56 +38,6 @@ try:
     import win32com.client     # noqa: F401
 except ImportError:
     pass
-
-
-# ════════════════════════════════════════════════
-# 앱 실행 모드  (subprocess에서 --run <folder> 로 호출)
-# ════════════════════════════════════════════════
-
-if "--run" in sys.argv:
-    _idx = sys.argv.index("--run")
-    _app_dir = sys.argv[_idx + 1]
-
-    def _fatal_run(msg: str) -> None:
-        print(f"[launcher] ERROR: {msg}", file=sys.stderr)
-        try:
-            from PySide6.QtWidgets import QApplication, QMessageBox
-            _a = QApplication.instance() or QApplication(sys.argv[:1])
-            QMessageBox.critical(None, "실행 오류", msg)
-        except Exception:
-            pass
-        sys.exit(1)
-
-    _manifest_path = os.path.join(_app_dir, "manifest.json")
-    if not os.path.exists(_manifest_path):
-        _fatal_run(f"manifest.json 없음:\n{_manifest_path}")
-
-    try:
-        _manifest = json.loads(open(_manifest_path, encoding="utf-8").read())
-    except Exception as e:
-        _fatal_run(f"manifest.json 읽기 실패:\n{e}")
-
-    _pyz_name = _manifest.get("pyz", "")
-    _pyz_path = os.path.join(_app_dir, _pyz_name)
-    if not os.path.exists(_pyz_path):
-        _fatal_run(f"앱 파일 없음:\n{_pyz_path}")
-
-    _expected = _manifest.get("sha256", "")
-    if _expected:
-        _actual = hashlib.sha256(open(_pyz_path, "rb").read()).hexdigest()
-        if _actual != _expected:
-            _fatal_run(f"파일 무결성 오류:\n{_pyz_name}")
-
-    sys.path.insert(0, _pyz_path)
-    _entry = _manifest.get("entry", "main")
-
-    try:
-        _mod = importlib.import_module(_entry)
-        _mod.main()
-    except Exception as e:
-        _fatal_run(f"앱 실행 실패:\n{e}")
-
-    sys.exit(0)
 
 
 # ════════════════════════════════════════════════
@@ -140,19 +90,43 @@ def _scan_apps(base: str) -> list[dict]:
             "version":     manifest.get("version",     "-"),
             "built_at":    manifest.get("built_at",    ""),
             "folder":      folder,
+            "manifest":    manifest,
         })
     return result
 
 
-def _launch_app(folder: str) -> None:
-    """subprocess로 앱 실행 (런처 자신을 --run 모드로 호출)."""
-    exe = sys.executable
-    script = os.path.abspath(__file__)
-    if getattr(sys, "frozen", False):
-        cmd = [exe, "--run", folder]
-    else:
-        cmd = [exe, script, "--run", folder]
-    subprocess.Popen(cmd)
+def _load_and_run(app_info: dict) -> None:
+    """
+    pyz를 같은 프로세스에서 직접 로드·실행한다.
+    subprocess 없이 실행하므로 PyInstaller 번들 의존성을 그대로 공유한다.
+    """
+    folder   = app_info["folder"]
+    manifest = app_info["manifest"]
+
+    pyz_name = manifest.get("pyz", "")
+    pyz_path = os.path.join(folder, pyz_name)
+    if not os.path.exists(pyz_path):
+        raise RuntimeError(f"앱 파일 없음:\n{pyz_path}")
+
+    expected = manifest.get("sha256", "")
+    if expected:
+        actual = hashlib.sha256(open(pyz_path, "rb").read()).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"파일 무결성 오류:\n{pyz_name}")
+
+    entry = manifest.get("entry", "main")
+
+    # 같은 pyz가 아직 sys.path에 없을 때만 추가
+    if pyz_path not in sys.path:
+        sys.path.insert(0, pyz_path)
+
+    # 모듈 캐시 초기화 (앱 재실행 시 fresh import)
+    for key in list(sys.modules.keys()):
+        if key in ("main", "pages", "core", "excel_io", "widgets"):
+            del sys.modules[key]
+
+    mod = importlib.import_module(entry)
+    mod.main()  # main.py 의 main() 호출 → 내부에서 이벤트 루프 관리
 
 
 # ── 커스텀 아이템 델리게이트 ──────────────────────
@@ -183,7 +157,6 @@ class _AppDelegate(QStyledItemDelegate):
 
         x = option.rect.x() + self.PADDING
         y = option.rect.y()
-        w = option.rect.width() - self.PADDING * 2
 
         # 앱 이름
         f1 = QFont(); f1.setPointSize(self.LINE1_SIZE); f1.setBold(True)
@@ -297,12 +270,28 @@ class LauncherWindow(QMainWindow):
         if not items:
             QMessageBox.information(self, "안내", "실행할 프로그램을 선택하세요.")
             return
-        app = items[0].data(Qt.UserRole)
+        app_info = items[0].data(Qt.UserRole)
+
         try:
-            _launch_app(app["folder"])
-            self.lbl_status.setText(f"'{app['name']}' 실행 중...")
+            # 런처 숨기고 앱 실행 (같은 프로세스 내 직접 로드)
+            self.lbl_status.setText(f"'{app_info['name']}' 실행 중...")
+            self.hide()
+
+            qa = QApplication.instance()
+            qa.setQuitOnLastWindowClosed(False)   # 앱 창 닫아도 런처 프로세스 유지
+            try:
+                _load_and_run(app_info)
+            except SystemExit:
+                pass
+            finally:
+                qa.setQuitOnLastWindowClosed(True)
+
         except Exception as e:
-            QMessageBox.critical(self, "실행 오류", str(e))
+            QMessageBox.critical(None, "실행 오류", str(e))
+        finally:
+            self.lbl_status.setText("")
+            self.show()
+            self._refresh()
 
 
 # ── 진입점 ────────────────────────────────────────

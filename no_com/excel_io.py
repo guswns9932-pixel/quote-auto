@@ -524,12 +524,12 @@ def generate_cover(
     # 투자자명
     ws_cover["B7"] = f"삼성전자 ㈜ / {investor_name} 님"
 
-    # 갑지DATA A2:A31 을 직접 확인하여 대응하는 COVER 행(20~49) 숨기기
+    # 갑지DATA A2:A31 을 직접 확인하여 빈 행을 COVER(20~49) + COVER_DATA(2~31) 양쪽에 숨기기
     for i in range(30):
         a_val = ws_data.cell(2 + i, 1).value
-        ws_cover.row_dimensions[20 + i].hidden = (
-            a_val is None or str(a_val).strip() == ""
-        )
+        blank = a_val is None or str(a_val).strip() == ""
+        ws_cover.row_dimensions[20 + i].hidden = blank
+        ws_data.row_dimensions[2 + i].hidden   = blank
 
     wb.calculation.fullCalcOnLoad = True
     _show_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])

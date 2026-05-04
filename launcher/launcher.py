@@ -109,6 +109,11 @@ from PySide6.QtWidgets import (
 
 def _base_dir() -> str:
     if getattr(sys, "frozen", False):
+        # onefile 모드: 데이터(App)는 _MEIPASS에 풀린다.
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and os.path.isdir(meipass):
+            return meipass
+        # onedir 모드: exe 옆 폴더를 기준으로 사용
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 

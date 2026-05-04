@@ -17,14 +17,19 @@
 #           └── app_v1.0.1.pyz
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all
+import os
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 BASE = Path(SPEC).parent  # launcher/ 폴더
+ONEFILE = os.environ.get("QUOTEAUTO_ONEFILE", "0") == "1"
+EXE_NAME = os.environ.get("QUOTEAUTO_EXE_NAME", "QuoteAuto")
 
 # collect_all: 서브모듈 + 데이터파일 + 바이너리 전체 수집
 # hiddenimports=["openpyxl"] 만으로는 서브모듈이 누락될 수 있음
 openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
 fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
+openpyxl_submods = collect_submodules("openpyxl")
+openpyxl_meta = copy_metadata("openpyxl")
 
 a = Analysis(
     [str(BASE / "launcher.py")],
@@ -38,12 +43,14 @@ a = Analysis(
         (str(BASE / "App"), "App"),
         *openpyxl_d,
         *fitz_d,
+        *openpyxl_meta,
     ],
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
         *openpyxl_h,
+        *openpyxl_submods,
         *fitz_h,
         "pythoncom",
         "pywintypes",
@@ -65,25 +72,41 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="QuoteAuto",
-    debug=False,
-    strip=False,
-    upx=True,
-    console=False,
-    # icon="icon.ico",
-)
+if ONEFILE:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        exclude_binaries=False,
+        name=EXE_NAME,
+        debug=False,
+        strip=False,
+        upx=True,
+        console=False,
+        # icon="icon.ico",
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=EXE_NAME,
+        debug=False,
+        strip=False,
+        upx=True,
+        console=False,
+        # icon="icon.ico",
+    )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="QuoteAuto",
-)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name=EXE_NAME,
+    )

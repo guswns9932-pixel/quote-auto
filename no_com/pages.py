@@ -355,6 +355,7 @@ class Step5Manager:
         self.step5_table.setItem(ins, 2, it_spec)
         self._set_qty(ins, qty); self._set_price(ins, unit_price)
         self._set_amt(ins, qty * unit_price); self._recalc_totals()
+        self._sort_step5_items()
 
     # ── Credit 행 ────────────────────────────────
     def _clear_credit_rows(self) -> None:
@@ -383,6 +384,45 @@ class Step5Manager:
         self._clear_credit_rows()
         if self.state.pump_credit: self._add_credit_row("Pump Credit", -abs(self.state.pump_credit))
         if self.state.rack_credit: self._add_credit_row("Rack Credit", -abs(self.state.rack_credit))
+
+    # ── STEP5 정렬 (STEP4 품목 순서 기준) ────────
+    def _sort_step5_items(self) -> None:
+        """ITEM 행을 self._spec_order 순서에 따라 제자리 정렬."""
+        spec_order: Dict[str, int] = getattr(self, "_spec_order", {})
+        if not spec_order:
+            return
+        item_rows = [r for r in range(self.step5_table.rowCount()) if self._is_item(r)]
+        if len(item_rows) <= 1:
+            return
+        # 각 행 데이터 스냅샷
+        snaps = []
+        for r in item_rows:
+            cb = self.step5_table.cellWidget(r, 0)
+            cat_it  = self.step5_table.item(r, 1)
+            spec_it = self.step5_table.item(r, 2)
+            snaps.append({
+                "checked": cb.isChecked() if isinstance(cb, QCheckBox) else False,
+                "cat":     s(cat_it.text())  if cat_it  else "",
+                "spec":    s(spec_it.text()) if spec_it else "",
+                "qty":     self._get_float(r, 3),
+                "price":   self._get_float(r, 4),
+                "amt":     self._get_float(r, 5),
+            })
+        snaps.sort(key=lambda x: spec_order.get(x["spec"], 10**9))
+        # 정렬된 데이터를 같은 위치에 재기입 (행 삽입/삭제 없이)
+        self.step5_table.blockSignals(True)
+        for r, d in zip(item_rows, snaps):
+            cb = self.step5_table.cellWidget(r, 0)
+            if isinstance(cb, QCheckBox):
+                cb.blockSignals(True); cb.setChecked(d["checked"]); cb.blockSignals(False)
+            cat_it  = self.step5_table.item(r, 1)
+            spec_it = self.step5_table.item(r, 2)
+            if cat_it:  cat_it.setText(d["cat"])
+            if spec_it: spec_it.setText(d["spec"])
+            self._set_qty(r, d["qty"])
+            self._set_price(r, d["price"])
+            self._set_amt(r, d["amt"])
+        self.step5_table.blockSignals(False)
 
     # ── STEP5 스냅샷 ─────────────────────────────
     def _snapshot_items(self) -> List[Dict[str, Any]]:
@@ -457,9 +497,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         QWidget.__init__(self)
         self.state = QuoteState()
 
-        self._step4_highlight : set                     = set()
-        self._filtered_items  : List[Tuple[str, float]] = []
-        self._spec_order      : Dict[str, int]          = {}
+        self._step4_highlight     : set                     = set()
+        self._filtered_items      : List[Tuple[str, float]] = []
+        self._spec_order          : Dict[str, int]          = {}
+        self._done_req_indices    : set                     = set()   # 견적 완료된 의뢰행 인덱스
+        self._pending_req_indices : List[int]               = []      # 현재 생성 중인 의뢰행 인덱스
 
         self._filter_timer  : QTimer                          = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -690,9 +732,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _style_req_table(self) -> None:
         self.req_table.setAlternatingRowColors(False)
+        # item background 는 지정하지 않아야 _mark_req_done 의 setBackground 가 반영된다
         self.req_table.setStyleSheet(
             "QTableWidget{background:transparent;border:none;}"
-            "QTableWidget::item{background:transparent;color:black;}"
             "QTableWidget::item:selected{color:black;background:rgba(180,200,230,140);}")
 
     # ══════════════════════════════════════════
@@ -764,6 +806,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         QMessageBox.information(self, "완료", "의뢰파일 LOAD 완료")
 
     def _fill_req_table(self, rows: List[Dict[str, Any]]) -> None:
+        self._done_req_indices = set()   # 새 의뢰파일 로드 시 완료 이력 초기화
         self.req_table.setRowCount(0)
         self.chk_req_all.blockSignals(True); self.chk_req_all.setCheckState(Qt.Unchecked); self.chk_req_all.blockSignals(False)
         for i, rd in enumerate(rows):
@@ -1087,8 +1130,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _generate_quote(self) -> None:
         if not self.state.template_path:
             QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
-        if not excel_io.COM_AVAILABLE:
-            QMessageBox.critical(self, "오류", "Excel COM(win32)이 없습니다."); return
         if self._gen_qt_thread and self._gen_qt_thread.isRunning():
             QMessageBox.warning(self, "진행 중", "이미 생성 작업이 진행 중입니다."); return
         self._refresh_credits(); self._recalc_totals()
@@ -1097,9 +1138,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if qtype == "미국"  and not self.state.us_info.get("tool"): self._open_options("us")
         checked = self._checked_req_rows()
         if qtype == "국내" and self.state.request_rows and len(checked) >= 2:
-            rds = [self.state.request_rows[i] for i in checked if i < len(self.state.request_rows)]
+            valid = [i for i in checked if i < len(self.state.request_rows)]
+            rds = [self.state.request_rows[i] for i in valid]
+            self._pending_req_indices = valid
         else:
-            rds = [self._pick_rd()]
+            idx = self._pick_rd_index()
+            rds = [self.state.request_rows[idx]] if (idx >= 0 and self.state.request_rows) else [{}]
+            self._pending_req_indices = [idx] if idx >= 0 else []
         self._log(f"견적서 생성 시작 ({qtype}, {len(rds)}건) …")
         self._set_gen_buttons(False)
         self._gen_qt_thread = _GenQuoteThread(self.state, qtype, items, rds, self)
@@ -1113,10 +1158,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             logger.error("견적서 생성 실패", exc_info=result)
             QMessageBox.critical(self, "생성 오류", f"{result}\n\n{traceback.format_exc()}")
             return
-        for _rd, path in result:
+        for i, (rd, path) in enumerate(result):
             if path:
                 self._add_done(path)
                 self.state.last_output_dir = os.path.dirname(path)
+                if i < len(self._pending_req_indices):
+                    idx = self._pending_req_indices[i]
+                    self._done_req_indices.add(idx)
+                    self._mark_req_done(idx)
         ok = sum(1 for _, p in result if p)
         self._log(f"견적서 생성 완료: {ok}/{len(result)}건")
         QMessageBox.information(self, "완료", f"견적서 {ok}건 생성 완료")
@@ -1124,8 +1173,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _generate_cover(self) -> None:
         if not self.state.template_path:
             QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
-        if not excel_io.COM_AVAILABLE:
-            QMessageBox.critical(self, "오류", "Excel COM(win32)이 없습니다."); return
         if self._gen_cv_thread and self._gen_cv_thread.isRunning():
             QMessageBox.warning(self, "진행 중", "이미 갑지 생성 작업이 진행 중입니다."); return
         start = self.state.last_output_dir or exe_dir()
@@ -1153,11 +1200,29 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._log(f"갑지 생성 완료: {out}")
         QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
 
-    def _pick_rd(self) -> Dict[str, Any]:
+    def _pick_rd_index(self) -> int:
+        """클릭(선택)된 행 → 체크된 첫 번째 행 → 0 순으로 의뢰행 인덱스 반환."""
+        cur = self.req_table.currentRow()
+        if 0 <= cur < len(self.state.request_rows):
+            return cur
         checked = self._checked_req_rows()
-        if checked and checked[0] < len(self.state.request_rows): return self.state.request_rows[checked[0]]
-        if self.state.request_rows: return self.state.request_rows[0]
+        if checked and checked[0] < len(self.state.request_rows):
+            return checked[0]
+        return 0 if self.state.request_rows else -1
+
+    def _pick_rd(self) -> Dict[str, Any]:
+        idx = self._pick_rd_index()
+        if idx >= 0 and idx < len(self.state.request_rows):
+            return self.state.request_rows[idx]
         return {}
+
+    def _mark_req_done(self, row: int) -> None:
+        """견적 완료된 의뢰행을 연두색으로 하이라이트."""
+        color = QBrush(QColor(160, 220, 160))
+        for col in range(1, self.req_table.columnCount()):
+            it = self.req_table.item(row, col)
+            if it:
+                it.setBackground(color)
 
     def _add_done(self, path: str) -> None:
         it = QListWidgetItem(os.path.basename(path)); it.setData(Qt.UserRole, path); self.list_done.addItem(it)

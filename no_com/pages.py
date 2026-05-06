@@ -1039,102 +1039,132 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self._log(f"투자자: {self.state.investor_name}")
 
     def _open_credit_dialog(self) -> None:
-        dlg = QDialog(self); dlg.setWindowTitle("Credit 입력"); dlg.setFixedWidth(460)
-        v = QVBoxLayout(dlg); v.setSpacing(8)
-
-        # ── Credit 직접 입력 ──
-        v.addWidget(bold_label("Credit 직접 입력", size=10))
-        form1 = QFormLayout()
-        ed_pump = QLineEdit("" if not self.state.pump_credit else fmt_krw(self.state.pump_credit))
-        ed_rack = QLineEdit("" if not self.state.rack_credit else fmt_krw(self.state.rack_credit))
-        for ed in (ed_pump, ed_rack): ed.setPlaceholderText("미입력 시 0(무시)")
-        form1.addRow("Pump Credit(원)", ed_pump); form1.addRow("Rack Credit(원)", ed_rack)
-        v.addLayout(form1)
-
-        # ── 목표가 설정 ──
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.HLine); sep1.setFrameShadow(QFrame.Sunken); v.addWidget(sep1)
-        v.addWidget(bold_label("목표가 설정 (입력 시 Credit 자동조정 / 공란 시 Credit 초기화)", size=10))
-        form2 = QFormLayout()
-        ed_target_pump = QLineEdit(); ed_target_pump.setPlaceholderText("Pump 목표가(원)")
-        ed_target_rack = QLineEdit(); ed_target_rack.setPlaceholderText("Rack 목표가(원)")
-        form2.addRow("Pump 목표가(원)", ed_target_pump)
-        form2.addRow("Rack 목표가(원)", ed_target_rack)
-        v.addLayout(form2)
-
-        # ── 자동계산 결과 ──
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine); sep2.setFrameShadow(QFrame.Sunken); v.addWidget(sep2)
-        lbl_base   = QLabel(); lbl_result = QLabel(); lbl_result.setStyleSheet("font-weight:bold;")
-        lbl_ch     = QLabel()
-        v.addWidget(lbl_base); v.addWidget(lbl_result); v.addWidget(lbl_ch)
+        dlg = QDialog(self); dlg.setWindowTitle("Credit 입력"); dlg.setFixedWidth(500)
+        v = QVBoxLayout(dlg); v.setSpacing(10)
 
         h_val = to_float(self._pick_rd().get("H")) if self.state.request_rows else 0.0
 
-        def _pump_sum() -> float:
+        # ── 카테고리별 품목 합계 ──────────────────────────────────
+        def _cat_sum(is_pump: bool) -> float:
             total = 0.0
             for r in range(self.step5_table.rowCount()):
                 if self._is_item(r):
                     cat_it = self.step5_table.item(r, 1)
-                    if cat_it and s(cat_it.text()) == "PUMP":
+                    if cat_it and (s(cat_it.text()) == "PUMP") == is_pump:
                         total += self._get_float(r, 5)
             return total
 
-        def _rack_sum() -> float:
-            total = 0.0
-            for r in range(self.step5_table.rowCount()):
-                if self._is_item(r):
-                    cat_it = self.step5_table.item(r, 1)
-                    if cat_it and s(cat_it.text()) != "PUMP":
-                        total += self._get_float(r, 5)
-            return total
+        pump_sum = _cat_sum(True)
+        rack_sum = _cat_sum(False)
 
-        def _refresh() -> None:
-            ps     = _pump_sum()
-            rs     = _rack_sum()
-            pc     = to_float(ed_pump.text())
-            rc     = to_float(ed_rack.text())
-            after  = ps + rs - pc - rc
-            lbl_base.setText(f"현재 총금액: {fmt_krw(ps + rs)} 원  (Pump: {fmt_krw(ps)}, Rack: {fmt_krw(rs)})")
-            lbl_result.setText(f"Credit 반영: {fmt_krw(after)} 원  (감액: {fmt_krw(pc + rc)} 원)")
+        # ── 섹션 빌더 ────────────────────────────────────────────
+        # 반환: (ed_credit, ed_target, ed_ch)
+        def _make_section(label: str, item_sum: float, init_credit: float):
+            grp = QGroupBox(f"{label}  (품목 합계: {fmt_krw(item_sum)} 원)")
+            form = QFormLayout(grp); form.setVerticalSpacing(6)
+
+            ed_credit = QLineEdit(); ed_credit.setPlaceholderText("0")
+            ed_target = QLineEdit(); ed_target.setPlaceholderText(fmt_krw(item_sum))
+            ed_ch     = QLineEdit(); ed_ch.setPlaceholderText(
+                fmt_krw(item_sum / h_val) if h_val > 0 else "CH 값 없음"
+            )
+            ed_ch.setEnabled(h_val > 0)
+
+            form.addRow("Credit 금액(원):", ed_credit)
+            form.addRow("목표가(원):",      ed_target)
+            form.addRow("CH당 단가(원/CH):", ed_ch)
+
+            # 초기값 설정
+            if init_credit:
+                ed_credit.setText(fmt_krw(init_credit))
+
+            updating = [False]
+
+            def _from_credit():
+                if updating[0]: return
+                updating[0] = True
+                try:
+                    c = to_float(ed_credit.text())
+                    t = item_sum - c
+                    ed_target.setText(fmt_krw(max(0.0, t)))
+                    if h_val > 0:
+                        ed_ch.setText(fmt_krw(max(0.0, t) / h_val))
+                finally:
+                    updating[0] = False
+
+            def _from_target():
+                if updating[0]: return
+                updating[0] = True
+                try:
+                    t = to_float(ed_target.text())
+                    c = max(0.0, item_sum - t)
+                    ed_credit.setText(fmt_krw(c))
+                    if h_val > 0:
+                        ed_ch.setText(fmt_krw(t / h_val))
+                finally:
+                    updating[0] = False
+
+            def _from_ch():
+                if updating[0]: return
+                if h_val <= 0: return
+                updating[0] = True
+                try:
+                    ch = to_float(ed_ch.text())
+                    t  = ch * h_val
+                    c  = max(0.0, item_sum - t)
+                    ed_credit.setText(fmt_krw(c))
+                    ed_target.setText(fmt_krw(max(0.0, t)))
+                finally:
+                    updating[0] = False
+
+            ed_credit.textEdited.connect(_from_credit)
+            ed_target.textEdited.connect(_from_target)
+            ed_ch.textEdited.connect(_from_ch)
+
+            return grp, ed_credit, ed_target, ed_ch
+
+        grp_pump, ed_pump_c, ed_pump_t, ed_pump_ch = _make_section(
+            "PUMP", pump_sum, self.state.pump_credit)
+        grp_rack, ed_rack_c, ed_rack_t, ed_rack_ch = _make_section(
+            "RACK", rack_sum, self.state.rack_credit)
+
+        v.addWidget(grp_pump)
+        v.addWidget(grp_rack)
+
+        # ── 결과 요약 ─────────────────────────────────────────────
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine); sep.setFrameShadow(QFrame.Sunken)
+        v.addWidget(sep)
+        lbl_summary = QLabel(); lbl_summary.setStyleSheet("font-weight:bold;")
+        lbl_ch_total = QLabel()
+        v.addWidget(lbl_summary); v.addWidget(lbl_ch_total)
+
+        def _refresh_summary() -> None:
+            pc    = to_float(ed_pump_c.text())
+            rc    = to_float(ed_rack_c.text())
+            after = pump_sum + rack_sum - pc - rc
+            lbl_summary.setText(
+                f"Credit 반영 후 총액: {fmt_krw(after)} 원"
+                f"  (감액 Pump {fmt_krw(pc)} + Rack {fmt_krw(rc)} = {fmt_krw(pc + rc)} 원)"
+            )
             if h_val > 0:
-                lbl_ch.setText(f"CH당 단가: {fmt_krw(after / h_val)} 원/CH  (H열: {fmt_qty(h_val)} CH)")
+                lbl_ch_total.setText(
+                    f"전체 CH당 단가: {fmt_krw(after / h_val)} 원/CH  (H: {fmt_qty(h_val)} CH)"
+                )
             else:
-                lbl_ch.setText("CH당 단가: H열 값 없음")
+                lbl_ch_total.setText("전체 CH당 단가: H열 값 없음")
 
-        def _on_pump_target_changed() -> None:
-            txt = ed_target_pump.text().strip()
-            if not txt:
-                ed_pump.blockSignals(True); ed_pump.setText(""); ed_pump.blockSignals(False)
-            else:
-                target = to_float(txt)
-                if target > 0:
-                    needed = max(0.0, _pump_sum() - target)
-                    ed_pump.blockSignals(True); ed_pump.setText(fmt_krw(needed)); ed_pump.blockSignals(False)
-            _refresh()
-
-        def _on_rack_target_changed() -> None:
-            txt = ed_target_rack.text().strip()
-            if not txt:
-                ed_rack.blockSignals(True); ed_rack.setText(""); ed_rack.blockSignals(False)
-            else:
-                target = to_float(txt)
-                if target > 0:
-                    needed = max(0.0, _rack_sum() - target)
-                    ed_rack.blockSignals(True); ed_rack.setText(fmt_krw(needed)); ed_rack.blockSignals(False)
-            _refresh()
-
-        ed_pump.textChanged.connect(_refresh)
-        ed_rack.textChanged.connect(_refresh)
-        ed_target_pump.textChanged.connect(_on_pump_target_changed)
-        ed_target_rack.textChanged.connect(_on_rack_target_changed)
+        for ed in (ed_pump_c, ed_pump_t, ed_pump_ch, ed_rack_c, ed_rack_t, ed_rack_ch):
+            ed.textEdited.connect(_refresh_summary)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); v.addWidget(bb)
 
         def _ok() -> None:
-            self.state.pump_credit = to_float(ed_pump.text())
-            self.state.rack_credit = to_float(ed_rack.text())
+            self.state.pump_credit = to_float(ed_pump_c.text())
+            self.state.rack_credit = to_float(ed_rack_c.text())
             self._refresh_credits(); self._recalc_totals(); dlg.accept()
 
-        bb.accepted.connect(_ok); bb.rejected.connect(dlg.reject); _refresh(); dlg.exec()
+        bb.accepted.connect(_ok); bb.rejected.connect(dlg.reject)
+        _refresh_summary(); dlg.exec()
 
     # ══════════════════════════════════════════
     # STEP6 – 생성

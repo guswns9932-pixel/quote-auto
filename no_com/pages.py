@@ -19,7 +19,7 @@ from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortc
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QGroupBox, QHBoxLayout,
+    QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
     QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
@@ -1066,8 +1066,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         # ── 섹션 빌더 ────────────────────────────────────────────
         # 반환: (ed_credit, ed_target, ed_ch)
         def _make_section(label: str, item_sum: float, init_credit: float):
-            grp = QGroupBox(f"{label}  (품목 합계: {fmt_krw(item_sum)} 원)")
-            form = QFormLayout(grp); form.setVerticalSpacing(6)
+            frame = QFrame(); frame.setFrameShape(QFrame.StyledPanel)
+            fv    = QVBoxLayout(frame); fv.setContentsMargins(8, 6, 8, 6); fv.setSpacing(6)
+            hdr = QLabel(f"<b>{label}</b>  (품목 합계: {fmt_krw(item_sum)} 원)")
+            fv.addWidget(hdr)
+
+            form = QFormLayout(); form.setVerticalSpacing(6)
+            fv.addLayout(form)
 
             ed_credit = QLineEdit(); ed_credit.setPlaceholderText("0")
             ed_target = QLineEdit(); ed_target.setPlaceholderText(fmt_krw(item_sum))
@@ -1080,7 +1085,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             form.addRow("목표가(원):",      ed_target)
             form.addRow("CH당 단가(원/CH):", ed_ch)
 
-            # 초기값 설정
             if init_credit:
                 ed_credit.setText(fmt_krw(init_credit))
 
@@ -1127,7 +1131,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             ed_target.textEdited.connect(_from_target)
             ed_ch.textEdited.connect(_from_ch)
 
-            return grp, ed_credit, ed_target, ed_ch
+            return frame, ed_credit, ed_target, ed_ch
 
         grp_pump, ed_pump_c, ed_pump_t, ed_pump_ch = _make_section(
             "PUMP", pump_sum, self.state.pump_credit)

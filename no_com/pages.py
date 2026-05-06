@@ -1069,15 +1069,32 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         h_val = to_float(self._pick_rd().get("H")) if self.state.request_rows else 0.0
 
-        def _base_amount() -> float:
-            return sum(self._get_float(r, 5) for r in range(self.step5_table.rowCount()) if not self._is_total(r))
+        def _pump_sum() -> float:
+            total = 0.0
+            for r in range(self.step5_table.rowCount()):
+                if self._is_item(r):
+                    cat_it = self.step5_table.item(r, 1)
+                    if cat_it and s(cat_it.text()) == "PUMP":
+                        total += self._get_float(r, 5)
+            return total
+
+        def _rack_sum() -> float:
+            total = 0.0
+            for r in range(self.step5_table.rowCount()):
+                if self._is_item(r):
+                    cat_it = self.step5_table.item(r, 1)
+                    if cat_it and s(cat_it.text()) != "PUMP":
+                        total += self._get_float(r, 5)
+            return total
 
         def _refresh() -> None:
-            base   = _base_amount()
-            credit = to_float(ed_pump.text()) + to_float(ed_rack.text())
-            after  = base - credit
-            lbl_base.setText(f"현재 총금액: {fmt_krw(base)} 원")
-            lbl_result.setText(f"Credit 반영: {fmt_krw(after)} 원  (감액: {fmt_krw(credit)} 원)")
+            ps     = _pump_sum()
+            rs     = _rack_sum()
+            pc     = to_float(ed_pump.text())
+            rc     = to_float(ed_rack.text())
+            after  = ps + rs - pc - rc
+            lbl_base.setText(f"현재 총금액: {fmt_krw(ps + rs)} 원  (Pump: {fmt_krw(ps)}, Rack: {fmt_krw(rs)})")
+            lbl_result.setText(f"Credit 반영: {fmt_krw(after)} 원  (감액: {fmt_krw(pc + rc)} 원)")
             if h_val > 0:
                 lbl_ch.setText(f"CH당 단가: {fmt_krw(after / h_val)} 원/CH  (H열: {fmt_qty(h_val)} CH)")
             else:
@@ -1090,7 +1107,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             else:
                 target = to_float(txt)
                 if target > 0:
-                    needed = max(0.0, _base_amount() - to_float(ed_rack.text()) - target)
+                    needed = max(0.0, _pump_sum() - target)
                     ed_pump.blockSignals(True); ed_pump.setText(fmt_krw(needed)); ed_pump.blockSignals(False)
             _refresh()
 
@@ -1101,7 +1118,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             else:
                 target = to_float(txt)
                 if target > 0:
-                    needed = max(0.0, _base_amount() - to_float(ed_pump.text()) - target)
+                    needed = max(0.0, _rack_sum() - target)
                     ed_rack.blockSignals(True); ed_rack.setText(fmt_krw(needed)); ed_rack.blockSignals(False)
             _refresh()
 

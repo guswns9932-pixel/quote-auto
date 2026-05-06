@@ -1039,6 +1039,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self._log(f"투자자: {self.state.investor_name}")
 
     def _open_credit_dialog(self) -> None:
+        try:
+            self._open_credit_dialog_impl()
+        except Exception:
+            QMessageBox.critical(self, "Credit 오류", traceback.format_exc())
+
+    def _open_credit_dialog_impl(self) -> None:
         dlg = QDialog(self); dlg.setWindowTitle("Credit 입력"); dlg.setFixedWidth(500)
         v = QVBoxLayout(dlg); v.setSpacing(10)
 

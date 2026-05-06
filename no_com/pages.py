@@ -19,7 +19,7 @@ from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortc
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QHBoxLayout,
+    QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
     QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QTabWidget,

@@ -408,7 +408,7 @@ class Step5Manager:
                 "price":   self._get_float(r, 4),
                 "amt":     self._get_float(r, 5),
             })
-        snaps.sort(key=lambda x: spec_order.get(x["spec"], 10**9))
+        snaps.sort(key=lambda x: (0 if x["cat"] == "PUMP" else 1, spec_order.get(x["spec"], 10**9)))
         # 정렬된 데이터를 같은 위치에 재기입 (행 삽입/삭제 없이)
         self.step5_table.blockSignals(True)
         for r, d in zip(item_rows, snaps):

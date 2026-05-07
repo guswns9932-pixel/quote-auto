@@ -974,6 +974,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             it = self.step5_table.item(row, 1)
             if it:
                 it.setText("RACK" if it.text().strip() == "PUMP" else "PUMP")
+                self._sort_step5_items()
                 self._recalc_totals(); self._sync_step4_highlight(scroll_top=False)
         elif col == 3:
             cur = self._get_float(row, 3)
@@ -997,7 +998,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                                      QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes: return
         for r in sorted(to_del, reverse=True): self.step5_table.removeRow(r)
-        self._ensure_total(); self._refresh_credits(); self._recalc_totals()
+        self._ensure_total(); self._refresh_credits(); self._sort_step5_items(); self._recalc_totals()
         self.chk_step5_all.blockSignals(True); self.chk_step5_all.setCheckState(Qt.Unchecked); self.chk_step5_all.blockSignals(False)
         self._sync_step4_highlight()
 

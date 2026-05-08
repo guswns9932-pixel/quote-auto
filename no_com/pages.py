@@ -1574,4 +1574,3 @@ class ESignPage(QWidget):
                         it.pixmap().save(buf, "PNG"); dst.insert_image(rect, stream=ba.data())
             finally: src.close()
         final.save(out); final.close()
-

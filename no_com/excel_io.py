@@ -17,9 +17,12 @@ Excel 입출력 전담 모듈.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
+import re
 import shutil
+import zipfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -158,6 +161,53 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
 # openpyxl 공통 헬퍼
 # ═══════════════════════════════════════════════════════════════
 
+def _strip_external_links(path: str) -> None:
+    """
+    openpyxl 저장 후 xlsx ZIP 안의 외부 링크 XML을 제거한다.
+    xl/externalLinks/ 파일이 남아 있으면 Excel이 "복구" 경고를 띄우므로
+    workbook.xml / rels / Content_Types 에서도 참조를 삭제한다.
+    """
+    with zipfile.ZipFile(path, "r") as zin:
+        names = zin.namelist()
+        ext_files = {n for n in names if n.startswith("xl/externalLinks/")}
+        if not ext_files:
+            return
+        contents = {n: zin.read(n) for n in names}
+
+    # workbook.xml — <externalReferences> 블록 제거
+    wb_key = "xl/workbook.xml"
+    if wb_key in contents:
+        contents[wb_key] = re.sub(
+            rb"<externalReferences\b[^>]*>.*?</externalReferences>",
+            b"", contents[wb_key], flags=re.DOTALL,
+        )
+
+    # workbook.xml.rels — externalLink 관계 항목 제거
+    rels_key = "xl/_rels/workbook.xml.rels"
+    if rels_key in contents:
+        contents[rels_key] = re.sub(
+            rb'<Relationship\b[^>]*externalLink[^>]*/?>',
+            b"", contents[rels_key],
+        )
+
+    # [Content_Types].xml — externalLinks Override 제거
+    ct_key = "[Content_Types].xml"
+    if ct_key in contents:
+        contents[ct_key] = re.sub(
+            rb'<Override\b[^>]*externalLinks[^>]*/?>',
+            b"", contents[ct_key],
+        )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in contents.items():
+            if name not in ext_files:
+                zout.writestr(name, data)
+
+    with open(path, "wb") as f:
+        f.write(buf.getvalue())
+
+
 def _hide_rows(ws: Worksheet, start: int, end: int, filled_count: int) -> None:
     """start~end 행 중 filled_count 이후 행을 숨김."""
     for i in range(end - start + 1):
@@ -290,6 +340,7 @@ def _fill_domestic(state: QuoteState,
     ])
 
     wb.save(path)
+    _strip_external_links(path)
     logger.info("국내 견적서 생성: %s", path)
     return path
 
@@ -353,6 +404,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _show_only_sheets(wb, [SheetName.QUOTE_CN])
 
     wb.save(path)
+    _strip_external_links(path)
     logger.info("중국 견적서 생성: %s", path)
     return path
 
@@ -416,6 +468,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _show_only_sheets(wb, [SheetName.QUOTE_US])
 
     wb.save(path)
+    _strip_external_links(path)
     logger.info("미국 견적서 생성: %s", path)
     return path
 
@@ -534,6 +587,7 @@ def generate_cover(
     wb.calculation.fullCalcOnLoad = True
     _show_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
     wb.save(out_path)
+    _strip_external_links(out_path)
     logger.info("갑지 생성: %s", out_path)
     return out_path
 

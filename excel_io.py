@@ -13,16 +13,15 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from core import (
-    CN, DOM, US, SheetName,
-    QuoteState, LogEntry,
+    CN, DOM, US, SheetName, QuoteState,
     ensure_dir, safe_filename, s, to_float, unique_path,
-    exe_dir,
+    exe_dir, parse_invest_info,
 )
 
 logger = logging.getLogger("QuoteApp")
@@ -142,6 +141,7 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
             "D": ws.cell(r,  4).value,
             "E": ws.cell(r,  5).value,
             "F": ws.cell(r,  6).value,
+            "G": ws.cell(r,  7).value,
             "H": ws.cell(r,  8).value,
             "J": ws.cell(r, 10).value,
             "K": ws.cell(r, 11).value,
@@ -306,6 +306,9 @@ def _fill_domestic(xl: ExcelCOM, wb, state: QuoteState,
 
     _write_req_row(xl, wb, state, rd)
 
+    investor = s(state.investor_name) or "채승철"
+    ws_spec.Range("B4").Value = f"{investor} 님 / 설비구매그룹"
+
     rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
     credits    = [r for r in items if r["role"] == "CREDIT"]
 
@@ -341,7 +344,7 @@ def _fill_domestic(xl: ExcelCOM, wb, state: QuoteState,
     lineproc = safe_filename(s(rd.get("K")))
     investor = safe_filename(s(rd.get("J")))
     tool     = safe_filename(s(rd.get("Z")))
-    folder   = ensure_dir(os.path.join(exe_dir(), f"{ymd}_LOT베큠_{lineproc}_{investor}"))
+    folder   = ensure_dir(os.path.join(exe_dir(), "견적서", f"{ymd}_LOT베큠_{lineproc}_{investor}"))
     return os.path.join(folder, f"{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor}_{tool}.xlsx")
 
 
@@ -392,7 +395,7 @@ def _fill_china(xl: ExcelCOM, wb, state: QuoteState, items: List[Dict[str, Any]]
     ymd    = datetime.now().strftime("%y%m%d")
     line   = safe_filename(info.get("line", ""))
     tool   = safe_filename(info.get("tool", ""))
-    folder = ensure_dir(os.path.join(exe_dir(), f"{ymd}_중국_SCS_{line}"))
+    folder = ensure_dir(os.path.join(exe_dir(), "견적서", f"{ymd}_중국_SCS_{line}"))
     return os.path.join(folder, f"{ymd}_중국_SCS_{line}_{tool}.xlsx")
 
 
@@ -443,7 +446,7 @@ def _fill_us(xl: ExcelCOM, wb, state: QuoteState, items: List[Dict[str, Any]]) -
     ymd    = datetime.now().strftime("%y%m%d")
     site   = safe_filename(info.get("site", ""))
     tool   = safe_filename(info.get("tool", ""))
-    folder = ensure_dir(os.path.join(exe_dir(), f"{ymd}_미국_{site}"))
+    folder = ensure_dir(os.path.join(exe_dir(), "견적서", f"{ymd}_미국_{site}"))
     return os.path.join(folder, f"{ymd}_{site}_{tool}_Quotation.xlsx")
 
 
@@ -487,14 +490,17 @@ def generate_quote_multi(
     state           : QuoteState,
     items           : List[Dict[str, Any]],
     request_rows    : List[Dict[str, Any]],
+    progress_cb     : Optional[Callable[[int, int, str], None]] = None,
 ) -> List[Tuple[Dict[str, Any], str]]:
     """
     국내 견적서 여러 건을 COM 인스턴스 1개로 순서대로 생성.
     반환: [(rd, saved_path), ...]  (실패하면 path="")
+    progress_cb(done, total, basename)
     """
     results: List[Tuple[Dict[str, Any], str]] = []
+    total = len(request_rows)
     with ExcelCOM() as xl:
-        for rd in request_rows:
+        for i, rd in enumerate(request_rows):
             wb = None
             try:
                 wb = xl.open(state.template_path)
@@ -505,9 +511,13 @@ def generate_quote_multi(
                 wb.SaveAs(path)
                 results.append((rd, path))
                 logger.info("멀티 생성: %s", path)
+                if progress_cb:
+                    progress_cb(i + 1, total, os.path.basename(path))
             except Exception as e:
                 logger.error("멀티 생성 실패: %s", e, exc_info=True)
                 results.append((rd, ""))
+                if progress_cb:
+                    progress_cb(i + 1, total, f"[실패] {e}")
             finally:
                 if wb is not None:
                     try:
@@ -521,6 +531,8 @@ def generate_cover(
     template_path   : str,
     folder          : str,
     source_files    : List[str],
+    investor_name   : str = "채승철",
+    progress_cb     : Optional[Callable[[int, int, str], None]] = None,
 ) -> str:
     """
     갑지 생성.
@@ -555,9 +567,12 @@ def generate_cover(
                 pass
 
             write_row = 2
-            for path in clean:
+            total_src = len(clean)
+            for idx, path in enumerate(clean):
                 src = None
                 try:
+                    if progress_cb:
+                        progress_cb(idx + 1, total_src, os.path.basename(path))
                     src = xl.open(path, read_only=True)
                     vals = src.Worksheets(SheetName.REQ_COPY).Range("A2:AA2").Value
                     ws_data.Range(f"A{write_row}:AA{write_row}").Value = vals
@@ -572,6 +587,8 @@ def generate_cover(
                             pass
 
             xl.recalc()
+
+            ws_cover.Range("B7").Value = f"삼성전자 ㈜ / {investor_name} 님"
 
             for r in range(20, 50):
                 try:

@@ -1,0 +1,10 @@
+{
+  "name": "견적자동화",
+  "description": "견적서 작성 및 전자서명 통합 관리 시스템",
+  "version": "1.0.2",
+  "pyz": "app_v1.0.2.pyz",
+  "sha256": "5d9937cc69c13b864eed8a6be6f21ad36785bc279adf0110eff10b334d5472a7",
+  "built_at": "2026-05-03 23:43:37",
+  "entry": "main",
+  "launcher_min": "1.0.0"
+}

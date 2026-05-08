@@ -1353,13 +1353,11 @@ class RackPurchaseRequestPage(QWidget):
         outer.addLayout(title_row)
 
         btn_row = QHBoxLayout()
-        self.btn_generate = QPushButton("요청서 생성")
-        self.btn_clear = QPushButton("입력 초기화")
         self.btn_load_quote = QPushButton("견적의뢰DATA 불러오기")
+        self.btn_generate = QPushButton("요청서 생성")
         for btn, color in [
-            (self.btn_generate, "#FFF176"),
             (self.btn_load_quote, "#BBDEFB"),
-            (self.btn_clear, "#FFCCBC"),
+            (self.btn_generate, "#FFF176"),
         ]:
             btn.setMinimumHeight(42)
             f = btn.font(); f.setPointSize(11); f.setBold(True); btn.setFont(f)
@@ -1393,15 +1391,21 @@ class RackPurchaseRequestPage(QWidget):
         outer.addWidget(self.table, 1)
 
         self.btn_generate.clicked.connect(self._generate_request)
-        self.btn_clear.clicked.connect(self._clear_inputs)
         self.btn_load_quote.clicked.connect(self._load_quote_data)
 
     def _populate_table(self) -> None:
         self._set_item(0, self.COL_LABEL, "", "#DDE2E6", bold=True, editable=False)
         self._set_item(0, self.COL_ITEM, "RACK구매요청서", "#C7EAF4", bold=True, editable=False)
         self._set_item(0, self.COL_REF_ITEM, "Ref.", "#DDE2E6", bold=True, editable=False)
-        self._set_item(0, self.COL_REF_APPLY, "Ref. 적용", "#00B050", bold=True, editable=False, size=18)
-        self._set_item(0, self.COL_REQUEST, "요청서 생성", "#FFFF00", bold=True, editable=False, size=16)
+        self._set_item(0, self.COL_REF_APPLY, "", "#00B050", bold=True, editable=False)
+        self.btn_apply_ref = QPushButton("Ref. 적용")
+        self.btn_apply_ref.setStyleSheet(
+            "QPushButton { background-color: #00B050; color: black; border: none; font-weight: bold; }"
+            "QPushButton:hover { background-color: #009944; }"
+        )
+        self.btn_apply_ref.clicked.connect(self._apply_ref_values)
+        self.table.setCellWidget(0, self.COL_REF_APPLY, self.btn_apply_ref)
+        self._set_item(0, self.COL_REQUEST, "비고", "#FFFFFF", bold=True, editable=False)
 
         for col, text, color in [
             (self.COL_ITEM, "항목", "#C7EAF4"), (self.COL_QTY, "수량", "#C7EAF4"),
@@ -1439,12 +1443,22 @@ class RackPurchaseRequestPage(QWidget):
         item.setFont(font)
         self.table.setItem(row, col, item)
 
-    def _clear_inputs(self) -> None:
-        reply = QMessageBox.question(self, "입력 초기화", "작성 중인 값을 기본 틀로 되돌릴까요?",
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
+    def reset_page(self) -> None:
+        """좌측 하단 초기화 버튼에서 호출되는 현재 페이지 초기화 진입점."""
         self._populate_table()
+
+    def _apply_ref_values(self) -> None:
+        """Ref. 적용 체크 행의 Ref 항목/수량을 좌측 수기입력 영역으로 복사."""
+        applied = 0
+        for row in range(2, self.table.rowCount()):
+            if self._text(row, self.COL_REF_APPLY) != "☑":
+                continue
+            ref_item = self._text(row, self.COL_REF_ITEM)
+            ref_qty = self._text(row, self.COL_REF_QTY)
+            self.table.item(row, self.COL_ITEM).setText(ref_item)
+            self.table.item(row, self.COL_QTY).setText(ref_qty)
+            applied += 1
+        QMessageBox.information(self, "Ref. 적용", f"Ref. 항목/수량 {applied}건을 1~58번 수기입력 칸에 반영했습니다.")
 
     def _load_quote_data(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "견적의뢰DATA 선택", "", "Excel Files (*.xlsx)")
@@ -1518,10 +1532,11 @@ class RackPurchaseRequestPage(QWidget):
                 color = fill_by_col.get(c, "FFFFFF")
                 if r == 0 and c == self.COL_REF_APPLY:
                     color = "00B050"
-                    cell.font = Font(name="Malgun Gothic", bold=True, size=16)
+                    cell.value = "Ref. 적용"
+                    cell.font = Font(name="Malgun Gothic", bold=True)
                 elif r == 0 and c == self.COL_REQUEST:
-                    color = "FFFF00"
-                    cell.font = Font(name="Malgun Gothic", bold=True, size=16)
+                    color = "FFFFFF"
+                    cell.font = Font(name="Malgun Gothic", bold=True)
                 elif r == 0 and c in (self.COL_LABEL, self.COL_REF_ITEM, self.COL_REF_QTY):
                     color = "DDE2E6"
                 elif r == 0 and c in (self.COL_ITEM, self.COL_QTY):

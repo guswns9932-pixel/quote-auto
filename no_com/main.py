@@ -104,12 +104,17 @@ class MainWindow(QMainWindow):
     # ── 초기화 ───────────────────────────────────
     def reset(self) -> None:
         try:
+            cur = self.stack.currentWidget()
+            if cur is not None and hasattr(cur, "reset_page"):
+                cur.reset_page()
+                return
+            idx = self.stack.currentIndex()
             while self.stack.count():
                 w = self.stack.widget(0)
                 self.stack.removeWidget(w)
                 w.deleteLater()
             self._populate_stack()
-            self.stack.setCurrentIndex(0)
+            self.stack.setCurrentIndex(max(0, min(idx, self.stack.count() - 1)))
         except Exception as e:
             QMessageBox.critical(self, "초기화 오류", str(e))
 

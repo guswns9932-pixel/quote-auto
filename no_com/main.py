@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from pages import ESignPage, QuoteBuilderPage
+from pages import ESignPage, QuoteBuilderPage, RackPurchaseRequestPage
 from widgets import tint_button
 
 
@@ -47,7 +47,8 @@ class LeftNav(QWidget):
 
         buttons = [
             ("견적서작성", lambda: stack.setCurrentIndex(0), "#BBDEFB"),   # 연파랑
-            ("전자서명",   lambda: stack.setCurrentIndex(1), "#C8E6C9"),   # 연초록
+            ("RACK구매요청서 작성", lambda: stack.setCurrentIndex(1), "#FFF176"),
+            ("전자서명",   lambda: stack.setCurrentIndex(2), "#C8E6C9"),   # 연초록
         ]
         for label, slot, color in buttons:
             btn = self._nav_btn(label, slot)
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
     # ── 페이지 채우기 ────────────────────────────
     def _populate_stack(self) -> None:
         self.stack.addWidget(QuoteBuilderPage())
+        self.stack.addWidget(RackPurchaseRequestPage())
         self.stack.addWidget(ESignPage())
 
     # ── 초기화 ───────────────────────────────────

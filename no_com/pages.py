@@ -1574,3 +1574,331 @@ class ESignPage(QWidget):
                         it.pixmap().save(buf, "PNG"); dst.insert_image(rect, stream=ba.data())
             finally: src.close()
         final.save(out); final.close()
+
+
+# ══════════════════════════════════════════════════════════════════
+# RACK 구매요청서 작성 페이지
+# ══════════════════════════════════════════════════════════════════
+class RackPurchasePage(QWidget):
+    """RACK 구매요청서 작성 위젯."""
+
+    # (항목명, Ref.적용 체크박스 여부, 요청서 생성 방식)
+    FIELDS: List[Tuple[str, bool, str]] = [
+        ("접수 일자",           False, "작성일"),
+        ("납품 요청",           False, "Main설비반입일 D-28"),
+        ("PR NO.",             False, "견적의뢰DATA"),
+        ("담당자",             False, "수기입력"),
+        ("공정",               False, "견적의뢰DATA"),
+        ("세부 공정",           False, "견적의뢰DATA"),
+        ("라인",               False, "견적의뢰DATA"),
+        ("설 비",              False, "견적의뢰DATA"),
+        ("설비MODEL",          False, "견적의뢰DATA"),
+        ("설비호기",            False, "견적의뢰DATA"),
+        ("PUMP MODEL",         False, "견적의뢰DATA"),
+        ("수량(CH)",            False, "견적의뢰DATA"),
+        ("5D",                 False, "견적의뢰DATA"),
+        ("FSC",                False, "5D 매칭"),
+        ("RACK CH",            True,  "공정+설비+5D 매칭"),
+        ("GATE V/V TYPE",      True,  "공정+설비+5D 매칭"),
+        ("METAL BELLOWS",      True,  "공정+설비+5D 매칭"),
+        ("HOT-N2 TYPE",        True,  "공정+설비+5D 매칭"),
+        ("IMS 중계기",          True,  "공정+설비+5D 매칭"),
+        ("DA / LEP",           True,  "공정+설비+5D 매칭"),
+        ("INVERTER",           True,  "공정+설비+5D 매칭"),
+        ("ANGLE Valve",        True,  "공정+설비+5D 매칭"),
+        ("Option",             True,  "공정+설비+5D 매칭"),
+        ("비 고",              True,  "공정+설비+5D 매칭"),
+        ("간섭여부",            True,  "공정+설비+5D 매칭"),
+        ("Interface Cable",    True,  "공정+설비+5D 매칭"),
+        ("Dual Cable",         True,  "공정+설비+5D 매칭"),
+        ("통신모듈 Cable",      True,  "공정+설비+5D 매칭"),
+        ("3단 모니터링 Cable",  True,  "공정+설비+5D 매칭"),
+    ]
+
+    # 배경색 상수
+    _BG_AUTO   = "#FFF9C4"   # 연노랑 – 자동/DATA 항목
+    _BG_MATCH  = "#E8F5E9"   # 연초록 – 매칭 항목
+    _BG_REF    = "#E3F2FD"   # 연파랑 – Ref. 열
+    _BG_GEN_MATCH = "#FCE4EC"  # 연분홍 – 공정+설비+5D 매칭
+    _BG_GEN_5D    = "#FFF3E0"  # 연주황 – 5D 매칭
+    _BG_GEN_DATE  = "#E8EAF6"  # 연라벤더 – 작성일
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._checkboxes: List[Tuple[int, Optional[QCheckBox]]] = []
+        self._build_ui()
+
+    # ── UI 빌드 ───────────────────────────────────
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
+
+        # 제목
+        title = bold_label("RACK 구매요청서 작성", size=14)
+        title.setAlignment(Qt.AlignCenter)
+        outer.addWidget(title)
+
+        # 상단 버튼 줄
+        outer.addLayout(self._build_top_buttons())
+
+        # 메인 테이블
+        self.table = self._build_table()
+        outer.addWidget(self.table, 1)
+
+        # 상태 레이블
+        self.lbl_status = QLabel("준비")
+        f = self.lbl_status.font(); f.setPointSize(10); self.lbl_status.setFont(f)
+        outer.addWidget(self.lbl_status)
+
+    def _build_top_buttons(self) -> QHBoxLayout:
+        row = QHBoxLayout(); row.setSpacing(10)
+
+        self.btn_load_rack = QPushButton("RACK 파일 로드")
+        self.btn_load_ref  = QPushButton("Ref. 파일 로드")
+        self.btn_apply_ref = QPushButton("Ref. 적용")
+        self.btn_generate  = QPushButton("요청서 생성")
+
+        tint_button(self.btn_load_rack, "#B3E5FC")  # 연하늘
+        tint_button(self.btn_load_ref,  "#C8E6C9")  # 연초록
+        tint_button(self.btn_apply_ref, "#BBDEFB")  # 연파랑
+        tint_button(self.btn_generate,  "#FFF176")  # 연노랑
+
+        for btn in (self.btn_load_rack, self.btn_load_ref,
+                    self.btn_apply_ref, self.btn_generate):
+            btn.setMinimumHeight(44)
+            f = btn.font(); f.setPointSize(11); f.setBold(True); btn.setFont(f)
+            row.addWidget(btn)
+
+        self.btn_load_rack.clicked.connect(self._load_rack_file)
+        self.btn_load_ref.clicked.connect(self._load_ref_file)
+        self.btn_apply_ref.clicked.connect(self._apply_ref)
+        self.btn_generate.clicked.connect(self._generate_request)
+        return row
+
+    def _build_table(self) -> QTableWidget:
+        """항목 / RACK수량 / Ref.항목 / Ref.수량 / Ref.적용 / 요청서생성 6열 테이블."""
+        tbl = QTableWidget(len(self.FIELDS), 6)
+        tbl.setHorizontalHeaderLabels(
+            ["항목", "수량 (RACK)", "Ref. 항목", "Ref. 수량", "Ref. 적용", "요청서 생성"]
+        )
+        tbl.verticalHeader().setVisible(False)
+        tbl.setAlternatingRowColors(False)
+        tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        tbl.setWordWrap(False)
+
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Fixed); tbl.setColumnWidth(4, 72)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+
+        # 헤더 스타일
+        tbl.setStyleSheet(
+            "QHeaderView::section { background-color: #90CAF9; font-weight: bold;"
+            "  border: 1px solid #bbb; padding: 4px; }"
+            "QTableWidget::item:selected { color: black;"
+            "  background: rgba(100,160,220,120); }"
+        )
+
+        self._checkboxes = []
+        for row, (name, has_check, gen_method) in enumerate(self.FIELDS):
+            bg_main = QColor(self._BG_AUTO if row < 14 else self._BG_MATCH)
+            bg_ref  = QColor(self._BG_REF)
+
+            # 0: 항목명 (읽기전용)
+            it0 = QTableWidgetItem(name)
+            it0.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it0.setBackground(QBrush(bg_main))
+            f0 = it0.font(); f0.setBold(True); it0.setFont(f0)
+            tbl.setItem(row, 0, it0)
+
+            # 1: RACK 수량/값 (편집 가능)
+            it1 = QTableWidgetItem("")
+            it1.setBackground(QBrush(bg_main))
+            tbl.setItem(row, 1, it1)
+
+            # 2: Ref. 항목 (읽기전용)
+            it2 = QTableWidgetItem("")
+            it2.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it2.setBackground(QBrush(bg_ref))
+            tbl.setItem(row, 2, it2)
+
+            # 3: Ref. 수량 (읽기전용)
+            it3 = QTableWidgetItem("")
+            it3.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it3.setBackground(QBrush(bg_ref))
+            tbl.setItem(row, 3, it3)
+
+            # 4: Ref. 적용 체크박스 or "-"
+            if has_check:
+                chk_w = QWidget()
+                chk_l = QHBoxLayout(chk_w)
+                chk_l.setContentsMargins(0, 0, 0, 0)
+                chk_l.setAlignment(Qt.AlignCenter)
+                chk = QCheckBox()
+                chk.setChecked(True)
+                chk_l.addWidget(chk)
+                tbl.setCellWidget(row, 4, chk_w)
+                self._checkboxes.append((row, chk))
+            else:
+                it4 = QTableWidgetItem("-")
+                it4.setFlags(Qt.ItemIsEnabled)
+                it4.setTextAlignment(Qt.AlignCenter)
+                it4.setBackground(QBrush(QColor("#EEEEEE")))
+                tbl.setItem(row, 4, it4)
+                self._checkboxes.append((row, None))
+
+            # 5: 요청서 생성 방식 (읽기전용)
+            it5 = QTableWidgetItem(gen_method)
+            it5.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it5.setTextAlignment(Qt.AlignCenter)
+            if "공정+설비+5D" in gen_method:
+                it5.setBackground(QBrush(QColor(self._BG_GEN_MATCH)))
+            elif gen_method == "5D 매칭":
+                it5.setBackground(QBrush(QColor(self._BG_GEN_5D)))
+            elif gen_method == "작성일":
+                it5.setBackground(QBrush(QColor(self._BG_GEN_DATE)))
+            else:
+                it5.setBackground(QBrush(bg_main))
+            tbl.setItem(row, 5, it5)
+
+            tbl.setRowHeight(row, 28)
+
+        return tbl
+
+    # ── 파일 로드 ─────────────────────────────────
+    def _load_rack_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "RACK 구매요청서 Excel 선택", "", "Excel Files (*.xlsx *.xls)"
+        )
+        if not path:
+            return
+        try:
+            wb = load_workbook(path, data_only=True)
+            ws = wb.active
+            # col A = 항목명, col B = 값 (2행부터)
+            data: Dict[str, str] = {}
+            for r in ws.iter_rows(min_row=2, values_only=True):
+                if r[0] is not None:
+                    data[str(r[0]).strip()] = str(r[1]).strip() if r[1] is not None else ""
+            for i, (name, _, _) in enumerate(self.FIELDS):
+                if name in data:
+                    self.table.item(i, 1).setText(data[name])
+            self.lbl_status.setText(f"RACK 파일 로드 완료: {os.path.basename(path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"RACK 파일 로드 실패:\n{e}")
+
+    def _load_ref_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Ref. Excel 선택", "", "Excel Files (*.xlsx *.xls)"
+        )
+        if not path:
+            return
+        try:
+            wb = load_workbook(path, data_only=True)
+            ws = wb.active
+            data: Dict[str, str] = {}
+            for r in ws.iter_rows(min_row=2, values_only=True):
+                if r[0] is not None:
+                    data[str(r[0]).strip()] = str(r[1]).strip() if r[1] is not None else ""
+            matched = 0
+            for i, (name, _, _) in enumerate(self.FIELDS):
+                if name in data:
+                    self.table.item(i, 2).setText(name)
+                    self.table.item(i, 3).setText(data[name])
+                    matched += 1
+            self.lbl_status.setText(
+                f"Ref. 파일 로드 완료: {os.path.basename(path)}  ({matched}개 항목 매칭)"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"Ref. 파일 로드 실패:\n{e}")
+
+    # ── Ref. 적용 ─────────────────────────────────
+    def _apply_ref(self) -> None:
+        applied = 0
+        for row, chk in self._checkboxes:
+            if chk is not None and chk.isChecked():
+                ref_val = self.table.item(row, 3).text()
+                if ref_val:
+                    self.table.item(row, 1).setText(ref_val)
+                    applied += 1
+        self.lbl_status.setText(f"Ref. 적용 완료: {applied}개 항목 반영")
+
+    # ── 요청서 생성 ───────────────────────────────
+    def _generate_request(self) -> None:
+        from openpyxl.styles import Alignment as XlAlign, Border, Font as XlFont
+        from openpyxl.styles import PatternFill, Side
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        default_name = f"RACK구매요청서_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "요청서 저장 위치", default_name, "Excel Files (*.xlsx)"
+        )
+        if not save_path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "RACK구매요청서"
+
+            # ── 헤더 ──
+            headers = ["항목", "수량", "Ref. 항목", "Ref. 수량", "Ref. 적용", "요청서 생성"]
+            hdr_fill = PatternFill("solid", fgColor="4472C4")
+            hdr_font = XlFont(bold=True, color="FFFFFF")
+            thin = Side(style="thin", color="888888")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            for ci, htext in enumerate(headers, start=1):
+                c = ws.cell(1, ci, htext)
+                c.fill = hdr_fill
+                c.font = hdr_font
+                c.alignment = XlAlign(horizontal="center", vertical="center")
+                c.border = border
+
+            # ── 데이터 행 ──
+            for ri, (name, has_check, gen_method) in enumerate(self.FIELDS, start=2):
+                rack_val = self.table.item(ri - 2, 1).text()
+                ref_name = self.table.item(ri - 2, 2).text()
+                ref_val  = self.table.item(ri - 2, 3).text()
+
+                # 자동 채움: 접수 일자
+                if gen_method == "작성일" and not rack_val:
+                    rack_val = today_str
+
+                chk_applied = ""
+                _, chk = self._checkboxes[ri - 2]
+                if chk is not None:
+                    chk_applied = "✓" if chk.isChecked() else ""
+                else:
+                    chk_applied = "-"
+
+                row_vals = [name, rack_val, ref_name, ref_val, chk_applied, gen_method]
+                bg_hex = ("FFF9C4" if ri - 2 < 14 else "E8F5E9")
+                row_fill = PatternFill("solid", fgColor=bg_hex)
+
+                for ci, val in enumerate(row_vals, start=1):
+                    c = ws.cell(ri, ci, val)
+                    c.fill = row_fill
+                    c.alignment = XlAlign(horizontal="left", vertical="center", wrap_text=True)
+                    c.border = border
+                ws.row_dimensions[ri].height = 20
+
+            # ── 열 너비 ──
+            ws.column_dimensions["A"].width = 22
+            ws.column_dimensions["B"].width = 28
+            ws.column_dimensions["C"].width = 22
+            ws.column_dimensions["D"].width = 28
+            ws.column_dimensions["E"].width = 10
+            ws.column_dimensions["F"].width = 22
+            ws.row_dimensions[1].height = 22
+
+            wb.save(save_path)
+            self.lbl_status.setText(f"요청서 생성 완료: {os.path.basename(save_path)}")
+            QMessageBox.information(self, "완료",
+                                    f"RACK 구매요청서 생성 완료!\n{save_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"요청서 생성 실패:\n{e}")

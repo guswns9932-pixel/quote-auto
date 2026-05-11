@@ -12,7 +12,7 @@ import os
 import re
 import shutil
 import traceback
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice, QThread, QTimer, Signal
@@ -1464,17 +1464,21 @@ class RackPurchaseRequestPage(QWidget):
             self._set_item(i, self.COL_QTY, str(i + 28), "#C7EAF4")
             self._set_item(i, self.COL_REF_ITEM, str(i + 57), "#DDE2E6")
             self._set_item(i, self.COL_REF_QTY, str(i + 86), "#DDE2E6")
-            self._set_item(i, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
-            host = centered_checkbox(lambda _state: None)
-            cb = get_checkbox_from_cell(host)
-            if cb:
-                cb.setChecked(i >= 16)
-            self.table.setCellWidget(i, self.COL_REF_APPLY, host)
-            self._set_item(i, self.COL_REQUEST, RACK_REQUEST_REF_NOTES[i - 2], "#FFFFFF")
+            if i <= 15:
+                self._set_item(i, self.COL_REF_APPLY, "-", "#DDE2E6", editable=False)
+            else:
+                self._set_item(i, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
+                host = centered_checkbox(lambda _state: None)
+                cb = get_checkbox_from_cell(host)
+                if cb:
+                    cb.setChecked(True)
+                self.table.setCellWidget(i, self.COL_REF_APPLY, host)
+            self._set_item(i, self.COL_REQUEST, RACK_REQUEST_REF_NOTES[i - 2], "#FFFFFF", editable=False)
 
         manager_row, manager_col = self._slot_pos(4)
         manager = QComboBox()
         manager.setEditable(True)
+        manager.lineEdit().setAlignment(Qt.AlignCenter)
         manager.addItems(RACK_REQUEST_MANAGERS)
         manager.setCurrentText(RACK_REQUEST_MANAGERS[0])
         manager.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
@@ -1526,6 +1530,29 @@ class RackPurchaseRequestPage(QWidget):
         item = self.table.item(row, col)
         if item:
             item.setText(s(value))
+
+    def _reset_slot_values(self, slots: List[int]) -> None:
+        for slot in slots:
+            self._set_slot_value(slot, str(slot))
+
+    def _date_yyyy_mm_dd(self, value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.strftime("%Y-%m-%d")
+        text = s(value)
+        if not text:
+            return ""
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        if "T" in text:
+            text = text.split("T", 1)[0]
+        if " " in text:
+            text = text.split(" ", 1)[0]
+        return text.replace("/", "-")
 
     def _split_line_process(self, value: Any) -> Tuple[str, str]:
         text = s(value)
@@ -1661,6 +1688,8 @@ class RackPurchaseRequestPage(QWidget):
     def _on_request_target_changed(self, row: int) -> None:
         if self._is_request_checked(row):
             self._apply_request_row(row, show_message=False)
+        else:
+            self._reset_slot_values(list(range(1, 15)))
 
     def _apply_request_row(self, row: int, show_message: bool = True) -> None:
         if row < 0 or row >= len(self.request_rows):
@@ -1669,7 +1698,7 @@ class RackPurchaseRequestPage(QWidget):
         line, process = self._split_line_process(rd.get("K"))
         defaults = {
             1: datetime.now().strftime("%Y-%m-%d"),
-            2: rd.get("AA"),
+            2: self._date_yyyy_mm_dd(rd.get("AA")),
             3: rd.get("D"),
             5: process,
             6: rd.get("N"),

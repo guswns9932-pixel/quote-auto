@@ -1484,6 +1484,28 @@ class RackPurchaseRequestPage(QWidget):
         manager.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
         self.table.setCellWidget(manager_row, manager_col, manager)
 
+        # RACK발주 매칭 REF 슬롯 초기화 (rows 16-30 / slots 73-87, 102-116)
+        for row in range(16, 31):
+            item = self.table.item(row, self.COL_REF_ITEM)
+            if item:
+                item.setText("")
+            item = self.table.item(row, self.COL_REF_QTY)
+            if item:
+                item.setText("")
+
+        # slot 80 (row 23, COL_REF_ITEM): 고정 "-"
+        self._set_item(23, self.COL_REF_ITEM, "-", "#DDE2E6", editable=False)
+
+        # slots 110-112 (rows 24-26, COL_REF_QTY): 고정 "-"
+        for row in (24, 25, 26):
+            self._set_item(row, self.COL_REF_QTY, "-", "#DDE2E6", editable=False)
+
+        # slot 83 (row 26, COL_REF_ITEM): 간섭여부 드롭다운
+        combo_83 = QComboBox()
+        combo_83.addItems(["", "간섭없음", "좌측간섭", "우측간섭", "좌/우간섭"])
+        combo_83.setStyleSheet("QComboBox { background-color: #DDE2E6; }")
+        self.table.setCellWidget(26, self.COL_REF_ITEM, combo_83)
+
     def _set_item(self, row: int, col: int, text: str, color: str, *, bold: bool = False,
                   editable: bool = True, size: Optional[int] = None) -> None:
         item = QTableWidgetItem(text)
@@ -1715,8 +1737,91 @@ class RackPurchaseRequestPage(QWidget):
             self._set_slot_value(slot, value)
         self._set_request_checked(row, True)
         self.request_data_table.selectRow(row)
+
+        # RACK발주 시트에서 공정/설비/5D로 매칭 행 조회 후 REF 슬롯 채우기
+        rack_row = self._lookup_rack_row(s(rd.get("K")), s(rd.get("X")), s(rd.get("V")))
+        self._fill_rack_ref_slots(rack_row)
+
         if show_message:
             QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 비고 열에 반영했습니다.")
+
+    def _lookup_rack_row(self, process: str, vendor: str, code_5d: str) -> Optional[List[Any]]:
+        """RACK발주 시트에서 공정/설비/5D가 일치하는 가장 마지막 행을 반환 (역순 탐색)."""
+        rows = self.rack_template_sheets.get("RACK발주", [])
+        proc = s(process)
+        vend = s(vendor)
+        d5   = s(code_5d)
+        if not (proc and vend and d5):
+            return None
+        for row in reversed(rows):
+            if (len(row) > 30
+                    and s(row[22]) == proc   # W열 (0-indexed 22)
+                    and s(row[25]) == vend   # Z열 (0-indexed 25)
+                    and s(row[30]) == d5):   # AE열 (0-indexed 30)
+                return row
+        return None
+
+    def _fill_rack_ref_slots(self, rack_row: Optional[List[Any]]) -> None:
+        """찾은 RACK발주 행의 값으로 REF 슬롯(73~87, 102~116)을 채운다."""
+        def _get(col_0idx: int) -> str:
+            if rack_row is None or col_0idx >= len(rack_row):
+                return ""
+            return s(rack_row[col_0idx])
+
+        # COL_REF_ITEM (rows 16-30, slots 73-87)
+        ref_item_cols = {
+            16: 32,   # AG(33)
+            17: 47,   # AV(48)
+            18: 81,   # CD(82)
+            19: 52,   # BA(53)
+            20: 56,   # BE(57)
+            21: 60,   # BI(61)
+            22: 70,   # BS(71)
+            # 23: slot 80 → 고정 "-"
+            24: 94,   # CQ(95)
+            25: 96,   # CS(97)
+            # 26: slot 83 → 드롭다운 (수동 선택)
+            27: 99,   # CV(100)
+            28: 101,  # CX(102)
+            29: 103,  # CZ(104)
+            30: 105,  # DB(106)
+        }
+        for row, col_0idx in ref_item_cols.items():
+            item = self.table.item(row, self.COL_REF_ITEM)
+            if item:
+                item.setText(_get(col_0idx))
+
+        # slot 80 (row 23): 항상 "-"
+        item = self.table.item(23, self.COL_REF_ITEM)
+        if item:
+            item.setText("-")
+
+        # COL_REF_QTY (rows 16-30, slots 102-116)
+        ref_qty_cols = {
+            16: 33,   # AH(34)
+            17: 48,   # AW(49)
+            18: 82,   # CE(83)
+            19: 53,   # BB(54)
+            20: 57,   # BF(58)
+            21: 61,   # BJ(62)
+            22: 71,   # BT(72)
+            23: 91,   # CN(92)
+            # 24, 25, 26: slots 110-112 → 고정 "-"
+            27: 100,  # CW(101)
+            28: 102,  # CY(103)
+            29: 104,  # DA(105)
+            30: 106,  # DC(107)
+        }
+        for row, col_0idx in ref_qty_cols.items():
+            item = self.table.item(row, self.COL_REF_QTY)
+            if item:
+                item.setText(_get(col_0idx))
+
+        # slots 110-112 (rows 24-26): 항상 "-"
+        for row in (24, 25, 26):
+            item = self.table.item(row, self.COL_REF_QTY)
+            if item:
+                item.setText("-")
 
     def _text(self, row: int, col: int) -> str:
         widget = self.table.cellWidget(row, col)

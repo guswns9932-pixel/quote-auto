@@ -117,7 +117,7 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     의뢰파일 파싱.
     반환: (active_sheet_name, row_dicts)
-    row_dict keys: row_idx, D, E, F, G, H, J, K, V, X, Z
+    row_dict keys: row_idx, D, E, F, G, H, J, K, N, V, X, Y, Z, AA
     """
     wb = load_workbook(path, data_only=True)
     ws = wb.active
@@ -147,9 +147,12 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
             "H": ws.cell(r,  8).value,
             "J": ws.cell(r, 10).value,
             "K": ws.cell(r, 11).value,
+            "N": ws.cell(r, 14).value,
             "V": ws.cell(r, 22).value,
             "X": ws.cell(r, 24).value,
+            "Y": ws.cell(r, 25).value,
             "Z": z,
+            "AA": ws.cell(r, 27).value,
         })
     return sheet_name, rows
 

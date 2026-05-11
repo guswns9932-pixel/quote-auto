@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import traceback
 from datetime import datetime
@@ -77,6 +78,7 @@ RACK_REQUEST_REF_NOTES = [
     "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA",
     "견적의뢰DATA", "5D 매칭",
 ] + ["공정+설비+5D 매칭"] * 15
+RACK_REQUEST_MANAGERS = ["김종균", "박현준", "이기웅", "정상철", "황명선"]
 
 
 
@@ -1462,9 +1464,21 @@ class RackPurchaseRequestPage(QWidget):
             self._set_item(i, self.COL_QTY, str(i + 28), "#C7EAF4")
             self._set_item(i, self.COL_REF_ITEM, str(i + 57), "#DDE2E6")
             self._set_item(i, self.COL_REF_QTY, str(i + 86), "#DDE2E6")
-            ref_apply = "☑" if i >= 16 else "-"
-            self._set_item(i, self.COL_REF_APPLY, ref_apply, "#DDE2E6", editable=False)
+            self._set_item(i, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
+            host = centered_checkbox(lambda _state: None)
+            cb = get_checkbox_from_cell(host)
+            if cb:
+                cb.setChecked(i >= 16)
+            self.table.setCellWidget(i, self.COL_REF_APPLY, host)
             self._set_item(i, self.COL_REQUEST, RACK_REQUEST_REF_NOTES[i - 2], "#FFFFFF")
+
+        manager_row, manager_col = self._slot_pos(4)
+        manager = QComboBox()
+        manager.setEditable(True)
+        manager.addItems(RACK_REQUEST_MANAGERS)
+        manager.setCurrentText(RACK_REQUEST_MANAGERS[0])
+        manager.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
+        self.table.setCellWidget(manager_row, manager_col, manager)
 
     def _set_item(self, row: int, col: int, text: str, color: str, *, bold: bool = False,
                   editable: bool = True, size: Optional[int] = None) -> None:
@@ -1491,11 +1505,60 @@ class RackPurchaseRequestPage(QWidget):
         self.request_data_table.setRowCount(0)
         self._populate_table()
 
+    def _is_ref_apply_checked(self, row: int) -> bool:
+        cb = get_checkbox_from_cell(self.table.cellWidget(row, self.COL_REF_APPLY))
+        return bool(cb and cb.isChecked())
+
+    def _slot_pos(self, slot: int) -> Tuple[int, int]:
+        """이미지 양식의 1~58 입력칸 번호를 테이블 row/col로 변환."""
+        if 1 <= slot <= 29:
+            return slot + 1, self.COL_ITEM
+        if 30 <= slot <= 58:
+            return slot - 28, self.COL_QTY
+        raise ValueError(f"지원하지 않는 RACK 요청서 칸 번호: {slot}")
+
+    def _set_slot_value(self, slot: int, value: Any) -> None:
+        row, col = self._slot_pos(slot)
+        widget = self.table.cellWidget(row, col)
+        if isinstance(widget, QComboBox):
+            widget.setCurrentText(s(value))
+            return
+        item = self.table.item(row, col)
+        if item:
+            item.setText(s(value))
+
+    def _split_line_process(self, value: Any) -> Tuple[str, str]:
+        text = s(value)
+        if "_" not in text:
+            return text, ""
+        line, process = text.split("_", 1)
+        return line, process
+
+    def _pump_model_from_g(self, value: Any) -> str:
+        parts = [part.strip() for part in s(value).split(",") if part.strip()]
+        for idx, part in enumerate(parts):
+            if part.upper() == "LOT" and idx + 1 < len(parts):
+                return parts[idx + 1]
+        return parts[-1] if parts else ""
+
+    def _rack_count_from_v(self, value: Any) -> str:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*RACK", s(value), re.IGNORECASE)
+        return match.group(1) if match else ""
+
+    def _lookup_fsc_from_template(self, value: Any) -> str:
+        key = s(value)
+        if not key:
+            return ""
+        for row in self.rack_template_sheets.get("FSC All List", []):
+            if len(row) >= 8 and s(row[7]) == key:
+                return s(row[1]) if len(row) >= 2 else ""
+        return ""
+
     def _apply_ref_values(self) -> None:
         """Ref. 적용 체크 행의 Ref 항목/수량을 좌측 수기입력 영역으로 복사."""
         applied = 0
         for row in range(2, self.table.rowCount()):
-            if self._text(row, self.COL_REF_APPLY) != "☑":
+            if not self._is_ref_apply_checked(row):
                 continue
             ref_item = self._text(row, self.COL_REF_ITEM)
             ref_qty = self._text(row, self.COL_REF_QTY)
@@ -1603,34 +1666,40 @@ class RackPurchaseRequestPage(QWidget):
         if row < 0 or row >= len(self.request_rows):
             return
         rd = self.request_rows[row]
-        mapping = {
-            "접수 일자": datetime.now().strftime("%Y-%m-%d"),
-            "PR NO.": rd.get("D"),
-            "담당자": rd.get("J"),
-            "공 정": rd.get("K"),
-            "설비호기": rd.get("Z"),
-            "PUMP MODEL": parse_invest_info(rd.get("G")),
-            "수량(CH)": fmt_qty(to_float(rd.get("H"))) if rd.get("H") is not None else "",
-            "5D": rd.get("V"),
-            "FSC": rd.get("X"),
+        line, process = self._split_line_process(rd.get("K"))
+        defaults = {
+            1: datetime.now().strftime("%Y-%m-%d"),
+            2: rd.get("AA"),
+            3: rd.get("D"),
+            5: process,
+            6: rd.get("N"),
+            7: line,
+            8: rd.get("X"),
+            9: rd.get("Y"),
+            10: rd.get("Z"),
+            11: self._pump_model_from_g(rd.get("G")),
+            12: self._rack_count_from_v(rd.get("V")),
+            13: rd.get("V"),
+            14: self._lookup_fsc_from_template(rd.get("V")),
         }
-        for form_row in range(2, self.table.rowCount()):
-            label = self._text(form_row, self.COL_LABEL)
-            if label in mapping and mapping[label] is not None:
-                self.table.item(form_row, self.COL_REQUEST).setText(s(mapping[label]))
+        for slot, value in defaults.items():
+            self._set_slot_value(slot, value)
         self._set_request_checked(row, True)
         self.request_data_table.selectRow(row)
         if show_message:
             QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 비고 열에 반영했습니다.")
 
     def _text(self, row: int, col: int) -> str:
+        widget = self.table.cellWidget(row, col)
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+        cb = get_checkbox_from_cell(widget)
+        if cb:
+            return "☑" if cb.isChecked() else ""
         item = self.table.item(row, col)
         return item.text().strip() if item else ""
 
     def _generate_request(self) -> None:
-        checked_rows = self._checked_request_rows()
-        if checked_rows:
-            self._apply_request_row(checked_rows[0], show_message=False)
         default_name = f"RACK구매요청서_{datetime.now().strftime('%Y%m%d')}.xlsx"
         path, _ = QFileDialog.getSaveFileName(self, "RACK 구매요청서 저장", default_name, "Excel Files (*.xlsx)")
         if not path:

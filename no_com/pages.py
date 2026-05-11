@@ -2208,27 +2208,53 @@ class RackPurchaseRequestPage(QWidget):
 
     # ── xlsx 생성 / 통합양식 업데이트 ──────────────────────────────────────
 
-    def _direct_patch_xlsx(self, path: str) -> None:
-        """drawings 손상·calcChain 오류 없이 xlsx를 직접 수정 (regex 방식)."""
+    @staticmethod
+    def _xlsx_load_and_clean(path: str) -> Tuple[dict, list]:
+        """xlsx ZIP을 읽어 calcChain·externalLinks를 제거한 (files, names) 반환."""
         import zipfile as _zf
-        from openpyxl.utils import get_column_letter as _gcl
-
         with _zf.ZipFile(path, 'r') as zf:
             names = zf.namelist()
             files = {n: zf.read(n) for n in names}
-
-        # calcChain.xml + externalLinks 제거 (오류 방지)
         files.pop('xl/calcChain.xml', None)
         names = [n for n in names if n != 'xl/calcChain.xml']
-        files, names = self._xlsx_remove_external_links(files, names)
+        files, names = RackPurchaseRequestPage._xlsx_remove_external_links(files, names)
+        return files, names
+
+    @staticmethod
+    def _xlsx_save(path: str, files: dict, names: list) -> None:
+        """(files, names)를 xlsx ZIP으로 저장."""
+        import zipfile as _zf
+        with _zf.ZipFile(path, 'w', _zf.ZIP_DEFLATED) as zf:
+            for name in names:
+                if name in files:
+                    zf.writestr(name, files[name])
+
+    @staticmethod
+    def _xlsx_collect_row_styles(sheet_xml: str, row_num: int) -> Dict[str, str]:
+        """sheet XML에서 지정 행의 열별 s 속성(스타일 인덱스) 수집."""
+        styles: Dict[str, str] = {}
+        for row_m in re.finditer(
+                rf'<row\b[^>]*\br="{row_num}"[^>]*>(.*?)</row>', sheet_xml, flags=re.DOTALL):
+            for cell_m in re.finditer(r'<c\b([^>]*)>', row_m.group(1)):
+                attrs = cell_m.group(1)
+                ref_m = re.search(r'\br="([A-Z]+)\d+"', attrs)
+                s_m   = re.search(r'\bs="(\d+)"', attrs)
+                if ref_m and s_m:
+                    styles[ref_m.group(1)] = s_m.group(1)
+            break
+        return styles
+
+    def _direct_patch_xlsx(self, path: str) -> None:
+        """drawings 손상·calcChain 오류 없이 xlsx를 직접 수정 (regex 방식)."""
+        from openpyxl.utils import get_column_letter as _gcl
+
+        files, names = self._xlsx_load_and_clean(path)
 
         wb_bytes   = files.get('xl/workbook.xml', b'')
         rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
         files['xl/workbook.xml'] = self._xlsx_patch_wb_visibility(wb_bytes, 'RACK발주양식')
-
         rack_file = self._xlsx_find_sheet_file(wb_bytes, rels_bytes, 'RACK발주양식')
 
-        # col_1idx → value 맵 (숫자/문자 구분, "-" 포함 기입)
         row2_vals: Dict[int, Any] = {}
         for row, (_, item_col, qty_col) in self._ROW_RACK_MAP.items():
             for col, tbl_col in ((item_col, self.COL_ITEM), (qty_col, self.COL_QTY)):
@@ -2243,10 +2269,9 @@ class RackPurchaseRequestPage(QWidget):
                     v = txt
                 row2_vals[col] = v
 
-        # RACK CH (row 16) → AO열(41)에도 동일 값 기입
         rack_ch = self._text(16, self.COL_ITEM)
         if rack_ch:
-            row2_vals[41] = rack_ch  # AO = 41
+            row2_vals[41] = rack_ch  # RACK CH → AO열(41)에도 기입
 
         if rack_file and rack_file in files:
             try:
@@ -2255,35 +2280,23 @@ class RackPurchaseRequestPage(QWidget):
             except Exception as e:
                 logger.warning("RACK발주양식 시트 패치 실패: %s", e)
 
-        with _zf.ZipFile(path, 'w', _zf.ZIP_DEFLATED) as zf:
-            for name in names:
-                if name in files:
-                    zf.writestr(name, files[name])
+        self._xlsx_save(path, files, names)
 
     def _update_rack_order_sheet(self, generated_path: str) -> None:
         """생성된 파일 RACK발주양식 2행 → 통합양식 RACK발주 시트 빈 행에 추가 (regex 방식)."""
-        import zipfile as _zf
         from openpyxl.utils import get_column_letter as _gcl
 
         try:
-            # 생성 파일 값 읽기 (openpyxl 읽기 전용, 저장 없음 → 안전)
             src_wb  = load_workbook(generated_path, data_only=True)
             ws_src  = src_wb["RACK발주양식"]
-            max_col = ws_src.max_column
-            src_vals = [(c, ws_src.cell(2, c).value) for c in range(1, max_col + 1)]
+            src_vals = [(c, ws_src.cell(2, c).value) for c in range(1, ws_src.max_column + 1)]
             src_wb.close()
 
             col_val_map = {c: v for c, v in src_vals if v is not None}
             if not col_val_map:
                 return
 
-            with _zf.ZipFile(self.rack_template_path, 'r') as zf:
-                names = zf.namelist()
-                files = {n: zf.read(n) for n in names}
-
-            # calcChain.xml 삭제 (수식 재계산 체인 오류 방지)
-            files.pop('xl/calcChain.xml', None)
-            names = [n for n in names if n != 'xl/calcChain.xml']
+            files, names = self._xlsx_load_and_clean(self.rack_template_path)
 
             wb_bytes   = files.get('xl/workbook.xml', b'')
             rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
@@ -2296,38 +2309,22 @@ class RackPurchaseRequestPage(QWidget):
 
             xml = files[rack_file].decode('utf-8', errors='replace')
 
-            # 열 A에 값 있는 마지막 행 → target_row
             last_data_row = 0
-            for row_m in re.finditer(r'<row\b[^>]*\br="(\d+)"[^>]*>(.*?)</row>', xml, flags=re.DOTALL):
-                row_num     = int(row_m.group(1))
+            for row_m in re.finditer(r'<row\b[^>]*\br="(\d+)"[^>]*>(.*?)</row>',
+                                     xml, flags=re.DOTALL):
                 row_content = row_m.group(2)
-                col_c = re.search(r'<c\b[^>]*r="C\d+"[^>]*>(.*?)</c>', row_content, flags=re.DOTALL)
+                col_c = re.search(r'<c\b[^>]*r="C\d+"[^>]*>(.*?)</c>',
+                                  row_content, flags=re.DOTALL)
                 if col_c and re.search(r'<v>[^<]+</v>', col_c.group(1)):
-                    last_data_row = max(last_data_row, row_num)
+                    last_data_row = max(last_data_row, int(row_m.group(1)))
 
             target_row = max(last_data_row + 1, 2)
-            style_row  = target_row - 1
-
-            # 이전 행 셀 스타일(s 속성) 수집
-            prev_styles: Dict[str, str] = {}
-            if style_row >= 1:
-                for row_m in re.finditer(
-                        rf'<row\b[^>]*\br="{style_row}"[^>]*>(.*?)</row>', xml, flags=re.DOTALL):
-                    for cell_m in re.finditer(r'<c\b([^>]*)>', row_m.group(1)):
-                        attrs = cell_m.group(1)
-                        ref_m = re.search(r'\br="([A-Z]+)\d+"', attrs)
-                        s_m   = re.search(r'\bs="(\d+)"', attrs)
-                        if ref_m and s_m:
-                            prev_styles[ref_m.group(1)] = s_m.group(1)
-                    break
+            prev_styles = self._xlsx_collect_row_styles(xml, target_row - 1)
 
             files[rack_file] = self._xlsx_patch_sheet_row(
                 files[rack_file], target_row, col_val_map, _gcl, prev_styles)
 
-            with _zf.ZipFile(self.rack_template_path, 'w', _zf.ZIP_DEFLATED) as zf:
-                for name in names:
-                    if name in files:
-                        zf.writestr(name, files[name])
+            self._xlsx_save(self.rack_template_path, files, names)
 
         except Exception as e:
             logger.error("RACK발주 시트 업데이트 실패: %s", e, exc_info=True)
@@ -2336,7 +2333,6 @@ class RackPurchaseRequestPage(QWidget):
 
     def _generate_approval_doc(self) -> None:
         """결재상신용: 여러 요청서 RACK발주양식 2행을 합쳐 A·B열 삭제 후 저장 (zipfile 방식)."""
-        import zipfile as _zf
         from openpyxl.utils import get_column_letter as _gcl
 
         start_dir = self._last_generated_folder or exe_dir()
@@ -2358,11 +2354,10 @@ class RackPurchaseRequestPage(QWidget):
             process = "_".join(parts[1:]) if len(parts) > 1 else base
 
         today    = datetime.now().strftime("%Y-%m-%d")
-        out_name = f"{process} Rack 구매요청서 ({today}).xlsx"
-        out_path = unique_path(os.path.join(folder, out_name))
+        out_path = unique_path(os.path.join(
+            folder, f"{process} Rack 구매요청서 ({today}).xlsx"))
 
         try:
-            # 각 파일의 RACK발주양식 row 2 값 읽기 (openpyxl data_only, 저장 없음)
             all_row_vals: List[Dict[int, Any]] = []
             for path in paths:
                 try:
@@ -2377,17 +2372,8 @@ class RackPurchaseRequestPage(QWidget):
                     logger.warning("결재상신용 파일 읽기 실패 (%s): %s", path, e)
                     all_row_vals.append({})
 
-            # 첫 번째 파일을 베이스로 복사
             shutil.copy2(paths[0], out_path)
-
-            with _zf.ZipFile(out_path, 'r') as zf:
-                names = zf.namelist()
-                files = {n: zf.read(n) for n in names}
-
-            # calcChain + externalLinks 제거
-            files.pop('xl/calcChain.xml', None)
-            names = [n for n in names if n != 'xl/calcChain.xml']
-            files, names = self._xlsx_remove_external_links(files, names)
+            files, names = self._xlsx_load_and_clean(out_path)
 
             wb_bytes   = files.get('xl/workbook.xml', b'')
             rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
@@ -2397,19 +2383,9 @@ class RackPurchaseRequestPage(QWidget):
                 QMessageBox.critical(self, "오류", "RACK발주양식 시트를 찾을 수 없습니다.")
                 return
 
-            # row 2 스타일 수집 (나머지 행에 동일 스타일 적용)
-            sheet_xml = files[rack_file].decode('utf-8', errors='replace')
-            row2_styles: Dict[str, str] = {}
-            for row_m in re.finditer(r'<row\b[^>]*\br="2"[^>]*>(.*?)</row>', sheet_xml, flags=re.DOTALL):
-                for cell_m in re.finditer(r'<c\b([^>]*)>', row_m.group(1)):
-                    attrs = cell_m.group(1)
-                    ref_m = re.search(r'\br="([A-Z]+)\d+"', attrs)
-                    s_m   = re.search(r'\bs="(\d+)"', attrs)
-                    if ref_m and s_m:
-                        row2_styles[ref_m.group(1)] = s_m.group(1)
-                break
+            row2_styles = self._xlsx_collect_row_styles(
+                files[rack_file].decode('utf-8', errors='replace'), 2)
 
-            # paths[1:]의 데이터를 row 3, 4, ... 에 추가
             for i, rv in enumerate(all_row_vals[1:], start=3):
                 try:
                     files[rack_file] = self._xlsx_patch_sheet_row(
@@ -2417,13 +2393,8 @@ class RackPurchaseRequestPage(QWidget):
                 except Exception as e:
                     logger.warning("결재상신용 행 추가 실패 (row=%d): %s", i, e)
 
-            # A열·B열 삭제 후 열 왼쪽 이동
             files[rack_file] = self._xlsx_delete_leading_cols(files[rack_file], 2)
-
-            with _zf.ZipFile(out_path, 'w', _zf.ZIP_DEFLATED) as zf:
-                for name in names:
-                    if name in files:
-                        zf.writestr(name, files[name])
+            self._xlsx_save(out_path, files, names)
 
             QMessageBox.information(self, "완료",
                 f"결재상신용 생성 완료\n{os.path.basename(out_path)}")

@@ -1739,26 +1739,46 @@ class RackPurchaseRequestPage(QWidget):
         self.request_data_table.selectRow(row)
 
         # RACK발주 시트에서 공정/설비/5D로 매칭 행 조회 후 REF 슬롯 채우기
-        rack_row = self._lookup_rack_row(s(rd.get("K")), s(rd.get("X")), s(rd.get("V")))
+        # 공정: K열을 "_"로 split한 process 부분 사용 (라인_공정 → 공정만)
+        rack_process = process
+        rack_vendor  = s(rd.get("X"))
+        rack_5d      = s(rd.get("V"))
+        rack_row = self._lookup_rack_row(rack_process, rack_vendor, rack_5d)
         self._fill_rack_ref_slots(rack_row)
 
         if show_message:
-            QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 비고 열에 반영했습니다.")
+            if rack_row is not None:
+                msg = f"{row + 1}번째 의뢰파일DATA를 반영했습니다.\n[RACK발주 매칭 성공] 공정={rack_process} / 설비={rack_vendor} / 5D={rack_5d}"
+            else:
+                msg = (f"{row + 1}번째 의뢰파일DATA를 반영했습니다.\n"
+                       f"[RACK발주 매칭 없음] 공정={rack_process} / 설비={rack_vendor} / 5D={rack_5d}\n"
+                       f"통합양식 RACK발주 시트에서 일치하는 행이 없습니다.")
+            QMessageBox.information(self, "의뢰파일DATA 적용", msg)
 
     def _lookup_rack_row(self, process: str, vendor: str, code_5d: str) -> Optional[List[Any]]:
-        """RACK발주 시트에서 공정/설비/5D가 일치하는 가장 마지막 행을 반환 (역순 탐색)."""
+        """RACK발주 시트에서 공정/설비/5D가 일치하는 가장 마지막 행을 반환 (역순 탐색).
+
+        비교 시 앞뒤 공백 제거 + 대소문자 무시.
+        W열(col 23) = 공정, Z열(col 26) = 설비, AE열(col 31) = 5D.
+        """
         rows = self.rack_template_sheets.get("RACK발주", [])
-        proc = s(process)
-        vend = s(vendor)
-        d5   = s(code_5d)
+        proc = s(process).upper().replace(" ", "")
+        vend = s(vendor).upper().replace(" ", "")
+        d5   = s(code_5d).upper().replace(" ", "")
         if not (proc and vend and d5):
+            logger.debug("RACK발주 조회 스킵: 공정=%r 설비=%r 5D=%r", process, vendor, code_5d)
             return None
+        logger.debug("RACK발주 조회: 공정=%r 설비=%r 5D=%r (총 %d행)", proc, vend, d5, len(rows))
         for row in reversed(rows):
-            if (len(row) > 30
-                    and s(row[22]) == proc   # W열 (0-indexed 22)
-                    and s(row[25]) == vend   # Z열 (0-indexed 25)
-                    and s(row[30]) == d5):   # AE열 (0-indexed 30)
+            if len(row) <= 30:
+                continue
+            w  = s(row[22]).upper().replace(" ", "")   # W열
+            z  = s(row[25]).upper().replace(" ", "")   # Z열
+            ae = s(row[30]).upper().replace(" ", "")   # AE열
+            if w == proc and z == vend and ae == d5:
+                logger.debug("RACK발주 매칭 성공: W=%r Z=%r AE=%r", row[22], row[25], row[30])
                 return row
+        logger.debug("RACK발주 매칭 없음: 공정=%r 설비=%r 5D=%r", proc, vend, d5)
         return None
 
     def _fill_rack_ref_slots(self, rack_row: Optional[List[Any]]) -> None:

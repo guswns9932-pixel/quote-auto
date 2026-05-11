@@ -1444,7 +1444,7 @@ class RackPurchaseRequestPage(QWidget):
         )
         self.btn_apply_ref.clicked.connect(self._apply_ref_values)
         self.table.setCellWidget(0, self.COL_REF_APPLY, self.btn_apply_ref)
-        self._set_item(0, self.COL_REQUEST, "요청서 생성", "#FFFF00", bold=True, editable=False, size=16)
+        self._set_item(0, self.COL_REQUEST, "비고", "#FFFFFF", bold=True, editable=False)
 
         for col, text, color in [
             (self.COL_ITEM, "항목", "#C7EAF4"), (self.COL_QTY, "수량", "#C7EAF4"),
@@ -1621,7 +1621,7 @@ class RackPurchaseRequestPage(QWidget):
         self._set_request_checked(row, True)
         self.request_data_table.selectRow(row)
         if show_message:
-            QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 요청서 생성 열에 반영했습니다.")
+            QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 비고 열에 반영했습니다.")
 
     def _text(self, row: int, col: int) -> str:
         item = self.table.item(row, col)
@@ -1671,8 +1671,8 @@ class RackPurchaseRequestPage(QWidget):
                     cell.value = "Ref. 적용"
                     cell.font = Font(name="Malgun Gothic", bold=True)
                 elif r == 0 and c == self.COL_REQUEST:
-                    color = "FFFF00"
-                    cell.font = Font(name="Malgun Gothic", bold=True, size=16)
+                    color = "FFFFFF"
+                    cell.font = Font(name="Malgun Gothic", bold=True)
                 elif r == 0 and c in (self.COL_LABEL, self.COL_REF_ITEM, self.COL_REF_QTY):
                     color = "DDE2E6"
                 elif r == 0 and c in (self.COL_ITEM, self.COL_QTY):

@@ -1416,9 +1416,9 @@ class RackPurchaseRequestPage(QWidget):
         title = bold_label("의뢰파일DATA", size=11)
         title.setStyleSheet("color:#B71C1C; border:none;")
         v.addWidget(title)
-        self.request_data_table = QTableWidget(0, 8)
+        self.request_data_table = QTableWidget(0, 9)
         self.request_data_table.setHorizontalHeaderLabels([
-            "PR NO.", "항번", "투자정보", "수량(CH)", "공정", "5D", "FSC", "설비호기"
+            "선택", "PR NO.", "항번", "투자정보", "수량(CH)", "공정", "5D", "FSC", "설비호기"
         ])
         self.request_data_table.verticalHeader().setVisible(False)
         self.request_data_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1427,10 +1427,7 @@ class RackPurchaseRequestPage(QWidget):
         self.request_data_table.setStyleSheet("QTableWidget { border: 1px solid #D32F2F; }")
         self.request_data_table.cellDoubleClicked.connect(lambda row, _col: self._apply_request_row(row))
         h = self.request_data_table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2, QHeaderView.Stretch)
-        for col in range(3, 8):
+        for col in range(self.request_data_table.columnCount()):
             h.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         v.addWidget(self.request_data_table, 1)
         return frame
@@ -1447,7 +1444,7 @@ class RackPurchaseRequestPage(QWidget):
         )
         self.btn_apply_ref.clicked.connect(self._apply_ref_values)
         self.table.setCellWidget(0, self.COL_REF_APPLY, self.btn_apply_ref)
-        self._set_item(0, self.COL_REQUEST, "비고", "#FFFFFF", bold=True, editable=False)
+        self._set_item(0, self.COL_REQUEST, "요청서 생성", "#FFFF00", bold=True, editable=False, size=16)
 
         for col, text, color in [
             (self.COL_ITEM, "항목", "#C7EAF4"), (self.COL_QTY, "수량", "#C7EAF4"),
@@ -1560,6 +1557,9 @@ class RackPurchaseRequestPage(QWidget):
         self.request_data_table.setRowCount(0)
         for i, rd in enumerate(rows):
             self.request_data_table.insertRow(i)
+            self.request_data_table.setCellWidget(
+                i, 0, centered_checkbox(lambda _state, _r=i: self._on_request_target_changed(_r))
+            )
             values = [
                 s(rd.get("D")),
                 s(rd.get("E")),
@@ -1570,13 +1570,34 @@ class RackPurchaseRequestPage(QWidget):
                 s(rd.get("X")),
                 s(rd.get("Z")),
             ]
-            for col, value in enumerate(values):
+            for col, value in enumerate(values, start=1):
                 item = QTableWidgetItem(value)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.request_data_table.setItem(i, col, item)
+            self.request_data_table.resizeRowToContents(i)
+        self.request_data_table.resizeColumnsToContents()
         if rows:
+            self._set_request_checked(0, True)
             self.request_data_table.selectRow(0)
+
+    def _set_request_checked(self, row: int, checked: bool) -> None:
+        cb = get_checkbox_from_cell(self.request_data_table.cellWidget(row, 0))
+        if cb:
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+
+    def _is_request_checked(self, row: int) -> bool:
+        cb = get_checkbox_from_cell(self.request_data_table.cellWidget(row, 0))
+        return bool(cb and cb.isChecked())
+
+    def _checked_request_rows(self) -> List[int]:
+        return [r for r in range(self.request_data_table.rowCount()) if self._is_request_checked(r)]
+
+    def _on_request_target_changed(self, row: int) -> None:
+        if self._is_request_checked(row):
+            self._apply_request_row(row, show_message=False)
 
     def _apply_request_row(self, row: int, show_message: bool = True) -> None:
         if row < 0 or row >= len(self.request_rows):
@@ -1597,15 +1618,19 @@ class RackPurchaseRequestPage(QWidget):
             label = self._text(form_row, self.COL_LABEL)
             if label in mapping and mapping[label] is not None:
                 self.table.item(form_row, self.COL_REQUEST).setText(s(mapping[label]))
+        self._set_request_checked(row, True)
         self.request_data_table.selectRow(row)
         if show_message:
-            QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 비고 열에 반영했습니다.")
+            QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 요청서 생성 열에 반영했습니다.")
 
     def _text(self, row: int, col: int) -> str:
         item = self.table.item(row, col)
         return item.text().strip() if item else ""
 
     def _generate_request(self) -> None:
+        checked_rows = self._checked_request_rows()
+        if checked_rows:
+            self._apply_request_row(checked_rows[0], show_message=False)
         default_name = f"RACK구매요청서_{datetime.now().strftime('%Y%m%d')}.xlsx"
         path, _ = QFileDialog.getSaveFileName(self, "RACK 구매요청서 저장", default_name, "Excel Files (*.xlsx)")
         if not path:
@@ -1646,8 +1671,8 @@ class RackPurchaseRequestPage(QWidget):
                     cell.value = "Ref. 적용"
                     cell.font = Font(name="Malgun Gothic", bold=True)
                 elif r == 0 and c == self.COL_REQUEST:
-                    color = "FFFFFF"
-                    cell.font = Font(name="Malgun Gothic", bold=True)
+                    color = "FFFF00"
+                    cell.font = Font(name="Malgun Gothic", bold=True, size=16)
                 elif r == 0 and c in (self.COL_LABEL, self.COL_REF_ITEM, self.COL_REF_QTY):
                     color = "DDE2E6"
                 elif r == 0 and c in (self.COL_ITEM, self.COL_QTY):

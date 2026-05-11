@@ -1919,7 +1919,7 @@ class RackPurchaseRequestPage(QWidget):
             8:  24,  # Y열  (라인)
             9:  25,  # Z열  (설 비)
             10: 26,  # AA열 (설비MODEL)
-            # 11: 설비호기 → 미지정
+            11: 27,  # AB열 (설비호기)
             12: 28,  # AC열 (PUMP MODEL)
             13: 29,  # AD열 (수량(CH))
             14: 30,  # AE열 (5D)
@@ -1942,7 +1942,7 @@ class RackPurchaseRequestPage(QWidget):
             # 23: slot 80 → 고정 "-"
             24: 94,   # CQ(95)
             25: 96,   # CS(97)
-            # 26: slot 83 → 드롭다운 (수동 선택)
+            # 26: 간섭여부 → QComboBox (CT열)
             27: 99,   # CV(100)
             28: 101,  # CX(102)
             29: 103,  # CZ(104)
@@ -1957,6 +1957,11 @@ class RackPurchaseRequestPage(QWidget):
         item = self.table.item(23, self.COL_REF_ITEM)
         if item:
             item.setText("-")
+
+        # row 26 (간섭여부) COL_REF_ITEM: QComboBox → CT열(0-indexed 97)
+        combo_26 = self.table.cellWidget(26, self.COL_REF_ITEM)
+        if isinstance(combo_26, QComboBox):
+            combo_26.setCurrentText(_get(97))
 
         # COL_REF_QTY (rows 16-30, slots 102-116)
         ref_qty_cols = {
@@ -1995,9 +2000,24 @@ class RackPurchaseRequestPage(QWidget):
         item = self.table.item(row, col)
         return item.text().strip() if item else ""
 
+    @staticmethod
+    def _is_file_writable(path: str) -> bool:
+        """파일이 쓰기 가능한지 확인 (다른 프로세스에 잠겨 있으면 False)."""
+        try:
+            with open(path, 'r+b'):
+                return True
+        except (IOError, PermissionError, OSError):
+            return False
+
     def _generate_request(self) -> None:
         if not self.rack_template_path:
             QMessageBox.warning(self, "오류", "통합양식을 먼저 불러오세요.")
+            return
+
+        if not self._is_file_writable(self.rack_template_path):
+            QMessageBox.warning(self, "파일 잠금",
+                "통합양식 파일이 다른 프로그램(Excel)에서 열려 있어 수정할 수 없습니다.\n"
+                "Excel에서 통합양식을 닫은 후 다시 시도해 주세요.")
             return
 
         ymd      = datetime.now().strftime("%y%m%d")
@@ -2023,61 +2043,145 @@ class RackPurchaseRequestPage(QWidget):
             QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류:\n{e}")
             logger.error("요청서 생성 오류", exc_info=True)
 
+    # ── xlsx 직접 조작 helper (ET 미사용, regex/raw bytes) ────────────────
+
+    @staticmethod
+    def _xlsx_find_sheet_file(wb_bytes: bytes, rels_bytes: bytes, sheet_name: str) -> Optional[str]:
+        """workbook.xml / .rels에서 시트 파일의 zip 내부 경로 반환."""
+        wb_str   = wb_bytes.decode('utf-8', errors='replace')
+        rels_str = rels_bytes.decode('utf-8', errors='replace')
+        rid = None
+        for m in re.finditer(r'<sheet\b([^>]*/?>)', wb_str):
+            attrs = m.group(1)
+            nm_m  = re.search(r'\bname="([^"]*)"', attrs)
+            rid_m = re.search(r'\br:id="([^"]*)"', attrs)
+            if nm_m and rid_m and nm_m.group(1) == sheet_name:
+                rid = rid_m.group(1)
+                break
+        if not rid:
+            return None
+        for m in re.finditer(r'<Relationship\b([^>]*/?>)', rels_str):
+            attrs = m.group(1)
+            id_m  = re.search(r'\bId="([^"]*)"', attrs)
+            tgt_m = re.search(r'\bTarget="([^"]*)"', attrs)
+            if id_m and id_m.group(1) == rid and tgt_m:
+                tgt = tgt_m.group(1).lstrip('/')
+                return tgt if tgt.startswith('xl/') else f'xl/{tgt}'
+        return None
+
+    @staticmethod
+    def _xlsx_patch_wb_visibility(wb_bytes: bytes, visible_sheet: str) -> bytes:
+        """workbook.xml에서 visible_sheet 외 모든 시트 veryHidden 처리."""
+        xml = wb_bytes.decode('utf-8', errors='replace')
+
+        def repl(m: re.Match) -> str:
+            tag = m.group(0)
+            nm_m = re.search(r'\bname="([^"]*)"', tag)
+            nm = nm_m.group(1) if nm_m else ''
+            tag = re.sub(r'\s+state=(?:"[^"]*"|\'[^\']*\')', '', tag)
+            if nm and nm != visible_sheet:
+                tag = re.sub(r'(\s*/?>)$', r' state="veryHidden"\1', tag)
+            return tag
+
+        xml = re.sub(r'<sheet\b[^>]*/>', repl, xml)
+
+        if 'fullCalcOnLoad' not in xml:
+            if '<calcPr' in xml:
+                xml = re.sub(r'(<calcPr\b[^/]*?)(/?>)',
+                             lambda m: m.group(1) + ' fullCalcOnLoad="1"' + m.group(2), xml)
+            else:
+                xml = xml.replace('</workbook>', '<calcPr fullCalcOnLoad="1"/></workbook>', 1)
+
+        return xml.encode('utf-8')
+
+    @staticmethod
+    def _xlsx_patch_sheet_row(sheet_bytes: bytes, row_num: int,
+                               col_vals: Dict[int, Any], get_col_letter,
+                               cell_styles: Optional[Dict[str, str]] = None) -> bytes:
+        """sheet XML 특정 행을 raw 문자열로 삽입/교체 (ET 미사용)."""
+        xml = sheet_bytes.decode('utf-8', errors='replace')
+        if not col_vals:
+            return sheet_bytes
+
+        styles = cell_styles or {}
+
+        def _col_1idx(letters: str) -> int:
+            n = 0
+            for ch in letters:
+                n = n * 26 + (ord(ch) - 64)
+            return n
+
+        all_cols = set(col_vals.keys()) | {_col_1idx(l) for l in styles}
+        cells_xml = ''
+        for col_idx in sorted(all_cols):
+            col_l = get_col_letter(col_idx)
+            ref   = f'{col_l}{row_num}'
+            s_attr = f' s="{styles[col_l]}"' if col_l in styles else ''
+            val   = col_vals.get(col_idx)
+            if val is None:
+                cells_xml += f'<c r="{ref}"{s_attr}/>'
+            elif isinstance(val, (int, float)):
+                num_s = str(int(val)) if float(val) == int(val) else str(val)
+                cells_xml += f'<c r="{ref}"{s_attr}><v>{num_s}</v></c>'
+            elif isinstance(val, datetime):
+                serial = (val.date() - date(1899, 12, 30)).days
+                cells_xml += f'<c r="{ref}"{s_attr}><v>{serial}</v></c>'
+            elif isinstance(val, date):
+                serial = (val - date(1899, 12, 30)).days
+                cells_xml += f'<c r="{ref}"{s_attr}><v>{serial}</v></c>'
+            else:
+                sv = (str(val).replace('&', '&amp;')
+                      .replace('<', '&lt;').replace('>', '&gt;'))
+                if sv:
+                    cells_xml += f'<c r="{ref}"{s_attr} t="inlineStr"><is><t>{sv}</t></is></c>'
+                else:
+                    cells_xml += f'<c r="{ref}"{s_attr}/>'
+
+        row_xml = f'<row r="{row_num}">' + cells_xml + '</row>'
+        rn = str(row_num)
+
+        # 기존 같은 번호의 행 제거
+        xml = re.sub(rf'<row\b[^>]*\br="{rn}"[^>]*/>', '', xml)
+        xml = re.sub(rf'<row\b[^>]*\br="{rn}"[^>]*>.*?</row>', '', xml, flags=re.DOTALL)
+
+        # 삽입 위치: row_num보다 큰 첫 번째 행 앞, 없으면 </sheetData> 앞
+        insert_pos: Optional[int] = None
+        for mm in re.finditer(r'<row\b[^>]*\br="(\d+)"', xml):
+            if int(mm.group(1)) > row_num:
+                insert_pos = mm.start()
+                break
+
+        if insert_pos is not None:
+            xml = xml[:insert_pos] + row_xml + xml[insert_pos:]
+        elif '</sheetData>' in xml:
+            xml = xml.replace('</sheetData>', row_xml + '</sheetData>', 1)
+        else:
+            xml = re.sub(r'<sheetData\s*/>', f'<sheetData>{row_xml}</sheetData>', xml, count=1)
+
+        return xml.encode('utf-8')
+
+    # ── xlsx 생성 / 통합양식 업데이트 ──────────────────────────────────────
+
     def _direct_patch_xlsx(self, path: str) -> None:
-        """drawings 손상 없이 xlsx를 zipfile로 직접 수정.
-
-        - RACK발주양식 row 2에 테이블 값 기입 (숫자 → 숫자 타입)
-        - RACK발주양식 외 모든 시트 veryHidden
-        - fullCalcOnLoad 설정
-        """
+        """drawings 손상·calcChain 오류 없이 xlsx를 직접 수정 (regex 방식)."""
         import zipfile as _zf
-        from xml.etree import ElementTree as _ET
         from openpyxl.utils import get_column_letter as _gcl
-
-        _WS_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-        _R_NS  = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-        for _pfx, _uri in [
-            ('',     _WS_NS),
-            ('r',    _R_NS),
-            ('mc',   'http://schemas.openxmlformats.org/markup-compatibility/2006'),
-            ('x14ac','http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac'),
-            ('xr',   'http://schemas.microsoft.com/office/spreadsheetml/2014/revision'),
-            ('xr2',  'http://schemas.microsoft.com/office/spreadsheetml/2015/revision2'),
-            ('xr3',  'http://schemas.microsoft.com/office/spreadsheetml/2016/revision3'),
-        ]:
-            _ET.register_namespace(_pfx, _uri)
 
         with _zf.ZipFile(path, 'r') as zf:
             names = zf.namelist()
             files = {n: zf.read(n) for n in names}
 
-        # workbook.xml 파싱
-        wb_root   = _ET.fromstring(files['xl/workbook.xml'])
-        rels_root = _ET.fromstring(files.get('xl/_rels/workbook.xml.rels', b'<Relationships/>'))
-        rid_map   = {r.get('Id', ''): r.get('Target', '') for r in rels_root}
+        # calcChain.xml 삭제 (수식 재계산 체인 오류 방지)
+        files.pop('xl/calcChain.xml', None)
+        names = [n for n in names if n != 'xl/calcChain.xml']
 
-        # 시트 visibility 설정 + RACK발주양식 파일 경로 확인
-        rack_file = None
-        sheets_el = wb_root.find(f'{{{_WS_NS}}}sheets')
-        if sheets_el is not None:
-            for sh in sheets_el:
-                nm  = sh.get('name', '')
-                rid = sh.get(f'{{{_R_NS}}}id', '')
-                tgt = rid_map.get(rid, '')
-                if nm == 'RACK발주양식':
-                    sh.attrib.pop('state', None)
-                    rack_file = tgt if tgt.startswith('xl/') else f'xl/{tgt}'
-                else:
-                    sh.set('state', 'veryHidden')
+        wb_bytes   = files.get('xl/workbook.xml', b'')
+        rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
+        files['xl/workbook.xml'] = self._xlsx_patch_wb_visibility(wb_bytes, 'RACK발주양식')
 
-        # fullCalcOnLoad 설정
-        calc_pr = wb_root.find(f'{{{_WS_NS}}}calcPr')
-        if calc_pr is None:
-            calc_pr = _ET.SubElement(wb_root, f'{{{_WS_NS}}}calcPr')
-        calc_pr.set('fullCalcOnLoad', '1')
-        files['xl/workbook.xml'] = _ET.tostring(wb_root, encoding='utf-8', xml_declaration=True)
+        rack_file = self._xlsx_find_sheet_file(wb_bytes, rels_bytes, 'RACK발주양식')
 
-        # col_1idx → value 맵 구성 (숫자는 float/int, 나머지 str)
+        # col_1idx → value 맵 (숫자/문자 구분)
         row2_vals: Dict[int, Any] = {}
         for row, (_, item_col, qty_col) in self._ROW_RACK_MAP.items():
             for col, tbl_col in ((item_col, self.COL_ITEM), (qty_col, self.COL_QTY)):
@@ -2092,173 +2196,86 @@ class RackPurchaseRequestPage(QWidget):
                     v = txt
                 row2_vals[col] = v
 
-        # RACK발주양식 sheet row 2 수정
         if rack_file and rack_file in files:
             try:
-                ws_root = _ET.fromstring(files[rack_file])
-                sdata   = ws_root.find(f'{{{_WS_NS}}}sheetData')
-                if sdata is not None:
-                    row2_el = None
-                    for r_el in sdata:
-                        if r_el.get('r') == '2':
-                            row2_el = r_el
-                            break
-                    if row2_el is None:
-                        row2_el = _ET.SubElement(sdata, f'{{{_WS_NS}}}row')
-                        row2_el.set('r', '2')
-
-                    existing = {c.get('r', ''): c for c in list(row2_el)}
-                    for c in list(row2_el):
-                        row2_el.remove(c)
-
-                    new_refs = {f'{_gcl(col)}2': val for col, val in row2_vals.items()}
-                    all_refs = set(existing.keys()) | set(new_refs.keys())
-
-                    def _rkey(ref: str):
-                        m = re.match(r'([A-Z]+)(\d+)', ref)
-                        return (len(m.group(1)), m.group(1), int(m.group(2))) if m else (0, '', 0)
-
-                    for ref in sorted(all_refs, key=_rkey):
-                        if ref in new_refs:
-                            val = new_refs[ref]
-                            c_el = _ET.SubElement(row2_el, f'{{{_WS_NS}}}c')
-                            c_el.set('r', ref)
-                            if isinstance(val, (int, float)):
-                                _ET.SubElement(c_el, f'{{{_WS_NS}}}v').text = str(val)
-                            else:
-                                c_el.set('t', 'inlineStr')
-                                t_el = _ET.SubElement(
-                                    _ET.SubElement(c_el, f'{{{_WS_NS}}}is'),
-                                    f'{{{_WS_NS}}}t')
-                                t_el.text = str(val)
-                        elif ref in existing:
-                            row2_el.append(existing[ref])
-
-                files[rack_file] = _ET.tostring(ws_root, encoding='utf-8', xml_declaration=True)
+                files[rack_file] = self._xlsx_patch_sheet_row(
+                    files[rack_file], 2, row2_vals, _gcl)
             except Exception as e:
                 logger.warning("RACK발주양식 시트 패치 실패: %s", e)
 
-        # 모든 파일 다시 기록 (drawings 그대로 보존)
         with _zf.ZipFile(path, 'w', _zf.ZIP_DEFLATED) as zf:
             for name in names:
-                zf.writestr(name, files[name])
+                if name in files:
+                    zf.writestr(name, files[name])
 
     def _update_rack_order_sheet(self, generated_path: str) -> None:
-        """생성된 파일 RACK발주양식 2행 → 통합양식 RACK발주 시트 빈 행에 추가 (zipfile 방식으로 drawings 보존)."""
+        """생성된 파일 RACK발주양식 2행 → 통합양식 RACK발주 시트 빈 행에 추가 (regex 방식)."""
         import zipfile as _zf
-        from xml.etree import ElementTree as _ET
         from openpyxl.utils import get_column_letter as _gcl
 
         try:
-            # 생성 파일에서 값 읽기 (openpyxl 읽기 전용, 저장 없음 → 안전)
+            # 생성 파일 값 읽기 (openpyxl 읽기 전용, 저장 없음 → 안전)
             src_wb  = load_workbook(generated_path, data_only=True)
             ws_src  = src_wb["RACK발주양식"]
             max_col = ws_src.max_column
             src_vals = [(c, ws_src.cell(2, c).value) for c in range(1, max_col + 1)]
             src_wb.close()
 
-            _WS_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-            _R_NS  = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+            col_val_map = {c: v for c, v in src_vals if v is not None}
+            if not col_val_map:
+                return
 
             with _zf.ZipFile(self.rack_template_path, 'r') as zf:
                 names = zf.namelist()
                 files = {n: zf.read(n) for n in names}
 
-            wb_root   = _ET.fromstring(files['xl/workbook.xml'])
-            rels_root = _ET.fromstring(files.get('xl/_rels/workbook.xml.rels', b'<Relationships/>'))
-            rid_map   = {r.get('Id', ''): r.get('Target', '') for r in rels_root}
+            # calcChain.xml 삭제 (수식 재계산 체인 오류 방지)
+            files.pop('xl/calcChain.xml', None)
+            names = [n for n in names if n != 'xl/calcChain.xml']
 
-            rack_file = None
-            for sh in (wb_root.find(f'{{{_WS_NS}}}sheets') or []):
-                if sh.get('name') == 'RACK발주':
-                    tgt = rid_map.get(sh.get(f'{{{_R_NS}}}id', ''), '')
-                    rack_file = tgt if tgt.startswith('xl/') else f'xl/{tgt}'
-                    break
+            wb_bytes   = files.get('xl/workbook.xml', b'')
+            rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
+            rack_file  = self._xlsx_find_sheet_file(wb_bytes, rels_bytes, 'RACK발주')
 
             if not rack_file or rack_file not in files:
-                QMessageBox.warning(self, "RACK발주 업데이트", "통합양식에서 RACK발주 시트를 찾을 수 없습니다.")
+                QMessageBox.warning(self, "RACK발주 업데이트",
+                                    "통합양식에서 RACK발주 시트를 찾을 수 없습니다.")
                 return
 
-            ws_root = _ET.fromstring(files[rack_file])
-            sdata   = ws_root.find(f'{{{_WS_NS}}}sheetData')
-            if sdata is None:
-                return
+            xml = files[rack_file].decode('utf-8', errors='replace')
 
-            # 열 A에서 마지막 데이터 행 탐색 → target_row
-            last_nonempty = 0
-            for r_el in sdata:
-                r_num = int(r_el.get('r', 0) or 0)
-                for c_el in r_el:
-                    ref = c_el.get('r', '')
-                    col_l = ''.join(ch for ch in ref if ch.isalpha())
-                    if col_l != 'A':
-                        continue
-                    v_el  = c_el.find(f'{{{_WS_NS}}}v')
-                    is_el = c_el.find(f'{{{_WS_NS}}}is')
-                    has_v = (v_el is not None and v_el.text and v_el.text.strip()) or (is_el is not None)
-                    if has_v:
-                        last_nonempty = max(last_nonempty, r_num)
+            # 열 A에 값 있는 마지막 행 → target_row
+            last_data_row = 0
+            for row_m in re.finditer(r'<row\b[^>]*\br="(\d+)"[^>]*>(.*?)</row>', xml, flags=re.DOTALL):
+                row_num     = int(row_m.group(1))
+                row_content = row_m.group(2)
+                col_a = re.search(r'<c\b[^>]*r="A\d+"[^>]*>(.*?)</c>', row_content, flags=re.DOTALL)
+                if col_a and re.search(r'<v>[^<]+</v>', col_a.group(1)):
+                    last_data_row = max(last_data_row, row_num)
 
-            target_row = max(last_nonempty + 1, 2)
+            target_row = max(last_data_row + 1, 2)
             style_row  = target_row - 1
 
-            # 이전 행 스타일 인덱스(s 속성) 수집
+            # 이전 행 셀 스타일(s 속성) 수집
             prev_styles: Dict[str, str] = {}
             if style_row >= 1:
-                for r_el in sdata:
-                    if int(r_el.get('r', 0) or 0) == style_row:
-                        for c_el in r_el:
-                            col_l = ''.join(ch for ch in c_el.get('r', '') if ch.isalpha())
-                            s_attr = c_el.get('s')
-                            if s_attr:
-                                prev_styles[col_l] = s_attr
-                        break
+                for row_m in re.finditer(
+                        rf'<row\b[^>]*\br="{style_row}"[^>]*>(.*?)</row>', xml, flags=re.DOTALL):
+                    for cell_m in re.finditer(r'<c\b([^>]*)>', row_m.group(1)):
+                        attrs = cell_m.group(1)
+                        ref_m = re.search(r'\br="([A-Z]+)\d+"', attrs)
+                        s_m   = re.search(r'\bs="(\d+)"', attrs)
+                        if ref_m and s_m:
+                            prev_styles[ref_m.group(1)] = s_m.group(1)
+                    break
 
-            # 새 행 생성
-            new_row = _ET.SubElement(sdata, f'{{{_WS_NS}}}row')
-            new_row.set('r', str(target_row))
-
-            def _col_1idx(letters: str) -> int:
-                n = 0
-                for ch in letters:
-                    n = n * 26 + (ord(ch) - 64)
-                return n
-
-            col_val_map = {c: v for c, v in src_vals if v is not None}
-            col_set = set(col_val_map.keys())
-            for col_l in prev_styles:
-                col_set.add(_col_1idx(col_l))
-
-            for col_idx in sorted(col_set):
-                col_l = _gcl(col_idx)
-                c_el  = _ET.SubElement(new_row, f'{{{_WS_NS}}}c')
-                c_el.set('r', f'{col_l}{target_row}')
-                if col_l in prev_styles:
-                    c_el.set('s', prev_styles[col_l])
-                val = col_val_map.get(col_idx)
-                if val is None:
-                    continue
-                if isinstance(val, (int, float)):
-                    _ET.SubElement(c_el, f'{{{_WS_NS}}}v').text = str(val)
-                elif isinstance(val, (datetime, date)):
-                    epoch  = date(1899, 12, 30)
-                    d      = val.date() if isinstance(val, datetime) else val
-                    serial = (d - epoch).days
-                    _ET.SubElement(c_el, f'{{{_WS_NS}}}v').text = str(serial)
-                else:
-                    sv = str(val).strip()
-                    if sv:
-                        c_el.set('t', 'inlineStr')
-                        t_el = _ET.SubElement(
-                            _ET.SubElement(c_el, f'{{{_WS_NS}}}is'),
-                            f'{{{_WS_NS}}}t')
-                        t_el.text = sv
-
-            files[rack_file] = _ET.tostring(ws_root, encoding='utf-8', xml_declaration=True)
+            files[rack_file] = self._xlsx_patch_sheet_row(
+                files[rack_file], target_row, col_val_map, _gcl, prev_styles)
 
             with _zf.ZipFile(self.rack_template_path, 'w', _zf.ZIP_DEFLATED) as zf:
                 for name in names:
-                    zf.writestr(name, files[name])
+                    if name in files:
+                        zf.writestr(name, files[name])
 
         except Exception as e:
             logger.error("RACK발주 시트 업데이트 실패: %s", e, exc_info=True)

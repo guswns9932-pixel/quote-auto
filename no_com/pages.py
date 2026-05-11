@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import excel_io
@@ -62,6 +63,22 @@ VENDOR_CHOICES  = [
     "", "AMAT", "ASM", "AXCELIS", "EUGENETECH", "WONIK_IPS",
     "KOKUSAI", "LAM", "SEMES", "TEL", "TES", "ULVAC", "GCS",
 ]
+
+
+RACK_REQUEST_LEFT_LABELS = [
+    "접수 일자", "납품 요청", "PR NO.", "담당자", "공 정", "세부 공정", "라인", "설 비",
+    "설비MODEL", "설비호기", "PUMP MODEL", "수량(CH)", "5D", "FSC", "RACK CH",
+    "GATE V/V TYPE", "METAL BELLOWS", "HOT-N2 TYPE", "IMS 중계기", "DA / LEP", "INVERTER",
+    "ANGLE Valve", "Option", "비 고", "간섭여부", "Interface Cable", "Dual Cable",
+    "통신모듈 Cable", "3단 모니터링 Cable",
+]
+RACK_REQUEST_REF_NOTES = [
+    "작성일", "Main설비반입일 D-28", "견적의뢰DATA", "수기입력", "견적의뢰DATA", "견적의뢰DATA",
+    "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA", "견적의뢰DATA",
+    "견적의뢰DATA", "5D 매칭",
+] + ["공정+설비+5D 매칭"] * 15
+
+
 
 
 # ──────────────────────────────────────────────
@@ -1300,6 +1317,349 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _log(self, text: str) -> None:
         self.log_view.append(text); logger.debug(text)
+
+
+# ══════════════════════════════════════════════
+# RACK 구매요청서 작성 페이지
+# ══════════════════════════════════════════════
+
+class RackPurchaseRequestPage(QWidget):
+    """이미지 양식 기반 RACK 구매요청서 작성/엑셀 생성 위젯."""
+
+    COL_LABEL = 0
+    COL_ITEM = 1
+    COL_QTY = 2
+    COL_REF_ITEM = 3
+    COL_REF_QTY = 4
+    COL_REF_APPLY = 5
+    COL_REQUEST = 6
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rack_template_path: Optional[str] = None
+        self.rack_template_sheets: Dict[str, List[List[Any]]] = {}
+        self.request_rows: List[Dict[str, Any]] = []
+        self._build_ui()
+        self._populate_table()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        title = bold_label("RACK구매요청서 작성", size=15)
+        guide = QLabel("이미지 양식과 동일한 항목 틀에서 값을 입력한 뒤 Excel 요청서를 생성합니다.")
+        guide.setStyleSheet("color:#555;")
+        title_row.addWidget(title)
+        title_row.addWidget(guide, 1)
+        outer.addLayout(title_row)
+
+        btn_row = QHBoxLayout()
+        self.btn_load_template = QPushButton("통합양식 불러오기")
+        self.btn_load_quote = QPushButton("견적의뢰DATA 불러오기")
+        self.btn_generate = QPushButton("요청서 생성")
+        for btn, color in [
+            (self.btn_load_template, "#C8E6C9"),
+            (self.btn_load_quote, "#BBDEFB"),
+            (self.btn_generate, "#FFF176"),
+        ]:
+            btn.setMinimumHeight(42)
+            f = btn.font(); f.setPointSize(11); f.setBold(True); btn.setFont(f)
+            tint_button(btn, color)
+            btn_row.addWidget(btn)
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
+
+        self.lbl_template_status = info_label("통합양식: 미로드")
+        outer.addWidget(self.lbl_template_status)
+        outer.addWidget(self._build_request_data_panel())
+
+        self.table = QTableWidget(31, 7)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(False)
+        self.table.setWordWrap(False)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.table.setShowGrid(True)
+        self.table.setSpan(0, self.COL_ITEM, 1, 2)
+        self.table.setSpan(0, self.COL_REF_ITEM, 1, 2)
+        self.table.setColumnWidth(self.COL_LABEL, 190)
+        self.table.setColumnWidth(self.COL_ITEM, 300)
+        self.table.setColumnWidth(self.COL_QTY, 70)
+        self.table.setColumnWidth(self.COL_REF_ITEM, 300)
+        self.table.setColumnWidth(self.COL_REF_QTY, 70)
+        self.table.setColumnWidth(self.COL_REF_APPLY, 145)
+        self.table.setColumnWidth(self.COL_REQUEST, 190)
+        self.table.horizontalHeader().setSectionResizeMode(self.COL_ITEM, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(self.COL_REF_ITEM, QHeaderView.Stretch)
+        for r in range(self.table.rowCount()):
+            self.table.setRowHeight(r, 24)
+        self.table.setRowHeight(0, 30)
+        outer.addWidget(self.table, 1)
+
+        self.btn_load_template.clicked.connect(self._load_rack_template)
+        self.btn_generate.clicked.connect(self._generate_request)
+        self.btn_load_quote.clicked.connect(self._load_quote_data)
+
+    def _build_request_data_panel(self) -> QFrame:
+        """불러온 견적의뢰DATA를 표시하는 붉은 박스 영역."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Box)
+        frame.setLineWidth(2)
+        frame.setStyleSheet("QFrame { border: 2px solid #D32F2F; }")
+        frame.setFixedHeight(150)
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(8, 6, 8, 8)
+        v.setSpacing(6)
+        title = bold_label("의뢰파일DATA", size=11)
+        title.setStyleSheet("color:#B71C1C; border:none;")
+        v.addWidget(title)
+        self.request_data_table = QTableWidget(0, 8)
+        self.request_data_table.setHorizontalHeaderLabels([
+            "PR NO.", "항번", "투자정보", "수량(CH)", "공정", "5D", "FSC", "설비호기"
+        ])
+        self.request_data_table.verticalHeader().setVisible(False)
+        self.request_data_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.request_data_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.request_data_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.request_data_table.setStyleSheet("QTableWidget { border: 1px solid #D32F2F; }")
+        self.request_data_table.cellDoubleClicked.connect(lambda row, _col: self._apply_request_row(row))
+        h = self.request_data_table.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(2, QHeaderView.Stretch)
+        for col in range(3, 8):
+            h.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        v.addWidget(self.request_data_table, 1)
+        return frame
+
+    def _populate_table(self) -> None:
+        self._set_item(0, self.COL_LABEL, "", "#DDE2E6", bold=True, editable=False)
+        self._set_item(0, self.COL_ITEM, "RACK구매요청서", "#C7EAF4", bold=True, editable=False)
+        self._set_item(0, self.COL_REF_ITEM, "Ref.", "#DDE2E6", bold=True, editable=False)
+        self._set_item(0, self.COL_REF_APPLY, "", "#00B050", bold=True, editable=False)
+        self.btn_apply_ref = QPushButton("Ref. 적용")
+        self.btn_apply_ref.setStyleSheet(
+            "QPushButton { background-color: #00B050; color: black; border: none; font-weight: bold; }"
+            "QPushButton:hover { background-color: #009944; }"
+        )
+        self.btn_apply_ref.clicked.connect(self._apply_ref_values)
+        self.table.setCellWidget(0, self.COL_REF_APPLY, self.btn_apply_ref)
+        self._set_item(0, self.COL_REQUEST, "비고", "#FFFFFF", bold=True, editable=False)
+
+        for col, text, color in [
+            (self.COL_ITEM, "항목", "#C7EAF4"), (self.COL_QTY, "수량", "#C7EAF4"),
+            (self.COL_REF_ITEM, "항목", "#DDE2E6"), (self.COL_REF_QTY, "수량", "#DDE2E6"),
+        ]:
+            self._set_item(1, col, text, color, bold=True, editable=False)
+        self._set_item(1, self.COL_LABEL, "", "#DDE2E6", editable=False)
+        self._set_item(1, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
+        self._set_item(1, self.COL_REQUEST, "", "#FFFFFF", editable=False)
+
+        for i, label in enumerate(RACK_REQUEST_LEFT_LABELS, start=2):
+            left_color = "#EAC3E7" if i <= 15 else "#F4DDCF"
+            self._set_item(i, self.COL_LABEL, label, left_color, bold=True, editable=False)
+            self._set_item(i, self.COL_ITEM, str(i - 1), "#C7EAF4")
+            self._set_item(i, self.COL_QTY, str(i + 28), "#C7EAF4")
+            self._set_item(i, self.COL_REF_ITEM, str(i + 57), "#DDE2E6")
+            self._set_item(i, self.COL_REF_QTY, str(i + 86), "#DDE2E6")
+            ref_apply = "☑" if i >= 16 else "-"
+            self._set_item(i, self.COL_REF_APPLY, ref_apply, "#DDE2E6", editable=False)
+            self._set_item(i, self.COL_REQUEST, RACK_REQUEST_REF_NOTES[i - 2], "#FFFFFF")
+
+    def _set_item(self, row: int, col: int, text: str, color: str, *, bold: bool = False,
+                  editable: bool = True, size: Optional[int] = None) -> None:
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setBackground(QBrush(QColor(color)))
+        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if editable:
+            flags |= Qt.ItemIsEditable
+        item.setFlags(flags)
+        font = item.font()
+        font.setBold(bold)
+        if size:
+            font.setPointSize(size)
+        item.setFont(font)
+        self.table.setItem(row, col, item)
+
+    def reset_page(self) -> None:
+        """좌측 하단 초기화 버튼에서 호출되는 현재 페이지 초기화 진입점."""
+        self.rack_template_path = None
+        self.rack_template_sheets = {}
+        self.request_rows = []
+        self.lbl_template_status.setText("통합양식: 미로드")
+        self.request_data_table.setRowCount(0)
+        self._populate_table()
+
+    def _apply_ref_values(self) -> None:
+        """Ref. 적용 체크 행의 Ref 항목/수량을 좌측 수기입력 영역으로 복사."""
+        applied = 0
+        for row in range(2, self.table.rowCount()):
+            if self._text(row, self.COL_REF_APPLY) != "☑":
+                continue
+            ref_item = self._text(row, self.COL_REF_ITEM)
+            ref_qty = self._text(row, self.COL_REF_QTY)
+            self.table.item(row, self.COL_ITEM).setText(ref_item)
+            self.table.item(row, self.COL_QTY).setText(ref_qty)
+            applied += 1
+        QMessageBox.information(self, "Ref. 적용", f"Ref. 항목/수량 {applied}건을 1~58번 수기입력 칸에 반영했습니다.")
+
+    def _load_rack_template(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "통합양식 선택", "", "Excel Files (*.xlsx)")
+        if not path:
+            return
+        required = ["RACK발주", "RACK발주양식", "FSC All List"]
+        try:
+            wb = load_workbook(path, data_only=True)
+            missing = [name for name in required if name not in wb.sheetnames]
+            if missing:
+                QMessageBox.warning(self, "통합양식 오류", "필수 시트 없음:\n" + "\n".join(missing))
+                wb.close()
+                return
+            loaded: Dict[str, List[List[Any]]] = {}
+            counts: List[str] = []
+            for name in required:
+                ws = wb[name]
+                rows: List[List[Any]] = []
+                for row in ws.iter_rows(values_only=True):
+                    values = [cell for cell in row]
+                    if any(s(cell) for cell in values):
+                        rows.append(values)
+                loaded[name] = rows
+                counts.append(f"{name} {len(rows)}행")
+            wb.close()
+        except Exception as e:
+            QMessageBox.critical(self, "불러오기 오류", f"통합양식을 읽을 수 없습니다.\n{e}")
+            return
+        self.rack_template_path = path
+        self.rack_template_sheets = loaded
+        self.lbl_template_status.setText(f"통합양식: {os.path.basename(path)} ({', '.join(counts)})")
+        QMessageBox.information(self, "완료", "통합양식 LOAD 완료\n" + "\n".join(counts))
+
+    def _load_quote_data(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "견적의뢰DATA 선택", "", "Excel Files (*.xlsx)")
+        if not path:
+            return
+        try:
+            sheet_name, rows = excel_io.parse_request_xlsx(path)
+        except Exception as e:
+            QMessageBox.critical(self, "불러오기 오류", f"견적의뢰DATA를 읽을 수 없습니다.\n{e}")
+            return
+        if not rows:
+            QMessageBox.warning(self, "견적의뢰DATA", "읽을 데이터가 없습니다.")
+            return
+        self.request_rows = rows
+        self._fill_request_data_table(rows)
+        self._apply_request_row(0, show_message=False)
+        QMessageBox.information(self, "완료", f"견적의뢰DATA {len(rows)}건을 붉은 박스 영역에 표시했습니다.\n시트: {sheet_name}")
+
+    def _fill_request_data_table(self, rows: List[Dict[str, Any]]) -> None:
+        self.request_data_table.setRowCount(0)
+        for i, rd in enumerate(rows):
+            self.request_data_table.insertRow(i)
+            values = [
+                s(rd.get("D")),
+                s(rd.get("E")),
+                parse_invest_info(rd.get("G")),
+                fmt_qty(to_float(rd.get("H"))) if rd.get("H") is not None else "",
+                s(rd.get("K")),
+                s(rd.get("V")),
+                s(rd.get("X")),
+                s(rd.get("Z")),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.request_data_table.setItem(i, col, item)
+        if rows:
+            self.request_data_table.selectRow(0)
+
+    def _apply_request_row(self, row: int, show_message: bool = True) -> None:
+        if row < 0 or row >= len(self.request_rows):
+            return
+        rd = self.request_rows[row]
+        mapping = {
+            "접수 일자": datetime.now().strftime("%Y-%m-%d"),
+            "PR NO.": rd.get("D"),
+            "담당자": rd.get("J"),
+            "공 정": rd.get("K"),
+            "설비호기": rd.get("Z"),
+            "PUMP MODEL": parse_invest_info(rd.get("G")),
+            "수량(CH)": fmt_qty(to_float(rd.get("H"))) if rd.get("H") is not None else "",
+            "5D": rd.get("V"),
+            "FSC": rd.get("X"),
+        }
+        for form_row in range(2, self.table.rowCount()):
+            label = self._text(form_row, self.COL_LABEL)
+            if label in mapping and mapping[label] is not None:
+                self.table.item(form_row, self.COL_REQUEST).setText(s(mapping[label]))
+        self.request_data_table.selectRow(row)
+        if show_message:
+            QMessageBox.information(self, "의뢰파일DATA 적용", f"{row + 1}번째 의뢰파일DATA를 비고 열에 반영했습니다.")
+
+    def _text(self, row: int, col: int) -> str:
+        item = self.table.item(row, col)
+        return item.text().strip() if item else ""
+
+    def _generate_request(self) -> None:
+        default_name = f"RACK구매요청서_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(self, "RACK 구매요청서 저장", default_name, "Excel Files (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            self._write_workbook(path)
+        except Exception as e:
+            QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류가 발생했습니다.\n{e}")
+            return
+        QMessageBox.information(self, "완료", f"RACK 구매요청서 생성 완료\n{os.path.basename(path)}")
+
+    def _write_workbook(self, path: str) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "RACK구매요청서"
+        widths = [20, 36, 8, 36, 8, 16, 22]
+        for idx, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = width
+        thin = Side(style="thin", color="000000")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        fill_by_col = {
+            self.COL_LABEL: "EAC3E7", self.COL_ITEM: "C7EAF4", self.COL_QTY: "C7EAF4",
+            self.COL_REF_ITEM: "DDE2E6", self.COL_REF_QTY: "DDE2E6", self.COL_REF_APPLY: "DDE2E6",
+            self.COL_REQUEST: "FFFFFF",
+        }
+        for r in range(self.table.rowCount()):
+            ws.row_dimensions[r + 1].height = 21
+            for c in range(self.table.columnCount()):
+                cell = ws.cell(r + 1, c + 1, self._text(r, c))
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+                cell.font = Font(name="Malgun Gothic", bold=(r <= 1 or c == self.COL_LABEL))
+                color = fill_by_col.get(c, "FFFFFF")
+                if r == 0 and c == self.COL_REF_APPLY:
+                    color = "00B050"
+                    cell.value = "Ref. 적용"
+                    cell.font = Font(name="Malgun Gothic", bold=True)
+                elif r == 0 and c == self.COL_REQUEST:
+                    color = "FFFFFF"
+                    cell.font = Font(name="Malgun Gothic", bold=True)
+                elif r == 0 and c in (self.COL_LABEL, self.COL_REF_ITEM, self.COL_REF_QTY):
+                    color = "DDE2E6"
+                elif r == 0 and c in (self.COL_ITEM, self.COL_QTY):
+                    color = "C7EAF4"
+                elif c == self.COL_LABEL and r >= 16:
+                    color = "F4DDCF"
+                cell.fill = PatternFill("solid", fgColor=color)
+        ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=3)
+        ws.merge_cells(start_row=1, start_column=4, end_row=1, end_column=5)
+        ws.freeze_panes = "A3"
+        wb.save(path)
+
 
 
 # ══════════════════════════════════════════════

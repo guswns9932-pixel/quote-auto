@@ -2162,7 +2162,7 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_remove_external_links(files: dict, names: list) -> tuple:
-        """zip에서 externalLinks 파일 및 workbook.xml/rels 참조를 모두 제거."""
+        """zip에서 externalLinks 파일 및 모든 참조를 제거."""
         names = [n for n in names if not n.startswith('xl/externalLinks/')]
         for key in [k for k in files if k.startswith('xl/externalLinks/')]:
             del files[key]
@@ -2177,6 +2177,12 @@ class RackPurchaseRequestPage(QWidget):
             ws = re.sub(r'<externalReferences\b[^>]*>.*?</externalReferences>', '', ws, flags=re.DOTALL)
             ws = re.sub(r'<externalReferences\s*/>', '', ws)
             files[wb_key] = ws.encode('utf-8')
+        # [Content_Types].xml에서 externalLink Override 항목 제거
+        ct_key = '[Content_Types].xml'
+        if ct_key in files:
+            ct = files[ct_key].decode('utf-8', errors='replace')
+            ct = re.sub(r'<Override\b[^>]*PartName="[^"]*externalLink[^"]*"[^>]*/>', '', ct)
+            files[ct_key] = ct.encode('utf-8')
         return files, names
 
     @staticmethod

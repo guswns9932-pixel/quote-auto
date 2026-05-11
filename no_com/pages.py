@@ -2206,6 +2206,45 @@ class RackPurchaseRequestPage(QWidget):
         xml = re.sub(r'\br="([A-Z]+\d+)"', shift_ref, xml)
         return xml.encode('utf-8')
 
+    @staticmethod
+    def _xlsx_shift_drawing_cols(files: dict, sheet_zip_path: str, delete_count: int) -> dict:
+        """sheet와 연결된 drawing XML의 열 앵커를 왼쪽으로 보정 (_xlsx_delete_leading_cols 후 호출)."""
+        # 시트 rels 경로: xl/worksheets/sheet1.xml → xl/worksheets/_rels/sheet1.xml.rels
+        base, fname = sheet_zip_path.rsplit('/', 1) if '/' in sheet_zip_path else ('', sheet_zip_path)
+        rels_path = f"{base}/_rels/{fname}.rels" if base else f"_rels/{fname}.rels"
+        if rels_path not in files:
+            return files
+
+        rels_xml = files[rels_path].decode('utf-8', errors='replace')
+        for m in re.finditer(r'<Relationship\b([^>]*/?>)', rels_xml):
+            attrs  = m.group(1)
+            type_m = re.search(r'\bType="([^"]*)"', attrs)
+            tgt_m  = re.search(r'\bTarget="([^"]*)"', attrs)
+            if not (type_m and tgt_m and '/drawing' in type_m.group(1)):
+                continue
+
+            tgt = tgt_m.group(1)
+            # "../drawings/drawing1.xml" → "xl/drawings/drawing1.xml"
+            if tgt.startswith('../'):
+                drawing_path = base.rsplit('/', 1)[0] + '/' + tgt[3:] if '/' in base else tgt[3:]
+            elif tgt.startswith('/'):
+                drawing_path = tgt.lstrip('/')
+            else:
+                drawing_path = (base + '/' + tgt) if base else tgt
+
+            if drawing_path not in files:
+                continue
+
+            draw_xml = files[drawing_path].decode('utf-8', errors='replace')
+
+            def _shift(cm: re.Match) -> str:
+                return f'<xdr:col>{max(0, int(cm.group(1)) - delete_count)}</xdr:col>'
+
+            files[drawing_path] = re.sub(
+                r'<xdr:col>(\d+)</xdr:col>', _shift, draw_xml).encode('utf-8')
+
+        return files
+
     # ── xlsx 생성 / 통합양식 업데이트 ──────────────────────────────────────
 
     @staticmethod
@@ -2394,6 +2433,7 @@ class RackPurchaseRequestPage(QWidget):
                     logger.warning("결재상신용 행 추가 실패 (row=%d): %s", i, e)
 
             files[rack_file] = self._xlsx_delete_leading_cols(files[rack_file], 2)
+            files = self._xlsx_shift_drawing_cols(files, rack_file, 2)
             self._xlsx_save(out_path, files, names)
 
             QMessageBox.information(self, "완료",

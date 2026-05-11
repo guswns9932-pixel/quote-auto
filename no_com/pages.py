@@ -1493,6 +1493,20 @@ class RackPurchaseRequestPage(QWidget):
             if item:
                 item.setText("")
 
+        # slots 30-43 (rows 2-15, COL_QTY): 고정 "-"
+        for row in range(2, 16):
+            self._set_item(row, self.COL_QTY, "-", "#C7EAF4", editable=False)
+
+        # slots 88-101 (rows 2-15, COL_REF_QTY): 고정 "-"
+        for row in range(2, 16):
+            self._set_item(row, self.COL_REF_QTY, "-", "#DDE2E6", editable=False)
+
+        # slots 59-72 (rows 2-15, COL_REF_ITEM): RACK발주 매칭 전 초기값 ""
+        for row in range(2, 16):
+            item = self.table.item(row, self.COL_REF_ITEM)
+            if item:
+                item.setText("")
+
         # slot 80 (row 23, COL_REF_ITEM): 고정 "-"
         self._set_item(23, self.COL_REF_ITEM, "-", "#DDE2E6", editable=False)
 
@@ -1500,8 +1514,11 @@ class RackPurchaseRequestPage(QWidget):
         for row in (24, 25, 26):
             self._set_item(row, self.COL_REF_QTY, "-", "#DDE2E6", editable=False)
 
-        # slot 83 (row 26, COL_REF_ITEM): 간섭여부 드롭다운
+        # slot 83 (row 26, COL_REF_ITEM): 간섭여부 드롭다운 (가운데 정렬)
         combo_83 = QComboBox()
+        combo_83.setEditable(True)
+        combo_83.lineEdit().setAlignment(Qt.AlignCenter)
+        combo_83.lineEdit().setReadOnly(True)
         combo_83.addItems(["", "간섭없음", "좌측간섭", "우측간섭", "좌/우간섭"])
         combo_83.setStyleSheet("QComboBox { background-color: #DDE2E6; }")
         self.table.setCellWidget(26, self.COL_REF_ITEM, combo_83)
@@ -1599,7 +1616,7 @@ class RackPurchaseRequestPage(QWidget):
         if not key:
             return ""
         for row in self.rack_template_sheets.get("FSC All List", []):
-            if len(row) >= 8 and s(row[7]) == key:
+            if len(row) >= 8 and key in s(row[7]):
                 return s(row[1]) if len(row) >= 2 else ""
         return ""
 
@@ -1782,11 +1799,36 @@ class RackPurchaseRequestPage(QWidget):
         return None
 
     def _fill_rack_ref_slots(self, rack_row: Optional[List[Any]]) -> None:
-        """찾은 RACK발주 행의 값으로 REF 슬롯(73~87, 102~116)을 채운다."""
+        """찾은 RACK발주 행의 값으로 REF 슬롯(59~87, 102~116)을 채운다."""
         def _get(col_0idx: int) -> str:
             if rack_row is None or col_0idx >= len(rack_row):
                 return ""
-            return s(rack_row[col_0idx])
+            val = rack_row[col_0idx]
+            if isinstance(val, (datetime, date)):
+                return val.strftime("%Y-%m-%d")
+            return s(val)
+
+        # COL_REF_ITEM (rows 2-15, slots 59-72): RACK발주 기본 정보 열
+        basic_ref_cols = {
+            2:  2,   # C열  (접수 일자)
+            3:  5,   # F열  (납품 요청)
+            4:  8,   # I열  (PR NO.)
+            5:  10,  # K열  (담당자)
+            6:  22,  # W열  (공 정)
+            7:  23,  # X열  (세부 공정)
+            8:  24,  # Y열  (라인)
+            9:  25,  # Z열  (설 비)
+            10: 26,  # AA열 (설비MODEL)
+            # 11: 설비호기 → 미지정
+            12: 28,  # AC열 (PUMP MODEL)
+            13: 29,  # AD열 (수량(CH))
+            14: 30,  # AE열 (5D)
+            15: 18,  # S열  (FSC)
+        }
+        for row, col_0idx in basic_ref_cols.items():
+            item = self.table.item(row, self.COL_REF_ITEM)
+            if item:
+                item.setText(_get(col_0idx))
 
         # COL_REF_ITEM (rows 16-30, slots 73-87)
         ref_item_cols = {

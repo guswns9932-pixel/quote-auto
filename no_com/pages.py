@@ -1560,10 +1560,15 @@ class RackPurchaseRequestPage(QWidget):
             _cb.setInsertPolicy(QComboBox.NoInsert)
             _cb.lineEdit().setAlignment(Qt.AlignCenter)
             _cb.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
-            _cmpl = _cb.completer()
-            if _cmpl:
-                _cmpl.setFilterMode(Qt.MatchContains)
-                _cmpl.setCompletionMode(QCompleter.PopupCompletion)
+            # FSC(16): 5D 자동 매칭 전용 — 수기 입력 불가
+            if _row == 16:
+                _cb.lineEdit().setReadOnly(True)
+                _cb.setStyleSheet("QComboBox { background-color: #DDE8F0; }")
+            else:
+                _cmpl = _cb.completer()
+                if _cmpl:
+                    _cmpl.setFilterMode(Qt.MatchContains)
+                    _cmpl.setCompletionMode(QCompleter.PopupCompletion)
             self.table.setCellWidget(_row, self.COL_ITEM, _cb)
             # 공정(7), 설비(10), 5D(15) 변경 시 실시간 Ref. 매칭
             if _row in (7, 10, 15):
@@ -1620,13 +1625,23 @@ class RackPurchaseRequestPage(QWidget):
         combo_83.setStyleSheet("QComboBox { background-color: #DDE2E6; }")
         self.table.setCellWidget(27, self.COL_REF_ITEM, combo_83)
 
-        # 기본값 설정 (견적의뢰DATA 없을 때 초기 표시값)
+        self._set_default_values()
+
+    def _set_default_values(self) -> None:
+        """견적의뢰DATA와 무관한 기본값 설정 (통합양식 로드 후에도 재적용)."""
         inv_item = self.table.item(2, self.COL_ITEM)
         if inv_item:
             inv_item.setText("투자미확인")
         self._set_slot_value(1, datetime.now().strftime("%Y-%m-%d"))
         self._set_slot_value(2, "입력필요")
         self._set_slot_value(3, "구두발주")
+        # 담당자/공정/세부공정/라인/설비/설비MODEL/설비호기/PUMP MODEL/수량(CH)/5D: 공란
+        for slot in (4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
+            self._set_slot_value(slot, "")
+        # FSC 공란 (5D 입력 시 자동 채워짐)
+        fsc_widget = self.table.cellWidget(16, self.COL_ITEM)
+        if isinstance(fsc_widget, QComboBox):
+            fsc_widget.setCurrentText("")
 
     def _set_item(self, row: int, col: int, text: str, color: str, *, bold: bool = False,
                   editable: bool = True, size: Optional[int] = None) -> None:
@@ -1833,6 +1848,7 @@ class RackPurchaseRequestPage(QWidget):
         self.rack_template_path = path
         self.rack_template_sheets = loaded
         self._populate_item_combos()
+        self._set_default_values()
         self.lbl_template_status.setText(f"통합양식: {os.path.basename(path)} ({', '.join(counts)})")
         QMessageBox.information(self, "완료", "통합양식 LOAD 완료\n" + "\n".join(counts))
 

@@ -1344,36 +1344,37 @@ class RackPurchaseRequestPage(QWidget):
     COL_REQUEST = 6
 
     # (rack_0idx_autocomplete, rack_1idx_item_col, rack_1idx_qty_col)
+    # row 2 = 인보이스 필요여부 (자동계산), row 3~ = 기존 데이터 행
     _ROW_RACK_MAP: Dict[int, Tuple] = {
-        2:  (2,  3,  None),
-        3:  (5,  6,  None),
-        4:  (8,  9,  None),
-        5:  (10, 11, None),
-        6:  (22, 23, None),
-        7:  (23, 24, None),
-        8:  (24, 25, None),
-        9:  (25, 26, None),
-        10: (26, 27, None),
-        11: (None,28, None),
-        12: (28, 29, None),
-        13: (29, 30, None),
-        14: (30, 31, None),
-        15: (18, 19, None),
-        16: (32, 33, 34),
-        17: (47, 48, 49),
-        18: (81, 82, 83),
-        19: (52, 53, 54),
-        20: (56, 57, 58),
-        21: (60, 61, 62),
-        22: (70, 71, 72),
-        23: (None, None, 92),
-        24: (94, 95, None),
-        25: (96, 97, None),
-        26: (None, 98, None),
-        27: (99, 100, 101),
-        28: (101, 102, 103),
-        29: (103, 104, 105),
-        30: (105, 106, 107),
+        3:  (2,  3,  None),
+        4:  (5,  6,  None),
+        5:  (8,  9,  None),
+        6:  (10, 11, None),
+        7:  (22, 23, None),
+        8:  (23, 24, None),
+        9:  (24, 25, None),
+        10: (25, 26, None),
+        11: (26, 27, None),
+        12: (None,28, None),
+        13: (28, 29, None),
+        14: (29, 30, None),
+        15: (30, 31, None),
+        16: (18, 19, None),
+        17: (32, 33, 34),
+        18: (47, 48, 49),
+        19: (81, 82, 83),
+        20: (52, 53, 54),
+        21: (56, 57, 58),
+        22: (60, 61, 62),
+        23: (70, 71, 72),
+        24: (None, None, 92),
+        25: (94, 95, None),
+        26: (96, 97, None),
+        27: (None, 98, None),
+        28: (99, 100, 101),
+        29: (101, 102, 103),
+        30: (103, 104, 105),
+        31: (105, 106, 107),
     }
 
     def __init__(self) -> None:
@@ -1404,11 +1405,13 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_load_quote = QPushButton("견적의뢰DATA 불러오기")
         self.btn_generate = QPushButton("요청서 생성")
         self.btn_generate_approval = QPushButton("결재상신용 생성")
+        self.btn_upload_history = QPushButton("발주이력 업로드")
         for btn, color in [
             (self.btn_load_template, "#C8E6C9"),
             (self.btn_load_quote, "#BBDEFB"),
             (self.btn_generate, "#FFF176"),
             (self.btn_generate_approval, "#FFE0B2"),
+            (self.btn_upload_history, "#E1BEE7"),
         ]:
             btn.setMinimumHeight(42)
             f = btn.font(); f.setPointSize(11); f.setBold(True); btn.setFont(f)
@@ -1421,7 +1424,7 @@ class RackPurchaseRequestPage(QWidget):
         outer.addWidget(self.lbl_template_status)
         outer.addWidget(self._build_request_data_panel())
 
-        self.table = QTableWidget(31, 7)
+        self.table = QTableWidget(32, 7)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setVisible(False)
         self.table.setAlternatingRowColors(False)
@@ -1449,6 +1452,7 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate.clicked.connect(self._generate_request)
         self.btn_load_quote.clicked.connect(self._load_quote_data)
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
+        self.btn_upload_history.clicked.connect(self._upload_order_history)
 
     def _build_request_data_panel(self) -> QFrame:
         """불러온 견적의뢰DATA를 표시하는 붉은 박스 영역."""
@@ -1507,14 +1511,24 @@ class RackPurchaseRequestPage(QWidget):
         self._set_item(1, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
         self._set_item(1, self.COL_REQUEST, "", "#FFFFFF", editable=False)
 
-        for i, label in enumerate(RACK_REQUEST_LEFT_LABELS, start=2):
-            left_color = "#EAC3E7" if i <= 15 else "#F4DDCF"
+        # Row 2: 인보이스 필요여부 (투자정보 기반 자동계산, 접수일자 위쪽)
+        self._set_item(2, self.COL_LABEL, "인보이스 필요여부", "#EAC3E7", bold=True, editable=False)
+        self._set_item(2, self.COL_ITEM, "", "#C7EAF4", editable=False)
+        self._set_item(2, self.COL_QTY, "-", "#C7EAF4", editable=False)
+        self._set_item(2, self.COL_REF_ITEM, "", "#DDE2E6", editable=False)
+        self._set_item(2, self.COL_REF_QTY, "-", "#DDE2E6", editable=False)
+        self._set_item(2, self.COL_REF_APPLY, "-", "#DDE2E6", editable=False)
+        self._set_item(2, self.COL_REQUEST, "KIT투자 시 인보이스필요", "#FFFFFF", editable=False)
+
+        # 기존 데이터 행: start=3 (row 2가 새 인보이스 행이므로)
+        for i, label in enumerate(RACK_REQUEST_LEFT_LABELS, start=3):
+            left_color = "#EAC3E7" if i <= 16 else "#F4DDCF"
             self._set_item(i, self.COL_LABEL, label, left_color, bold=True, editable=False)
-            self._set_item(i, self.COL_ITEM, str(i - 1), "#C7EAF4")
-            self._set_item(i, self.COL_QTY, str(i + 28), "#C7EAF4")
-            self._set_item(i, self.COL_REF_ITEM, str(i + 57), "#DDE2E6")
-            self._set_item(i, self.COL_REF_QTY, str(i + 86), "#DDE2E6")
-            if i <= 15:
+            self._set_item(i, self.COL_ITEM, str(i - 2), "#C7EAF4")
+            self._set_item(i, self.COL_QTY, str(i + 27), "#C7EAF4")
+            self._set_item(i, self.COL_REF_ITEM, str(i + 56), "#DDE2E6")
+            self._set_item(i, self.COL_REF_QTY, str(i + 85), "#DDE2E6")
+            if i <= 16:
                 self._set_item(i, self.COL_REF_APPLY, "-", "#DDE2E6", editable=False)
             else:
                 self._set_item(i, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
@@ -1523,20 +1537,20 @@ class RackPurchaseRequestPage(QWidget):
                 if cb:
                     cb.setChecked(True)
                 self.table.setCellWidget(i, self.COL_REF_APPLY, host)
-            self._set_item(i, self.COL_REQUEST, RACK_REQUEST_REF_NOTES[i - 2], "#FFFFFF", editable=False)
+            self._set_item(i, self.COL_REQUEST, RACK_REQUEST_REF_NOTES[i - 3], "#FFFFFF", editable=False)
 
-        # COL_ITEM 자동완성 콤보박스 (row 5=담당자 제외, row 26=간섭여부 별도 처리)
-        for _row in range(2, 31):
-            if _row == 5:
+        # COL_ITEM 자동완성 콤보박스 (row 6=담당자 제외, row 27=간섭여부 별도 처리)
+        for _row in range(3, 32):
+            if _row == 6:
                 continue  # 담당자: 뒤에서 manager combobox로 덮어씀
-            if _row == 26:
-                _cb26 = _NoScrollComboBox()
-                _cb26.setEditable(True)
-                _cb26.lineEdit().setAlignment(Qt.AlignCenter)
-                _cb26.lineEdit().setReadOnly(True)
-                _cb26.addItems(["", "간섭없음", "좌측간섭", "우측간섭", "좌/우간섭"])
-                _cb26.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
-                self.table.setCellWidget(_row, self.COL_ITEM, _cb26)
+            if _row == 27:
+                _cb27 = _NoScrollComboBox()
+                _cb27.setEditable(True)
+                _cb27.lineEdit().setAlignment(Qt.AlignCenter)
+                _cb27.lineEdit().setReadOnly(True)
+                _cb27.addItems(["", "간섭없음", "좌측간섭", "우측간섭", "좌/우간섭"])
+                _cb27.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
+                self.table.setCellWidget(_row, self.COL_ITEM, _cb27)
                 continue
             _cb = _NoScrollComboBox()
             _cb.setEditable(True)
@@ -1548,6 +1562,9 @@ class RackPurchaseRequestPage(QWidget):
                 _cmpl.setFilterMode(Qt.MatchContains)
                 _cmpl.setCompletionMode(QCompleter.PopupCompletion)
             self.table.setCellWidget(_row, self.COL_ITEM, _cb)
+            # 공정(7), 설비(10), 5D(15) 변경 시 실시간 Ref. 매칭
+            if _row in (7, 10, 15):
+                _cb.currentTextChanged.connect(self._on_key_field_changed)
 
         manager_row, manager_col = self._slot_pos(4)
         manager = _NoScrollComboBox()
@@ -1558,8 +1575,8 @@ class RackPurchaseRequestPage(QWidget):
         manager.setStyleSheet("QComboBox { background-color: #C7EAF4; }")
         self.table.setCellWidget(manager_row, manager_col, manager)
 
-        # RACK발주 매칭 REF 슬롯 초기화 (rows 16-30 / slots 73-87, 102-116)
-        for row in range(16, 31):
+        # RACK발주 매칭 REF 슬롯 초기화 (rows 17-31)
+        for row in range(17, 32):
             item = self.table.item(row, self.COL_REF_ITEM)
             if item:
                 item.setText("")
@@ -1567,35 +1584,35 @@ class RackPurchaseRequestPage(QWidget):
             if item:
                 item.setText("")
 
-        # slots 30-43 (rows 2-15, COL_QTY): 고정 "-"
-        for row in range(2, 16):
+        # COL_QTY 고정 "-" (rows 2-16, 인보이스 포함)
+        for row in range(2, 17):
             self._set_item(row, self.COL_QTY, "-", "#C7EAF4", editable=False)
 
-        # slots 88-101 (rows 2-15, COL_REF_QTY): 고정 "-"
-        for row in range(2, 16):
+        # COL_REF_QTY 고정 "-" (rows 2-16)
+        for row in range(2, 17):
             self._set_item(row, self.COL_REF_QTY, "-", "#DDE2E6", editable=False)
 
-        # slots 59-72 (rows 2-15, COL_REF_ITEM): RACK발주 매칭 전 초기값 ""
-        for row in range(2, 16):
+        # COL_REF_ITEM 초기값 "" (rows 3-16, 접수일자~RACK CH)
+        for row in range(3, 17):
             item = self.table.item(row, self.COL_REF_ITEM)
             if item:
                 item.setText("")
 
-        # slot 80 (row 23, COL_REF_ITEM): 고정 "-"
-        self._set_item(23, self.COL_REF_ITEM, "-", "#DDE2E6", editable=False)
+        # slot 80 (row 24, COL_REF_ITEM): 고정 "-"
+        self._set_item(24, self.COL_REF_ITEM, "-", "#DDE2E6", editable=False)
 
-        # slots 110-112 (rows 24-26, COL_REF_QTY): 고정 "-"
-        for row in (24, 25, 26):
+        # slots 110-112 (rows 25-27, COL_REF_QTY): 고정 "-"
+        for row in (25, 26, 27):
             self._set_item(row, self.COL_REF_QTY, "-", "#DDE2E6", editable=False)
 
-        # slot 83 (row 26, COL_REF_ITEM): 간섭여부 드롭다운 (가운데 정렬)
+        # slot 83 (row 27, COL_REF_ITEM): 간섭여부 드롭다운 (가운데 정렬)
         combo_83 = _NoScrollComboBox()
         combo_83.setEditable(True)
         combo_83.lineEdit().setAlignment(Qt.AlignCenter)
         combo_83.lineEdit().setReadOnly(True)
         combo_83.addItems(["", "간섭없음", "좌측간섭", "우측간섭", "좌/우간섭"])
         combo_83.setStyleSheet("QComboBox { background-color: #DDE2E6; }")
-        self.table.setCellWidget(26, self.COL_REF_ITEM, combo_83)
+        self.table.setCellWidget(27, self.COL_REF_ITEM, combo_83)
 
     def _set_item(self, row: int, col: int, text: str, color: str, *, bold: bool = False,
                   editable: bool = True, size: Optional[int] = None) -> None:
@@ -1627,11 +1644,12 @@ class RackPurchaseRequestPage(QWidget):
         return bool(cb and cb.isChecked())
 
     def _slot_pos(self, slot: int) -> Tuple[int, int]:
-        """이미지 양식의 1~58 입력칸 번호를 테이블 row/col로 변환."""
+        """이미지 양식의 1~58 입력칸 번호를 테이블 row/col로 변환.
+        row 2 = 인보이스 필요여부(자동계산), row 3~ = slot 1~ 대응."""
         if 1 <= slot <= 29:
-            return slot + 1, self.COL_ITEM
+            return slot + 2, self.COL_ITEM
         if 30 <= slot <= 58:
-            return slot - 28, self.COL_QTY
+            return slot - 27, self.COL_QTY
         raise ValueError(f"지원하지 않는 RACK 요청서 칸 번호: {slot}")
 
     def _set_slot_value(self, slot: int, value: Any) -> None:
@@ -1696,12 +1714,14 @@ class RackPurchaseRequestPage(QWidget):
             if not isinstance(widget, QComboBox):
                 continue
             seen: set = {widget.itemText(i) for i in range(widget.count())}
+            widget.blockSignals(True)
             for r in rack_rows:
                 if col_0idx < len(r):
                     val = s(r[col_0idx])
                     if val and val not in seen:
                         widget.addItem(val)
                         seen.add(val)
+            widget.blockSignals(False)
 
     def _lookup_fsc_from_template(self, value: Any) -> str:
         key = s(value)
@@ -1896,6 +1916,12 @@ class RackPurchaseRequestPage(QWidget):
         rack_row = self._lookup_rack_row(rack_process, rack_vendor, rack_5d)
         self._fill_rack_ref_slots(rack_row)
 
+        invest_info = parse_invest_info(rd.get("G"))
+        invoice_text = "인보이스 필요" if "KIT" in invest_info.upper() else "해당 없음"
+        inv_item = self.table.item(2, self.COL_ITEM)
+        if inv_item:
+            inv_item.setText(invoice_text)
+
         if show_message:
             if rack_row is not None:
                 msg = f"{row + 1}번째 의뢰파일DATA를 반영했습니다.\n[RACK발주 매칭 성공] 공정={rack_process} / 설비={rack_vendor} / 5D={rack_5d}"
@@ -1941,84 +1967,84 @@ class RackPurchaseRequestPage(QWidget):
                 return val.strftime("%Y-%m-%d")
             return s(val)
 
-        # COL_REF_ITEM (rows 2-15, slots 59-72): RACK발주 기본 정보 열
+        # COL_REF_ITEM (rows 3-16, slots 59-72): RACK발주 기본 정보 열
         basic_ref_cols = {
-            2:  2,   # C열  (접수 일자)
-            3:  5,   # F열  (납품 요청)
-            4:  8,   # I열  (PR NO.)
-            5:  10,  # K열  (담당자)
-            6:  22,  # W열  (공 정)
-            7:  23,  # X열  (세부 공정)
-            8:  24,  # Y열  (라인)
-            9:  25,  # Z열  (설 비)
-            10: 26,  # AA열 (설비MODEL)
-            11: 27,  # AB열 (설비호기)
-            12: 28,  # AC열 (PUMP MODEL)
-            13: 29,  # AD열 (수량(CH))
-            14: 30,  # AE열 (5D)
-            15: 18,  # S열  (FSC)
+            3:  2,   # C열  (접수 일자)
+            4:  5,   # F열  (납품 요청)
+            5:  8,   # I열  (PR NO.)
+            6:  10,  # K열  (담당자)
+            7:  22,  # W열  (공 정)
+            8:  23,  # X열  (세부 공정)
+            9:  24,  # Y열  (라인)
+            10: 25,  # Z열  (설 비)
+            11: 26,  # AA열 (설비MODEL)
+            12: 27,  # AB열 (설비호기)
+            13: 28,  # AC열 (PUMP MODEL)
+            14: 29,  # AD열 (수량(CH))
+            15: 30,  # AE열 (5D)
+            16: 18,  # S열  (FSC)
         }
         for row, col_0idx in basic_ref_cols.items():
             item = self.table.item(row, self.COL_REF_ITEM)
             if item:
                 item.setText(_get(col_0idx))
 
-        # COL_REF_ITEM (rows 16-30, slots 73-87)
+        # COL_REF_ITEM (rows 17-31, slots 73-87)
         ref_item_cols = {
-            16: 32,   # AG(33)
-            17: 47,   # AV(48)
-            18: 81,   # CD(82)
-            19: 52,   # BA(53)
-            20: 56,   # BE(57)
-            21: 60,   # BI(61)
-            22: 70,   # BS(71)
-            # 23: slot 80 → 고정 "-"
-            24: 94,   # CQ(95)
-            25: 96,   # CS(97)
-            # 26: 간섭여부 → QComboBox (CT열)
-            27: 99,   # CV(100)
-            28: 101,  # CX(102)
-            29: 103,  # CZ(104)
-            30: 105,  # DB(106)
+            17: 32,   # AG(33)
+            18: 47,   # AV(48)
+            19: 81,   # CD(82)
+            20: 52,   # BA(53)
+            21: 56,   # BE(57)
+            22: 60,   # BI(61)
+            23: 70,   # BS(71)
+            # 24: slot 80 → 고정 "-"
+            25: 94,   # CQ(95)
+            26: 96,   # CS(97)
+            # 27: 간섭여부 → QComboBox (CT열)
+            28: 99,   # CV(100)
+            29: 101,  # CX(102)
+            30: 103,  # CZ(104)
+            31: 105,  # DB(106)
         }
         for row, col_0idx in ref_item_cols.items():
             item = self.table.item(row, self.COL_REF_ITEM)
             if item:
                 item.setText(_get(col_0idx))
 
-        # slot 80 (row 23): 항상 "-"
-        item = self.table.item(23, self.COL_REF_ITEM)
+        # slot 80 (row 24): 항상 "-"
+        item = self.table.item(24, self.COL_REF_ITEM)
         if item:
             item.setText("-")
 
-        # row 26 (간섭여부) COL_REF_ITEM: QComboBox → CT열(0-indexed 97)
-        combo_26 = self.table.cellWidget(26, self.COL_REF_ITEM)
-        if isinstance(combo_26, QComboBox):
-            combo_26.setCurrentText(_get(97))
+        # row 27 (간섭여부) COL_REF_ITEM: QComboBox → CT열(0-indexed 97)
+        combo_27 = self.table.cellWidget(27, self.COL_REF_ITEM)
+        if isinstance(combo_27, QComboBox):
+            combo_27.setCurrentText(_get(97))
 
-        # COL_REF_QTY (rows 16-30, slots 102-116)
+        # COL_REF_QTY (rows 17-31, slots 102-116)
         ref_qty_cols = {
-            16: 33,   # AH(34)
-            17: 48,   # AW(49)
-            18: 82,   # CE(83)
-            19: 53,   # BB(54)
-            20: 57,   # BF(58)
-            21: 61,   # BJ(62)
-            22: 71,   # BT(72)
-            23: 91,   # CN(92)
-            # 24, 25, 26: slots 110-112 → 고정 "-"
-            27: 100,  # CW(101)
-            28: 102,  # CY(103)
-            29: 104,  # DA(105)
-            30: 106,  # DC(107)
+            17: 33,   # AH(34)
+            18: 48,   # AW(49)
+            19: 82,   # CE(83)
+            20: 53,   # BB(54)
+            21: 57,   # BF(58)
+            22: 61,   # BJ(62)
+            23: 71,   # BT(72)
+            24: 91,   # CN(92)
+            # 25, 26, 27: slots 110-112 → 고정 "-"
+            28: 100,  # CW(101)
+            29: 102,  # CY(103)
+            30: 104,  # DA(105)
+            31: 106,  # DC(107)
         }
         for row, col_0idx in ref_qty_cols.items():
             item = self.table.item(row, self.COL_REF_QTY)
             if item:
                 item.setText(_get(col_0idx))
 
-        # slots 110-112 (rows 24-26): 항상 "-"
-        for row in (24, 25, 26):
+        # slots 110-112 (rows 25-27): 항상 "-"
+        for row in (25, 26, 27):
             item = self.table.item(row, self.COL_REF_QTY)
             if item:
                 item.setText("-")
@@ -2033,6 +2059,81 @@ class RackPurchaseRequestPage(QWidget):
         item = self.table.item(row, col)
         return item.text().strip() if item else ""
 
+    def _on_key_field_changed(self, _text: str = "") -> None:
+        """공정/설비/5D 수기 수정 시 실시간 Ref. 매칭."""
+        if not self.rack_template_sheets.get("RACK발주"):
+            return
+        process = self._text(7,  self.COL_ITEM)
+        vendor  = self._text(10, self.COL_ITEM)
+        code_5d = self._text(15, self.COL_ITEM)
+        rack_row = self._lookup_rack_row(process, vendor, code_5d)
+        self._fill_rack_ref_slots(rack_row)
+
+    def _upload_order_history(self) -> None:
+        """발주이력 업로드: 선택한 요청서 xlsx의 RACK발주양식 2행을 통합양식 RACK발주 시트에 추가."""
+        if not self.rack_template_path:
+            QMessageBox.warning(self, "오류", "통합양식을 먼저 불러오세요.")
+            return
+        if not self._is_file_writable(self.rack_template_path):
+            QMessageBox.warning(self, "파일 잠금",
+                "통합양식 파일이 다른 프로그램(Excel)에서 열려 있어 수정할 수 없습니다.\n"
+                "Excel에서 통합양식 파일을 닫은 후 다시 실행해 주세요.")
+            return
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "발주이력 요청서 선택", "", "Excel Files (*.xlsx)")
+        if not paths:
+            return
+
+        from openpyxl import load_workbook as _lw
+        from openpyxl.utils import get_column_letter as _gcl
+
+        try:
+            tmpl_wb = _lw(self.rack_template_path)
+            if "RACK발주" not in tmpl_wb.sheetnames:
+                QMessageBox.warning(self, "오류", "통합양식에 'RACK발주' 시트가 없습니다.")
+                tmpl_wb.close()
+                return
+            ws = tmpl_wb["RACK발주"]
+
+            # C열(col=3)이 비어 있는 첫 번째 행 탐색
+            first_empty = ws.max_row + 1
+            for r in range(1, ws.max_row + 2):
+                if ws.cell(r, 3).value is None or str(ws.cell(r, 3).value).strip() == "":
+                    first_empty = r
+                    break
+
+            added = 0
+            errors = []
+            for path in paths:
+                try:
+                    src_wb = _lw(path, data_only=True)
+                    if "RACK발주양식" not in src_wb.sheetnames:
+                        errors.append(f"{os.path.basename(path)}: 'RACK발주양식' 시트 없음")
+                        src_wb.close()
+                        continue
+                    src_ws = src_wb["RACK발주양식"]
+                    for col_idx in range(1, (src_ws.max_column or 0) + 1):
+                        val = src_ws.cell(2, col_idx).value
+                        if val is not None:
+                            ws.cell(first_empty, col_idx, val)
+                    src_wb.close()
+                    first_empty += 1
+                    added += 1
+                except Exception as e:
+                    errors.append(f"{os.path.basename(path)}: {e}")
+
+            tmpl_wb.save(self.rack_template_path)
+            tmpl_wb.close()
+
+            msg = f"{added}건 발주이력을 RACK발주 시트에 추가했습니다."
+            if errors:
+                msg += "\n\n오류:\n" + "\n".join(errors)
+            QMessageBox.information(self, "발주이력 업로드 완료", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "업로드 오류", f"발주이력 업로드 중 오류:\n{e}")
+            logger.error("발주이력 업로드 오류", exc_info=True)
+
     @staticmethod
     def _is_file_writable(path: str) -> bool:
         """파일이 쓰기 가능한지 확인 (다른 프로세스에 잠겨 있으면 False)."""
@@ -2045,9 +2146,9 @@ class RackPurchaseRequestPage(QWidget):
     def _do_generate_one(self) -> str:
         """현재 self.table 상태로 파일 1개 생성 후 경로 반환."""
         ymd      = datetime.now().strftime("%y%m%d")
-        process  = safe_filename(self._text(6,  self.COL_ITEM)) or "RACK"
-        line     = safe_filename(self._text(8,  self.COL_ITEM)) or ""
-        equip_no = safe_filename(self._text(11, self.COL_ITEM)) or "설비호기"
+        process  = safe_filename(self._text(7,  self.COL_ITEM)) or "RACK"
+        line     = safe_filename(self._text(9,  self.COL_ITEM)) or ""
+        equip_no = safe_filename(self._text(12, self.COL_ITEM)) or "설비호기"
         folder_mid = f"{ymd}_{line}_{process}" if line else f"{ymd}_{process}"
         folder = ensure_dir(os.path.join(
             exe_dir(), "RACK구매요청서", f"{folder_mid}_RACK구매요청서"))
@@ -2539,14 +2640,35 @@ class RackPurchaseRequestPage(QWidget):
                     v = txt
                 row2_vals[col] = v
 
-        rack_ch = self._text(16, self.COL_ITEM)
+        rack_ch = self._text(17, self.COL_ITEM)
         if rack_ch:
-            row2_vals[41] = rack_ch  # RACK CH → AO열(41)에도 기입
+            row2_vals[42] = rack_ch  # RACK CH → AP열(42)에도 기입
+
+        row2_vals[88] = "전기공통"  # CJ열(88) 항상 기입
+
+        invoice_text = self._text(2, self.COL_ITEM)
+        if invoice_text:
+            row2_vals[2] = invoice_text  # B열(2): 인보이스 필요여부
+        if invoice_text == "인보이스 필요":
+            row2_vals[95] = "KIT투자 시 인보이스필요"  # CQ열(95): 비고
+
+        # 데이터 입력된 열 중 비어 있는 셀은 "-"로 채움
+        all_data_cols: set = set()
+        for _, item_col, qty_col in self._ROW_RACK_MAP.values():
+            if item_col is not None:
+                all_data_cols.add(item_col)
+            if qty_col is not None:
+                all_data_cols.add(qty_col)
+        for col in all_data_cols:
+            if col not in row2_vals:
+                row2_vals[col] = "-"
 
         if rack_file and rack_file in files:
             try:
+                sheet_xml = files[rack_file].decode('utf-8', errors='replace')
+                row2_styles = self._xlsx_collect_row_styles(sheet_xml, 2)
                 files[rack_file] = self._xlsx_patch_sheet_row(
-                    files[rack_file], 2, row2_vals, _gcl)
+                    files[rack_file], 2, row2_vals, _gcl, row2_styles)
             except Exception as e:
                 logger.warning("RACK발주양식 시트 패치 실패: %s", e)
 

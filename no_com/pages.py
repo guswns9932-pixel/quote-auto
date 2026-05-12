@@ -2192,18 +2192,97 @@ class RackPurchaseRequestPage(QWidget):
         xml = sheet_bytes.decode('utf-8', errors='replace')
         del_letters = [_cl(i) for i in range(1, delete_count + 1)]
         del_pat = '|'.join(re.escape(l) for l in del_letters)
+
+        # ── 셀 데이터 제거 ──────────────────────────────────────────────────
         xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*/>', '', xml)
         xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*>.*?</c>', '', xml, flags=re.DOTALL)
+
+        def _shift_col(col_idx: int) -> int:
+            return max(1, col_idx - delete_count)
+
+        def _shift_cell(ref: str):
+            """(new_ref, was_deleted) 반환."""
+            rm = re.match(r'([A-Z]+)(\d+)', ref)
+            if not rm:
+                return ref, False
+            ci = _ci(rm.group(1))
+            if ci <= delete_count:
+                return None, True
+            return f'{_cl(ci - delete_count)}{rm.group(2)}', False
+
+        # ── r="XN" 셀 참조 시프트 (cell 태그) ──────────────────────────────
         def shift_ref(m: re.Match) -> str:
-            ref = m.group(1)
-            rm  = re.match(r'([A-Z]+)(\d+)', ref)
+            rm = re.match(r'([A-Z]+)(\d+)', m.group(1))
             if not rm:
                 return m.group(0)
-            col_idx = _ci(rm.group(1))
-            if col_idx <= delete_count:
+            ci = _ci(rm.group(1))
+            if ci <= delete_count:
                 return m.group(0)
-            return f'r="{_cl(col_idx - delete_count)}{rm.group(2)}"'
+            return f'r="{_cl(ci - delete_count)}{rm.group(2)}"'
         xml = re.sub(r'\br="([A-Z]+\d+)"', shift_ref, xml)
+
+        # ── mergeCells 처리 ─────────────────────────────────────────────────
+        def shift_merge(m: re.Match) -> str:
+            ref = m.group(1)
+            if ':' not in ref:
+                return ''  # 단일 셀 병합 → 제거
+            from_r, to_r = ref.split(':', 1)
+            fm = re.match(r'([A-Z]+)(\d+)', from_r)
+            tm = re.match(r'([A-Z]+)(\d+)', to_r)
+            if not fm or not tm:
+                return m.group(0)
+            fc, frow = _ci(fm.group(1)), fm.group(2)
+            tc, trow = _ci(tm.group(1)), tm.group(2)
+            if tc <= delete_count:
+                return ''  # 완전히 삭제 범위 → 제거
+            new_fc = 1 if fc <= delete_count else fc - delete_count
+            new_tc = tc - delete_count
+            if new_fc == new_tc and frow == trow:
+                return ''  # 단일 셀이 됨 → 병합 불필요
+            return f'<mergeCell ref="{_cl(new_fc)}{frow}:{_cl(new_tc)}{trow}"/>'
+        xml = re.sub(r'<mergeCell\b[^>]*\bref="([^"]+)"[^>]*/>', shift_merge, xml)
+        xml = re.sub(r'<mergeCells[^>]*>\s*</mergeCells>', '', xml)
+
+        # ── sqref 속성 처리 (dataValidation / conditionalFormatting) ────────
+        def shift_sqref(sqref_val: str) -> str:
+            new_parts = []
+            for part in sqref_val.split():
+                if ':' in part:
+                    fr, tr = part.split(':', 1)
+                    fm = re.match(r'([A-Z]+)(\d+)', fr)
+                    tm = re.match(r'([A-Z]+)(\d+)', tr)
+                    if fm and tm:
+                        fc, frow = _ci(fm.group(1)), fm.group(2)
+                        tc, trow = _ci(tm.group(1)), tm.group(2)
+                        if tc <= delete_count:
+                            continue
+                        new_fc = 1 if fc <= delete_count else fc - delete_count
+                        new_parts.append(f'{_cl(new_fc)}{frow}:{_cl(tc - delete_count)}{trow}')
+                    else:
+                        new_parts.append(part)
+                else:
+                    mm = re.match(r'([A-Z]+)(\d+)', part)
+                    if mm:
+                        ci = _ci(mm.group(1))
+                        if ci <= delete_count:
+                            continue
+                        new_parts.append(f'{_cl(ci - delete_count)}{mm.group(2)}')
+                    else:
+                        new_parts.append(part)
+            return ' '.join(new_parts)
+
+        def repl_sqref(m: re.Match) -> str:
+            new_val = shift_sqref(m.group(1))
+            return f'sqref="{new_val}"' if new_val else 'sqref=""'
+        xml = re.sub(r'\bsqref="([^"]+)"', repl_sqref, xml)
+        # sqref가 빈 조건부서식/유효성 블록 제거
+        xml = re.sub(r'<conditionalFormatting\b[^>]*sqref=""[^>]*/>', '', xml)
+        xml = re.sub(r'<conditionalFormatting\b[^>]*sqref=""[^>]*>.*?</conditionalFormatting>',
+                     '', xml, flags=re.DOTALL)
+        xml = re.sub(r'<dataValidation\b[^>]*sqref=""[^>]*/>', '', xml)
+        xml = re.sub(r'<dataValidation\b[^>]*sqref=""[^>]*>.*?</dataValidation>',
+                     '', xml, flags=re.DOTALL)
+
         return xml.encode('utf-8')
 
     @staticmethod

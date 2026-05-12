@@ -1472,6 +1472,7 @@ class RackPurchaseRequestPage(QWidget):
         self.request_data_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.request_data_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.request_data_table.setStyleSheet("QTableWidget { border: 1px solid #D32F2F; }")
+        self.request_data_table.cellClicked.connect(self._on_request_row_clicked)
         self.request_data_table.cellDoubleClicked.connect(lambda row, _col: self._apply_request_row(row))
         h = self.request_data_table.horizontalHeader()
         for col in range(self.request_data_table.columnCount()):
@@ -1824,11 +1825,37 @@ class RackPurchaseRequestPage(QWidget):
     def _checked_request_rows(self) -> List[int]:
         return [r for r in range(self.request_data_table.rowCount()) if self._is_request_checked(r)]
 
+    def _highlight_request_row(self, row: int, color: str) -> None:
+        """request_data_table 특정 행의 배경색 설정 (color="" 이면 초기화)."""
+        for col in range(1, self.request_data_table.columnCount()):
+            item = self.request_data_table.item(row, col)
+            if item:
+                if color:
+                    item.setBackground(QBrush(QColor(color)))
+                else:
+                    item.setBackground(QBrush())
+
+    def _mark_request_generated(self, row: int) -> None:
+        """생성 완료 행을 붉은 파스텔 음영으로 표시."""
+        self._highlight_request_row(row, "#FFCDD2")
+
+    def _on_request_row_clicked(self, row: int, _col: int) -> None:
+        """클릭한 행을 파스텔 파랑으로 하이라이트 (이미 생성된 행은 유지)."""
+        for col in range(1, self.request_data_table.columnCount()):
+            item = self.request_data_table.item(row, col)
+            if item:
+                bg = item.background().color().name()
+                if bg != "#ffcdd2":  # 생성 완료 색은 유지
+                    item.setBackground(QBrush(QColor("#E3F2FD")))
+
     def _on_request_target_changed(self, row: int) -> None:
         if self._is_request_checked(row):
+            self._highlight_request_row(row, "#E3F2FD")
             self._apply_request_row(row, show_message=False)
         else:
+            self._highlight_request_row(row, "")
             self._reset_slot_values(list(range(1, 15)))
+            self._fill_rack_ref_slots(None)
 
     def _apply_request_row(self, row: int, show_message: bool = True) -> None:
         if row < 0 or row >= len(self.request_rows):
@@ -2009,39 +2036,59 @@ class RackPurchaseRequestPage(QWidget):
         except (IOError, PermissionError, OSError):
             return False
 
+    def _do_generate_one(self) -> str:
+        """현재 self.table 상태로 파일 1개 생성 후 경로 반환."""
+        ymd      = datetime.now().strftime("%y%m%d")
+        process  = safe_filename(self._text(6,  self.COL_ITEM)) or "RACK"
+        line     = safe_filename(self._text(8,  self.COL_ITEM)) or ""
+        equip_no = safe_filename(self._text(11, self.COL_ITEM)) or "설비호기"
+        folder_mid = f"{ymd}_{line}_{process}" if line else f"{ymd}_{process}"
+        folder = ensure_dir(os.path.join(
+            exe_dir(), "RACK구매요청서", f"{folder_mid}_RACK구매요청서"))
+        out_path = unique_path(os.path.join(folder, f"{equip_no}_RACK구매요청서.xlsx"))
+        shutil.copy2(self.rack_template_path, out_path)
+        self._direct_patch_xlsx(out_path)
+        self._update_rack_order_sheet(out_path)
+        self._last_generated_folder = folder
+        return out_path
+
     def _generate_request(self) -> None:
         if not self.rack_template_path:
             QMessageBox.warning(self, "오류", "통합양식을 먼저 불러오세요.")
             return
-
         if not self._is_file_writable(self.rack_template_path):
             QMessageBox.warning(self, "파일 잠금",
                 "통합양식 파일이 다른 프로그램(Excel)에서 열려 있어 수정할 수 없습니다.\n"
                 "Excel에서 통합양식을 닫은 후 다시 시도해 주세요.")
             return
 
-        ymd      = datetime.now().strftime("%y%m%d")
-        process  = safe_filename(self._text(6,  self.COL_ITEM)) or "RACK"
-        line     = safe_filename(self._text(8,  self.COL_ITEM)) or ""
-        equip_no = safe_filename(self._text(11, self.COL_ITEM)) or "설비호기"
+        checked_rows = self._checked_request_rows()
 
-        folder_mid = f"{ymd}_{line}_{process}" if line else f"{ymd}_{process}"
-        folder = ensure_dir(os.path.join(
-            exe_dir(), "RACK구매요청서",
-            f"{folder_mid}_RACK구매요청서"
-        ))
-        out_path = unique_path(os.path.join(folder, f"{equip_no}_RACK구매요청서.xlsx"))
-
-        try:
-            shutil.copy2(self.rack_template_path, out_path)
-            self._direct_patch_xlsx(out_path)
-            self._update_rack_order_sheet(out_path)
-            self._last_generated_folder = folder
-            QMessageBox.information(self, "완료",
-                f"RACK 구매요청서 생성 완료\n{os.path.basename(out_path)}")
-        except Exception as e:
-            QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류:\n{e}")
-            logger.error("요청서 생성 오류", exc_info=True)
+        if not checked_rows:
+            # 체크 없음 → 현재 테이블 상태로 단독 생성
+            try:
+                out_path = self._do_generate_one()
+                QMessageBox.information(self, "완료",
+                    f"RACK 구매요청서 생성 완료\n{os.path.basename(out_path)}")
+            except Exception as e:
+                QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류:\n{e}")
+                logger.error("요청서 생성 오류", exc_info=True)
+        else:
+            # 체크된 행 모두 순서대로 생성
+            success, errors = [], []
+            for row in checked_rows:
+                try:
+                    self._apply_request_row(row, show_message=False)
+                    out_path = self._do_generate_one()
+                    success.append(os.path.basename(out_path))
+                    self._mark_request_generated(row)
+                except Exception as e:
+                    errors.append(f"행 {row + 1}: {e}")
+                    logger.error("멀티 요청서 생성 오류 (행 %d)", row, exc_info=True)
+            msg = f"총 {len(success)}개 생성 완료:\n" + "\n".join(success)
+            if errors:
+                msg += f"\n\n실패 {len(errors)}건:\n" + "\n".join(errors)
+            QMessageBox.information(self, "생성 완료", msg)
 
     # ── xlsx 직접 조작 helper (ET 미사용, regex/raw bytes) ────────────────
 
@@ -2184,6 +2231,20 @@ class RackPurchaseRequestPage(QWidget):
             ct = re.sub(r'<Override\b[^>]*PartName="[^"]*externalLink[^"]*"[^>]*/>', '', ct)
             files[ct_key] = ct.encode('utf-8')
         return files, names
+
+    @staticmethod
+    def _xlsx_strip_external_ref_formulas(files: dict) -> dict:
+        """모든 워크시트에서 [N] 외부 링크 참조를 포함한 <f> 태그를 제거 (캐시값 <v> 유지)."""
+        for name in list(files.keys()):
+            if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
+                continue
+            xml = files[name].decode('utf-8', errors='replace')
+            def _drop(m: re.Match) -> str:
+                return '' if re.search(r'\[\d+\]', m.group(0)) else m.group(0)
+            new_xml = re.sub(r'<f(?:\s[^>]*)?>.*?</f>', _drop, xml, flags=re.DOTALL)
+            if new_xml != xml:
+                files[name] = new_xml.encode('utf-8')
+        return files
 
     @staticmethod
     def _xlsx_delete_leading_cols(sheet_bytes: bytes, delete_count: int) -> bytes:
@@ -2336,6 +2397,7 @@ class RackPurchaseRequestPage(QWidget):
         files.pop('xl/calcChain.xml', None)
         names = [n for n in names if n != 'xl/calcChain.xml']
         files, names = RackPurchaseRequestPage._xlsx_remove_external_links(files, names)
+        files = RackPurchaseRequestPage._xlsx_strip_external_ref_formulas(files)
         return files, names
 
     @staticmethod

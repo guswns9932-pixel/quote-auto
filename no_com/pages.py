@@ -2268,52 +2268,64 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_strip_all_formulas(files: dict) -> dict:
-        """모든 워크시트의 수식을 제거하고 셀 타입을 정규화 (복구 메시지 완전 차단)."""
+        """모든 워크시트의 수식을 제거하고 셀 타입을 정규화 (복구 메시지 완전 차단).
+
+        모든 <c> 셀을 단일 패스로 처리하여 엣지케이스 누락 방지:
+        - 수식 포함 셀: 수식 제거 후 t 속성을 값 타입에 맞게 재설정
+        - t="str" 고아 셀(수식 없음): inlineStr 변환 또는 빈 셀
+        - 자체종결 t="str" 셀: t 속성 제거
+        """
         for name in list(files.keys()):
             if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
                 continue
             xml = files[name].decode('utf-8', errors='replace')
 
-            # 1. <f>...</f> 전체 제거
-            xml = re.sub(r'<f(?:\s[^>]*)?>.*?</f>', '', xml, flags=re.DOTALL)
-            # 2. 자체종결 공유수식 인스턴스 <f ... /> 제거
-            xml = re.sub(r'<f\b[^>]*/>', '', xml)
+            # ── 비자체종결 셀 처리 ───────────────────────────────────────────
+            def _fix_cell(m: re.Match) -> str:
+                full  = m.group(0)
+                gt    = full.index('>')
+                attrs = full[2:gt]        # <c 와 > 사이의 속성 문자열
+                body  = full[gt + 1:-4]  # > 와 </c> 사이의 본문
 
-            # 3. 비자체종결 t="str" 셀 → t="inlineStr" 변환 또는 빈 셀
-            #    수식 없이 t="str" 만 남으면 Excel이 "제거된 레코드: 셀 정보" 복구 메시지 발생
-            def _to_inline(m: re.Match) -> str:
-                pre, suf, body = m.group(1), m.group(2), m.group(3)
-                vm = re.search(r'<v>(.*?)</v>', body, re.DOTALL)
-                if vm:
-                    val = vm.group(1)
-                    body = re.sub(r'<v>.*?</v>', f'<is><t>{val}</t></is>', body, flags=re.DOTALL)
-                    return f'<c{pre}t="inlineStr"{suf}>{body}</c>'
-                # <v> 없음: t 속성 제거 → 빈 숫자형 셀 (inlineStr without <is> also invalid)
-                return f'<c{(pre + suf).rstrip()}/>'
+                has_f    = '<f' in body
+                has_tstr = 't="str"' in attrs
 
-            xml = re.sub(
-                r'<c\b([^>]*)\bt="str"([^>]*)>(.*?)</c>',
-                _to_inline,
-                xml,
-                flags=re.DOTALL,
-            )
+                if not has_f and not has_tstr:
+                    return full  # 변경 불필요
 
-            # 4. 안전망: 자체종결 <c ... t="str" .../> 에서 t="str" 제거 → 빈 셀
+                # 수식 태그 제거
+                if has_f:
+                    body = re.sub(r'<f(?:\s[^>]*)?>.*?</f>', '', body, flags=re.DOTALL)
+                    body = re.sub(r'<f\b[^>]*/>', '', body)
+
+                # t="str" 제거 (수식 없으면 OOXML 규격 위반)
+                clean = re.sub(r'\s*\bt="str"', '', attrs)  # 뒤 \b 생략 (""는 word char 아님)
+
+                vm  = re.search(r'<v>(.*?)</v>', body, re.DOTALL)
+                val = vm.group(1) if vm else None
+
+                if val is not None:
+                    if has_tstr:
+                        # 문자열 수식 결과 → inlineStr로 변환
+                        body = re.sub(r'<v>.*?</v>',
+                                      f'<is><t>{val}</t></is>', body, flags=re.DOTALL)
+                        return f'<c{clean} t="inlineStr">{body}</c>'
+                    else:
+                        # 숫자/불리언 등 → 타입 없는 숫자 셀 유지
+                        return f'<c{clean}>{body}</c>'
+                else:
+                    # 캐시 값 없음 → 빈 셀
+                    stripped = body.strip()
+                    if stripped:
+                        return f'<c{clean}>{stripped}</c>'
+                    return f'<c{clean.rstrip()}/>'
+
+            xml = re.sub(r'<c\b[^>]*>.*?</c>', _fix_cell, xml, flags=re.DOTALL)
+
+            # ── 자체종결 셀 안전망 ──────────────────────────────────────────
+            # <c ... t="str" ... /> 에서 t="str" 제거 (빈 숫자형 셀)
             xml = re.sub(r'(<c\b[^>]*?)\s+t="str"([^>]*/>)', r'\1\2', xml)
 
-            # 5. t="inlineStr" 이지만 <is> 없는 셀 → 빈 <is><t/> 추가
-            def _ensure_is(m: re.Match) -> str:
-                if '<is' in m.group(3):
-                    return m.group(0)
-                pre, suf, body = m.group(1), m.group(2), m.group(3)
-                return f'<c{pre}t="inlineStr"{suf}>{body}<is><t/></is></c>'
-
-            xml = re.sub(
-                r'<c\b([^>]*)\bt="inlineStr"([^>]*)>(.*?)</c>',
-                _ensure_is,
-                xml,
-                flags=re.DOTALL,
-            )
             files[name] = xml.encode('utf-8')
         return files
 

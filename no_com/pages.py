@@ -3005,8 +3005,7 @@ class ESignPage(QWidget):
         self.file_list.blockSignals(False)
 
         self._cleanup_tmp()
-        import tempfile as _tf
-        tmp = _tf.mkdtemp(prefix="esign_tmp_")   # 시스템 임시 폴더 — 보안 감시 경로 외부
+        tmp = ensure_dir(os.path.join(base, "_esign_tmp_pdf"))
         self._tmp_dir = tmp
 
         self._load_progress = QProgressDialog("변환 준비 중...", "취소", 0, len(paths), self)

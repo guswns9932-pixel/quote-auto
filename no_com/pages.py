@@ -1404,12 +1404,14 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_load_template = QPushButton("통합양식 불러오기")
         self.btn_load_quote = QPushButton("견적의뢰DATA 불러오기")
         self.btn_generate = QPushButton("요청서 생성")
+        self.btn_generate_overseas = QPushButton("국외요청서 생성")
         self.btn_generate_approval = QPushButton("결재상신용 생성")
         self.btn_upload_history = QPushButton("발주이력 업로드")
         for btn, color in [
             (self.btn_load_template, "#C8E6C9"),
             (self.btn_load_quote, "#BBDEFB"),
             (self.btn_generate, "#FFF176"),
+            (self.btn_generate_overseas, "#B3E5FC"),
             (self.btn_generate_approval, "#FFE0B2"),
             (self.btn_upload_history, "#E1BEE7"),
         ]:
@@ -1450,6 +1452,7 @@ class RackPurchaseRequestPage(QWidget):
 
         self.btn_load_template.clicked.connect(self._load_rack_template)
         self.btn_generate.clicked.connect(self._generate_request)
+        self.btn_generate_overseas.clicked.connect(self._generate_overseas_request)
         self.btn_load_quote.clicked.connect(self._load_quote_data)
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
         self.btn_upload_history.clicked.connect(self._upload_order_history)
@@ -1565,6 +1568,9 @@ class RackPurchaseRequestPage(QWidget):
             # 공정(7), 설비(10), 5D(15) 변경 시 실시간 Ref. 매칭
             if _row in (7, 10, 15):
                 _cb.currentTextChanged.connect(self._on_key_field_changed)
+            # 5D(15) 변경 시 FSC 자동 매칭
+            if _row == 15:
+                _cb.currentTextChanged.connect(self._auto_match_fsc)
 
         manager_row, manager_col = self._slot_pos(4)
         manager = _NoScrollComboBox()
@@ -1614,6 +1620,14 @@ class RackPurchaseRequestPage(QWidget):
         combo_83.setStyleSheet("QComboBox { background-color: #DDE2E6; }")
         self.table.setCellWidget(27, self.COL_REF_ITEM, combo_83)
 
+        # 기본값 설정 (견적의뢰DATA 없을 때 초기 표시값)
+        inv_item = self.table.item(2, self.COL_ITEM)
+        if inv_item:
+            inv_item.setText("투자미확인")
+        self._set_slot_value(1, datetime.now().strftime("%Y-%m-%d"))
+        self._set_slot_value(2, "입력필요")
+        self._set_slot_value(3, "구두발주")
+
     def _set_item(self, row: int, col: int, text: str, color: str, *, bold: bool = False,
                   editable: bool = True, size: Optional[int] = None) -> None:
         item = QTableWidgetItem(text)
@@ -1659,6 +1673,25 @@ class RackPurchaseRequestPage(QWidget):
         it_qty = self.table.item(row, self.COL_QTY)
         if it_qty:
             it_qty.setText(ref_qty)
+
+    def _clear_lower_rows(self) -> None:
+        """rows 17-31(RACK CH~3단 모니터링 Cable) 항목/수량 값 공란으로 초기화."""
+        for row in range(17, 32):
+            w = self.table.cellWidget(row, self.COL_ITEM)
+            if isinstance(w, QComboBox):
+                w.setCurrentText("")
+            else:
+                it = self.table.item(row, self.COL_ITEM)
+                if it:
+                    it.setText("")
+            it_qty = self.table.item(row, self.COL_QTY)
+            if it_qty:
+                it_qty.setText("")
+
+    def _apply_all_checked_refs(self) -> None:
+        """rows 17-31 중 체크된 행의 Ref 항목/수량을 COL_ITEM/COL_QTY에 즉시 반영."""
+        for row in range(17, 32):
+            self._on_ref_apply_changed(row)
 
     def _slot_pos(self, slot: int) -> Tuple[int, int]:
         """이미지 양식의 1~58 입력칸 번호를 테이블 row/col로 변환.
@@ -1899,6 +1932,7 @@ class RackPurchaseRequestPage(QWidget):
             self._highlight_request_row(row, "")
             self._reset_slot_values(list(range(1, 15)))
             self._fill_rack_ref_slots(None)
+            self._clear_lower_rows()
 
     def _apply_request_row(self, row: int, show_message: bool = True) -> None:
         if row < 0 or row >= len(self.request_rows):
@@ -1932,6 +1966,7 @@ class RackPurchaseRequestPage(QWidget):
         rack_5d      = s(rd.get("V"))
         rack_row = self._lookup_rack_row(rack_process, rack_vendor, rack_5d)
         self._fill_rack_ref_slots(rack_row)
+        self._apply_all_checked_refs()
 
         invest_info = parse_invest_info(rd.get("G"))
         invoice_text = "인보이스 필요" if "KIT" in invest_info.upper() else "해당 없음"
@@ -2085,6 +2120,23 @@ class RackPurchaseRequestPage(QWidget):
         code_5d = self._text(15, self.COL_ITEM)
         rack_row = self._lookup_rack_row(process, vendor, code_5d)
         self._fill_rack_ref_slots(rack_row)
+        self._apply_all_checked_refs()
+
+    def _auto_match_fsc(self, _text: str = "") -> None:
+        """5D 입력 시 FSC All List에서 FSC를 실시간 자동 매칭."""
+        code_5d = self._text(15, self.COL_ITEM)
+        fsc = self._lookup_fsc_from_template(code_5d)
+        if not fsc:
+            return
+        w = self.table.cellWidget(16, self.COL_ITEM)
+        if isinstance(w, QComboBox):
+            w.blockSignals(True)
+            w.setCurrentText(fsc)
+            w.blockSignals(False)
+        else:
+            it = self.table.item(16, self.COL_ITEM)
+            if it:
+                it.setText(fsc)
 
     def _upload_order_history(self) -> None:
         """발주이력 업로드: 선택한 요청서 xlsx의 RACK발주양식 2행을 통합양식 RACK발주 시트에 추가."""
@@ -2120,7 +2172,17 @@ class RackPurchaseRequestPage(QWidget):
                     first_empty = r
                     break
 
+            # 기존 데이터 행 수집 (중복 검사용)
+            existing_rows: List[Dict] = []
+            for r in range(1, first_empty):
+                if ws.cell(r, 3).value is not None and str(ws.cell(r, 3).value).strip():
+                    rd = {c: ws.cell(r, c).value
+                          for c in range(1, (ws.max_column or 0) + 1)
+                          if ws.cell(r, c).value is not None}
+                    existing_rows.append(rd)
+
             added = 0
+            duplicates: List[str] = []
             errors = []
             for path in paths:
                 try:
@@ -2130,10 +2192,18 @@ class RackPurchaseRequestPage(QWidget):
                         src_wb.close()
                         continue
                     src_ws = src_wb["RACK발주양식"]
-                    for cell in src_ws[2]:
-                        if cell.value is not None:
-                            ws.cell(first_empty, cell.column, cell.value)
+                    new_row: Dict = {cell.column: cell.value
+                                     for cell in src_ws[2] if cell.value is not None}
                     src_wb.close()
+
+                    # 완전히 동일한 행 있으면 중복으로 스킵
+                    if any(ex == new_row for ex in existing_rows):
+                        duplicates.append(os.path.basename(path))
+                        continue
+
+                    for col, val in new_row.items():
+                        ws.cell(first_empty, col, val)
+                    existing_rows.append(new_row)
                     first_empty += 1
                     added += 1
                 except Exception as e:
@@ -2143,6 +2213,8 @@ class RackPurchaseRequestPage(QWidget):
             tmpl_wb.close()
 
             msg = f"{added}건 발주이력을 RACK발주 시트에 추가했습니다."
+            if duplicates:
+                msg += f"\n\n중복 항목 발견 (등록 제외됨):\n" + "\n".join(duplicates)
             if errors:
                 msg += "\n\n오류:\n" + "\n".join(errors)
             QMessageBox.information(self, "발주이력 업로드 완료", msg)
@@ -2178,11 +2250,6 @@ class RackPurchaseRequestPage(QWidget):
         if not self.rack_template_path:
             QMessageBox.warning(self, "오류", "통합양식을 먼저 불러오세요.")
             return
-        if not self._is_file_writable(self.rack_template_path):
-            QMessageBox.warning(self, "파일 잠금",
-                "통합양식 파일이 다른 프로그램(Excel)에서 열려 있어 수정할 수 없습니다.\n"
-                "Excel에서 통합양식을 닫은 후 다시 시도해 주세요.")
-            return
 
         checked_rows = self._checked_request_rows()
 
@@ -2211,6 +2278,19 @@ class RackPurchaseRequestPage(QWidget):
             if errors:
                 msg += f"\n\n실패 {len(errors)}건:\n" + "\n".join(errors)
             QMessageBox.information(self, "생성 완료", msg)
+
+    def _generate_overseas_request(self) -> None:
+        """국외요청서 생성: 의뢰파일DATA 체크 여부와 무관하게 현재 입력값으로 요청서 1개 생성."""
+        if not self.rack_template_path:
+            QMessageBox.warning(self, "오류", "통합양식을 먼저 불러오세요.")
+            return
+        try:
+            out_path = self._do_generate_one()
+            QMessageBox.information(self, "완료",
+                f"국외 RACK 구매요청서 생성 완료\n{os.path.basename(out_path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류:\n{e}")
+            logger.error("국외요청서 생성 오류", exc_info=True)
 
     # ── xlsx 직접 조작 helper (ET 미사용, regex/raw bytes) ────────────────
 

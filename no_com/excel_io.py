@@ -590,48 +590,52 @@ class ExcelCOM:
 def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
                         xl_app=None) -> str:
     """
-    xlsx 의 Visible 시트를 개별 PDF 로 내보낸 뒤 병합.
-    반환: 병합된 PDF 경로 (시트 없으면 "")
+    xlsx 의 ESIGN_TARGET 시트(원래 Visible인 것)만 PDF 로 내보낸다.
+    반환: PDF 경로 (대상 시트 없으면 "")
 
-    xl_app: 호출자가 이미 열어 둔 Excel.Application COM 객체.
-            None 이면 내부에서 ExcelCOM 을 새로 열고 닫는다 (단독 호출 호환).
+    워크북 단위 ExportAsFixedFormat 1회 호출:
+      - 비대상 시트를 일시적으로 VeryHidden 처리 → workbook 전체 export
+      - Close(False) 로 디스크 파일은 변경하지 않음
+      - RenameFile 발생 횟수: 파일당 1회 (기존 시트 수만큼 → 1회로 감소)
+
+    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
     """
-    import fitz  # PyMuPDF
+    import fitz
 
     out_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}.pdf")
 
     def _process(app) -> str:
-        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=False, UpdateLinks=0, AddToMru=False)
         try:
-            merged = fitz.open()
-            for name in SheetName.ESIGN_TARGET:
-                try:
-                    ws = wb.Worksheets(name)
-                except Exception:
-                    continue
-                if int(ws.Visible) != -1:   # -1 = xlSheetVisible
-                    continue
-                safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
-                sheet_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}_{safe_name}.pdf")
-                try:
-                    ws.ExportAsFixedFormat(0, sheet_pdf)
-                except Exception as e:
-                    logger.warning("PDF Export 실패 (%s): %s", name, e)
-                    continue
-                if os.path.exists(sheet_pdf):
-                    src = fitz.open(sheet_pdf)
-                    merged.insert_pdf(src)
-                    src.close()
+            target_set = set(SheetName.ESIGN_TARGET)
+            to_hide = []
 
-            if len(merged) == 0:
-                merged.close()
+            # 원래 Visible 이면서 ESIGN_TARGET에 속하는 시트만 유지
+            has_visible_target = False
+            for ws in wb.Worksheets:
+                is_target  = ws.Name in target_set
+                was_visible = int(ws.Visible) == -1   # xlSheetVisible = -1
+                if is_target and was_visible:
+                    has_visible_target = True
+                else:
+                    to_hide.append(ws)
+
+            if not has_visible_target:
                 return ""
-            merged.save(out_pdf)
-            merged.close()
-            return out_pdf
+
+            # 비대상 시트를 VeryHidden (xlVeryHidden = 2)
+            for ws in to_hide:
+                try:
+                    ws.Visible = 2
+                except Exception:
+                    pass
+
+            # 워크북 전체를 PDF 1회 export (ExportAsFixedFormat 1회 = RenameFile 1회)
+            wb.ExportAsFixedFormat(0, out_pdf)
+            return out_pdf if os.path.exists(out_pdf) else ""
         finally:
             try:
-                wb.Close(False)
+                wb.Close(False)   # 디스크 파일 변경 없음
             except Exception:
                 pass
 

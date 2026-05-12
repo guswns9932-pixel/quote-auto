@@ -1532,7 +1532,7 @@ class RackPurchaseRequestPage(QWidget):
                 self._set_item(i, self.COL_REF_APPLY, "-", "#DDE2E6", editable=False)
             else:
                 self._set_item(i, self.COL_REF_APPLY, "", "#DDE2E6", editable=False)
-                host = centered_checkbox(lambda _state: None)
+                host = centered_checkbox(lambda _state, _row=i: self._on_ref_apply_changed(_row))
                 cb = get_checkbox_from_cell(host)
                 if cb:
                     cb.setChecked(True)
@@ -1642,6 +1642,23 @@ class RackPurchaseRequestPage(QWidget):
     def _is_ref_apply_checked(self, row: int) -> bool:
         cb = get_checkbox_from_cell(self.table.cellWidget(row, self.COL_REF_APPLY))
         return bool(cb and cb.isChecked())
+
+    def _on_ref_apply_changed(self, row: int) -> None:
+        """COL_REF_APPLY 체크박스 토글 시 해당 행의 Ref 값을 항목/수량에 즉시 반영."""
+        if not self._is_ref_apply_checked(row):
+            return
+        ref_item = self._text(row, self.COL_REF_ITEM)
+        ref_qty  = self._text(row, self.COL_REF_QTY)
+        w = self.table.cellWidget(row, self.COL_ITEM)
+        if isinstance(w, QComboBox):
+            w.setCurrentText(ref_item)
+        else:
+            it = self.table.item(row, self.COL_ITEM)
+            if it:
+                it.setText(ref_item)
+        it_qty = self.table.item(row, self.COL_QTY)
+        if it_qty:
+            it_qty.setText(ref_qty)
 
     def _slot_pos(self, slot: int) -> Tuple[int, int]:
         """이미지 양식의 1~58 입력칸 번호를 테이블 row/col로 변환.
@@ -2113,10 +2130,9 @@ class RackPurchaseRequestPage(QWidget):
                         src_wb.close()
                         continue
                     src_ws = src_wb["RACK발주양식"]
-                    for col_idx in range(1, (src_ws.max_column or 0) + 1):
-                        val = src_ws.cell(2, col_idx).value
-                        if val is not None:
-                            ws.cell(first_empty, col_idx, val)
+                    for cell in src_ws[2]:
+                        if cell.value is not None:
+                            ws.cell(first_empty, cell.column, cell.value)
                     src_wb.close()
                     first_empty += 1
                     added += 1
@@ -2640,9 +2656,16 @@ class RackPurchaseRequestPage(QWidget):
                     v = txt
                 row2_vals[col] = v
 
-        rack_ch = self._text(17, self.COL_ITEM)
-        if rack_ch:
-            row2_vals[42] = rack_ch  # RACK CH → AP열(42)에도 기입
+        rack_ch_item = self._text(17, self.COL_ITEM)
+        rack_ch_qty  = self._text(17, self.COL_QTY)
+        if rack_ch_item:
+            row2_vals[41] = rack_ch_item  # AO열(41): RACK CH 항목
+        if rack_ch_qty:
+            try:
+                rack_ch_qty_v: Any = int(rack_ch_qty) if '.' not in rack_ch_qty else float(rack_ch_qty)
+            except (ValueError, TypeError):
+                rack_ch_qty_v = rack_ch_qty
+            row2_vals[42] = rack_ch_qty_v  # AP열(42): RACK CH 수량
 
         row2_vals[88] = "전기공통"  # CJ열(88) 항상 기입
 

@@ -2281,19 +2281,21 @@ class RackPurchaseRequestPage(QWidget):
 
             # 3. t="str" 셀 → t="inlineStr" 변환
             #    수식 없이 t="str" 만 남으면 Excel이 "제거된 레코드: 셀 정보" 복구 메시지 발생
-            def _fix_str_cell(m: re.Match) -> str:
-                c = m.group(0)
-                if not re.search(r'\bt="str"', c):
-                    return c
-                vm = re.search(r'<v>(.*?)</v>', c, flags=re.DOTALL)
-                if not vm:
-                    return re.sub(r'\s*\bt="str"', '', c)
-                val = vm.group(1)  # 이미 XML 인코딩된 값 그대로 사용
-                c = re.sub(r'\bt="str"', 't="inlineStr"', c)
-                c = re.sub(r'<v>.*?</v>', f'<is><t>{val}</t></is>', c, flags=re.DOTALL)
-                return c
+            #    여기서는 t="str"이 반드시 opening tag에 있어야 하는 패턴을 직접 매칭
+            def _to_inline(m: re.Match) -> str:
+                pre, suf, body = m.group(1), m.group(2), m.group(3)
+                vm = re.search(r'<v>(.*?)</v>', body, re.DOTALL)
+                if vm:
+                    val = vm.group(1)
+                    body = re.sub(r'<v>.*?</v>', f'<is><t>{val}</t></is>', body, flags=re.DOTALL)
+                return f'<c{pre}t="inlineStr"{suf}>{body}</c>'
 
-            xml = re.sub(r'<c\b[^>]*>.*?</c>', _fix_str_cell, xml, flags=re.DOTALL)
+            xml = re.sub(
+                r'<c\b([^>]*)\bt="str"([^>]*)>(.*?)</c>',
+                _to_inline,
+                xml,
+                flags=re.DOTALL,
+            )
             files[name] = xml.encode('utf-8')
         return files
 

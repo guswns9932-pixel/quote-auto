@@ -587,18 +587,21 @@ class ExcelCOM:
 # 공개 API: 전자서명용 임시 PDF 생성 (COM 유지)
 # ═══════════════════════════════════════════════════════════════
 
-def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int) -> str:
+def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
+                        xl_app=None) -> str:
     """
     xlsx 의 Visible 시트를 개별 PDF 로 내보낸 뒤 병합.
     반환: 병합된 PDF 경로 (시트 없으면 "")
-    전자서명 페이지에서만 호출되며 COM 을 사용하는 유일한 함수.
+
+    xl_app: 호출자가 이미 열어 둔 Excel.Application COM 객체.
+            None 이면 내부에서 ExcelCOM 을 새로 열고 닫는다 (단독 호출 호환).
     """
     import fitz  # PyMuPDF
 
     out_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}.pdf")
 
-    with ExcelCOM() as xl:
-        wb = xl.open(xlsx_path, read_only=True)
+    def _process(app) -> str:
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
         try:
             merged = fitz.open()
             for name in SheetName.ESIGN_TARGET:
@@ -631,3 +634,9 @@ def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int) -> str:
                 wb.Close(False)
             except Exception:
                 pass
+
+    if xl_app is not None:
+        return _process(xl_app)
+
+    with ExcelCOM() as xl:
+        return _process(xl.app)

@@ -169,15 +169,35 @@ class _ExcelLoaderThread(QThread):
 
     def run(self) -> None:
         total = len(self.paths)
-        for i, xlsx in enumerate(self.paths):
-            if self._cancel:
-                break
-            self.progress.emit(i, total, os.path.basename(xlsx))
-            try:
-                self.pdfs.append(excel_io.excel_to_merged_pdf(xlsx, self.tmp_dir, i + 1))
-            except Exception as e:
-                logger.error("임시 PDF 실패 (%s): %s", xlsx, e, exc_info=True)
-                self.pdfs.append("")
+        # Excel 인스턴스를 한 번만 열어 전체 파일에 재사용 → RenameFile 반복 방지
+        try:
+            com_ctx = excel_io.ExcelCOM()
+            com_ctx.__enter__()
+            xl_app = com_ctx.app
+        except Exception as e:
+            logger.error("Excel COM 초기화 실패: %s", e, exc_info=True)
+            com_ctx = None
+            xl_app = None
+
+        try:
+            for i, xlsx in enumerate(self.paths):
+                if self._cancel:
+                    break
+                self.progress.emit(i, total, os.path.basename(xlsx))
+                try:
+                    self.pdfs.append(
+                        excel_io.excel_to_merged_pdf(xlsx, self.tmp_dir, i + 1, xl_app)
+                    )
+                except Exception as e:
+                    logger.error("임시 PDF 실패 (%s): %s", xlsx, e, exc_info=True)
+                    self.pdfs.append("")
+        finally:
+            if com_ctx is not None:
+                try:
+                    com_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+
         self.progress.emit(len(self.pdfs), total, "완료")
 
 

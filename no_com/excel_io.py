@@ -677,7 +677,9 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                 png_path = os.path.join(
                     tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
-                    ws.UsedRange.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
+                    pa = ws.PageSetup.PrintArea
+                    rng = ws.Range(pa) if pa else ws.UsedRange
+                    rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()
                     if img is not None:
                         img.save(png_path, "PNG")

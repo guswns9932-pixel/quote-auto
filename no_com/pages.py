@@ -2054,7 +2054,6 @@ class RackPurchaseRequestPage(QWidget):
         out_path = unique_path(os.path.join(folder, f"{equip_no}_RACK구매요청서.xlsx"))
         shutil.copy2(self.rack_template_path, out_path)
         self._direct_patch_xlsx(out_path)
-        self._update_rack_order_sheet(out_path)
         self._last_generated_folder = folder
         return out_path
 
@@ -2269,13 +2268,32 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_strip_all_formulas(files: dict) -> dict:
-        """모든 워크시트의 수식(<f> 태그 전체)을 제거해 완전 정적 값으로 변환."""
+        """모든 워크시트의 수식을 제거하고 셀 타입을 정규화 (복구 메시지 완전 차단)."""
         for name in list(files.keys()):
             if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
                 continue
             xml = files[name].decode('utf-8', errors='replace')
+
+            # 1. <f>...</f> 전체 제거
             xml = re.sub(r'<f(?:\s[^>]*)?>.*?</f>', '', xml, flags=re.DOTALL)
-            xml = re.sub(r'<f\b[^>]*/>', '', xml)  # 공유수식 인스턴스 (자체종결)
+            # 2. 자체종결 공유수식 인스턴스 <f ... /> 제거
+            xml = re.sub(r'<f\b[^>]*/>', '', xml)
+
+            # 3. t="str" 셀 → t="inlineStr" 변환
+            #    수식 없이 t="str" 만 남으면 Excel이 "제거된 레코드: 셀 정보" 복구 메시지 발생
+            def _fix_str_cell(m: re.Match) -> str:
+                c = m.group(0)
+                if not re.search(r'\bt="str"', c):
+                    return c
+                vm = re.search(r'<v>(.*?)</v>', c, flags=re.DOTALL)
+                if not vm:
+                    return re.sub(r'\s*\bt="str"', '', c)
+                val = vm.group(1)  # 이미 XML 인코딩된 값 그대로 사용
+                c = re.sub(r'\bt="str"', 't="inlineStr"', c)
+                c = re.sub(r'<v>.*?</v>', f'<is><t>{val}</t></is>', c, flags=re.DOTALL)
+                return c
+
+            xml = re.sub(r'<c\b[^>]*>.*?</c>', _fix_str_cell, xml, flags=re.DOTALL)
             files[name] = xml.encode('utf-8')
         return files
 
@@ -2502,54 +2520,6 @@ class RackPurchaseRequestPage(QWidget):
 
         self._xlsx_save(path, files, names)
 
-    def _update_rack_order_sheet(self, generated_path: str) -> None:
-        """생성된 파일 RACK발주양식 2행 → 통합양식 RACK발주 시트 빈 행에 추가 (regex 방식)."""
-        from openpyxl.utils import get_column_letter as _gcl
-
-        try:
-            src_wb  = load_workbook(generated_path, data_only=True)
-            ws_src  = src_wb["RACK발주양식"]
-            src_vals = [(c, ws_src.cell(2, c).value) for c in range(1, ws_src.max_column + 1)]
-            src_wb.close()
-
-            col_val_map = {c: v for c, v in src_vals if v is not None}
-            if not col_val_map:
-                return
-
-            files, names = self._xlsx_load_and_clean(self.rack_template_path)
-
-            wb_bytes   = files.get('xl/workbook.xml', b'')
-            rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
-            rack_file  = self._xlsx_find_sheet_file(wb_bytes, rels_bytes, 'RACK발주')
-
-            if not rack_file or rack_file not in files:
-                QMessageBox.warning(self, "RACK발주 업데이트",
-                                    "통합양식에서 RACK발주 시트를 찾을 수 없습니다.")
-                return
-
-            xml = files[rack_file].decode('utf-8', errors='replace')
-
-            last_data_row = 0
-            for row_m in re.finditer(r'<row\b[^>]*\br="(\d+)"[^>]*>(.*?)</row>',
-                                     xml, flags=re.DOTALL):
-                row_content = row_m.group(2)
-                col_c = re.search(r'<c\b[^>]*r="C\d+"[^>]*>(.*?)</c>',
-                                  row_content, flags=re.DOTALL)
-                if col_c and re.search(r'<v>[^<]+</v>', col_c.group(1)):
-                    last_data_row = max(last_data_row, int(row_m.group(1)))
-
-            target_row = max(last_data_row + 1, 2)
-            prev_styles = self._xlsx_collect_row_styles(xml, target_row - 1)
-
-            files[rack_file] = self._xlsx_patch_sheet_row(
-                files[rack_file], target_row, col_val_map, _gcl, prev_styles)
-
-            self._xlsx_save(self.rack_template_path, files, names)
-
-        except Exception as e:
-            logger.error("RACK발주 시트 업데이트 실패: %s", e, exc_info=True)
-            QMessageBox.warning(self, "RACK발주 업데이트 실패",
-                                f"통합양식 RACK발주 시트 업데이트 중 오류:\n{e}")
 
     def _generate_approval_doc(self) -> None:
         """결재상신용: 여러 요청서 RACK발주양식 2행을 합쳐 A·B열 삭제 후 저장 (zipfile 방식)."""
@@ -2615,6 +2585,12 @@ class RackPurchaseRequestPage(QWidget):
 
             files[rack_file] = self._xlsx_delete_leading_cols(files[rack_file], 2)
             files = self._xlsx_shift_drawing_cols(files, rack_file, 2)
+
+            # 열 숨기기 전체 해제 (<col hidden="1"> 속성 제거)
+            sheet_str = files[rack_file].decode('utf-8', errors='replace')
+            sheet_str = re.sub(r'(<col\b[^>]*?)\s+hidden="1"', r'\1', sheet_str)
+            files[rack_file] = sheet_str.encode('utf-8')
+
             self._xlsx_save(out_path, files, names)
 
             QMessageBox.information(self, "완료",

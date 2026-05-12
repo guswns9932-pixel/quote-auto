@@ -154,22 +154,21 @@ class _GenCoverThread(QThread):
 
 
 class _ExcelLoaderThread(QThread):
-    """전자서명 페이지용: Excel 파일을 백그라운드에서 PDF로 변환."""
+    """전자서명 페이지용: Excel 시트를 CopyPicture로 캡처 (ExportAsFixedFormat 미사용 → RenameFile 없음)."""
     progress = Signal(int, int, str)   # (완료수, 전체수, 현재파일명)
 
     def __init__(self, paths: List[str], tmp_dir: str, parent=None) -> None:
         super().__init__(parent)
-        self.paths    = paths
-        self.tmp_dir  = tmp_dir
-        self.pdfs     : List[str] = []
-        self._cancel  = False
+        self.paths      = paths
+        self.tmp_dir    = tmp_dir
+        self.sheet_pngs : List[List[str]] = []   # 파일별 PNG 경로 리스트
+        self._cancel    = False
 
     def cancel(self) -> None:
         self._cancel = True
 
     def run(self) -> None:
         total = len(self.paths)
-        # Excel 인스턴스를 한 번만 열어 전체 파일에 재사용 → RenameFile 반복 방지
         try:
             com_ctx = excel_io.ExcelCOM()
             com_ctx.__enter__()
@@ -185,12 +184,12 @@ class _ExcelLoaderThread(QThread):
                     break
                 self.progress.emit(i, total, os.path.basename(xlsx))
                 try:
-                    self.pdfs.append(
-                        excel_io.excel_to_merged_pdf(xlsx, self.tmp_dir, i + 1, xl_app)
-                    )
+                    pngs = excel_io.excel_capture_sheets_to_pngs(
+                        xlsx, self.tmp_dir, i + 1, xl_app)
+                    self.sheet_pngs.append(pngs)
                 except Exception as e:
-                    logger.error("임시 PDF 실패 (%s): %s", xlsx, e, exc_info=True)
-                    self.pdfs.append("")
+                    logger.error("시트 캡처 실패 (%s): %s", xlsx, e, exc_info=True)
+                    self.sheet_pngs.append([])
         finally:
             if com_ctx is not None:
                 try:
@@ -198,7 +197,7 @@ class _ExcelLoaderThread(QThread):
                 except Exception:
                     pass
 
-        self.progress.emit(len(self.pdfs), total, "완료")
+        self.progress.emit(len(self.sheet_pngs), total, "완료")
 
 
 # ══════════════════════════════════════════════
@@ -2909,10 +2908,10 @@ class ESignPage(QWidget):
         self._signs       : List = []
         self._files       : List[str] = []
         self._base_folder : str  = ""
-        self._pdfs        : List[str] = []
+        self._sheet_pngs  : List[List[str]] = []   # 파일별 시트 PNG 경로 리스트
+        self._cur_pngs    : List[str] = []          # 현재 파일 PNG 경로들
         self._cur_file    : int  = 0
         self._cur_page    : int  = 0
-        self._pdf_doc            = None
         self._sign_items    : Dict[Tuple[int,int], List[SignatureItem]] = {}
         self._render_sz     : Dict[Tuple[int,int], Tuple[int,int]]     = {}
         self._bg_item              = None
@@ -2993,7 +2992,8 @@ class ESignPage(QWidget):
             base = os.path.dirname(base)
         self._base_folder = base
         self._files = paths
-        self._pdfs = []
+        self._sheet_pngs = []
+        self._cur_pngs   = []
         self._sign_items.clear()
 
         self.file_list.blockSignals(True)
@@ -3035,9 +3035,9 @@ class ESignPage(QWidget):
         if self._load_progress:
             self._load_progress.close()
             self._load_progress = None
-        self._pdfs = self._loader_thread.pdfs
-        while len(self._pdfs) < len(self._files):
-            self._pdfs.append("")
+        self._sheet_pngs = self._loader_thread.sheet_pngs
+        while len(self._sheet_pngs) < len(self._files):
+            self._sheet_pngs.append([])
         self.btn_excel.setEnabled(True)
         self.lbl_status.setText(f"{len(self._files)}개 로드 완료")
         if self.file_list.count() > 0:
@@ -3045,32 +3045,19 @@ class ESignPage(QWidget):
 
     def _on_select_file(self, row: int) -> None:
         if row < 0 or row >= len(self._files): return
-        self._cur_file = row; self._cur_page = 0; self._open_pdf(); self._render()
+        self._cur_file = row; self._cur_page = 0; self._load_sheets(); self._render()
 
-    def _open_pdf(self) -> None:
-        if self._pdf_doc:
-            try: self._pdf_doc.close()
-            except Exception: pass
-            self._pdf_doc = None
-        if self._cur_file >= len(self._pdfs): return
-        pdf_path = self._pdfs[self._cur_file]
-        if not pdf_path or not os.path.exists(pdf_path):
-            self.lbl_status.setText("표시할 시트 없음(스킵)"); self.scene.clear(); return
-        try:
-            import fitz
-            self._pdf_doc = fitz.open(pdf_path)
-        except Exception as e: QMessageBox.critical(self, "오류", f"PDF 열기 실패\n{e}")
+    def _load_sheets(self) -> None:
+        self._cur_pngs = (self._sheet_pngs[self._cur_file]
+                          if self._cur_file < len(self._sheet_pngs) else [])
+        if not self._cur_pngs:
+            self.lbl_status.setText("표시할 시트 없음(스킵)"); self.scene.clear()
 
     def _render(self) -> None:
-        if not self._pdf_doc: return
-        self._cur_page = max(0, min(self._cur_page, len(self._pdf_doc)-1))
-        import fitz
-        page = self._pdf_doc.load_page(self._cur_page)
-        vp_w = max(1, self.view.viewport().width())
-        zoom = max(2.0, min(4.0, vp_w*2 / max(1.0, float(page.rect.width))))
-        pix  = page.get_pixmap(matrix=fitz.Matrix(zoom,zoom), alpha=False)
-        img  = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
-        pm   = QPixmap.fromImage(img.copy())
+        if not self._cur_pngs: return
+        self._cur_page = max(0, min(self._cur_page, len(self._cur_pngs) - 1))
+        pm = QPixmap(self._cur_pngs[self._cur_page])
+        if pm.isNull(): return
         self._render_sz[(self._cur_file, self._cur_page)] = (pm.width(), pm.height())
         if self._shown_key is not None:
             for it in list(self._sign_items.get(self._shown_key, [])):
@@ -3087,26 +3074,27 @@ class ESignPage(QWidget):
             try: self.scene.addItem(it); it.setZValue(10)
             except RuntimeError: pass
         self.scene.setSceneRect(bg.boundingRect()); self.view.resetTransform()
+        vp_w = max(1, self.view.viewport().width())
         scale = vp_w / max(1, pm.width()); self.view.scale(scale, scale); self.view.setFocus()
         self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().minimum())
-        self.lbl_status.setText(f"파일 {self._cur_file+1}/{len(self._files)} / 페이지 {self._cur_page+1}/{len(self._pdf_doc)}")
+        self.lbl_status.setText(f"파일 {self._cur_file+1}/{len(self._files)} / 시트 {self._cur_page+1}/{len(self._cur_pngs)}")
 
     def _next_page(self) -> None:
-        if not self._pdf_doc: return
-        if self._cur_page+1 < len(self._pdf_doc): self._cur_page += 1; self._render()
+        if not self._cur_pngs: return
+        if self._cur_page+1 < len(self._cur_pngs): self._cur_page += 1; self._render()
         elif self._cur_file+1 < len(self._files): self.file_list.setCurrentRow(self._cur_file+1)
 
     def _prev_page(self) -> None:
-        if not self._pdf_doc: return
+        if not self._cur_pngs: return
         if self._cur_page-1 >= 0: self._cur_page -= 1; self._render()
         elif self._cur_file-1 >= 0:
             self.file_list.setCurrentRow(self._cur_file-1)
-            if self._pdf_doc: self._cur_page = max(0, len(self._pdf_doc)-1); self._render()
+            if self._cur_pngs: self._cur_page = max(0, len(self._cur_pngs)-1); self._render()
 
     def _add_sign(self, scene_pos: QPointF) -> None:
         if not self._signs:
             QMessageBox.information(self, "안내", "승인코드 LOAD 후 서명 이미지가 필요합니다."); return
-        if not self._pdf_doc: return
+        if not self._cur_pngs: return
         dlg = PasswordDialog(self, self._code)
         if dlg.exec() != QDialog.Accepted or not dlg.verified: return
         idx = min(1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs)-1)
@@ -3117,10 +3105,7 @@ class ESignPage(QWidget):
         self.scene.update()
 
     def _cleanup_tmp(self) -> None:
-        if self._pdf_doc:
-            try: self._pdf_doc.close()
-            except Exception: pass
-            self._pdf_doc = None
+        self._cur_pngs = []
         if self._tmp_dir and os.path.isdir(self._tmp_dir):
             try:
                 shutil.rmtree(self._tmp_dir)
@@ -3129,7 +3114,7 @@ class ESignPage(QWidget):
             self._tmp_dir = None
 
     def _save_pdf(self) -> None:
-        if not self._pdf_doc or not self._files:
+        if not any(self._sheet_pngs) or not self._files:
             QMessageBox.information(self, "안내", "먼저 엑셀을 LOAD 하세요."); return
         folder_name = os.path.basename(self._base_folder.rstrip("\\/"))
         out = unique_path(os.path.join(self._base_folder, f"{folder_name}.pdf"))
@@ -3143,26 +3128,45 @@ class ESignPage(QWidget):
 
     def _build_pdf(self, out: str) -> None:
         import fitz
+        from PySide6.QtGui import QPainter
+        A4_W, A4_H = 595.0, 842.0   # A4 in points (1pt = 1/72 inch)
         final = fitz.open()
-        for fi, pdf_path in enumerate(self._pdfs):
-            if not pdf_path or not os.path.exists(pdf_path): continue
-            src = fitz.open(pdf_path)
-            try:
-                for pno in range(len(src)):
-                    final.insert_pdf(src, from_page=pno, to_page=pno); dst = final[-1]
-                    signs = self._sign_items.get((fi,pno), [])
-                    if not signs: continue
-                    iw, ih = self._render_sz.get((fi,pno), (0,0))
-                    if iw <= 0 or ih <= 0:
-                        pix = src.load_page(pno).get_pixmap(matrix=fitz.Matrix(2.0,2.0), alpha=False)
-                        iw, ih = pix.width, pix.height
-                    pr = dst.rect
+
+        for fi, pngs in enumerate(self._sheet_pngs):
+            for pno, png_path in enumerate(pngs):
+                if not os.path.exists(png_path):
+                    continue
+                base_pm = QPixmap(png_path)
+                if base_pm.isNull():
+                    continue
+                iw, ih = base_pm.width(), base_pm.height()
+                signs = self._sign_items.get((fi, pno), [])
+
+                if signs:
+                    # 서명 이미지를 PNG 위에 합성
+                    composed = QPixmap(iw, ih)
+                    composed.fill(Qt.white)
+                    painter = QPainter(composed)
+                    painter.drawPixmap(0, 0, base_pm)
                     for it in list(signs):
-                        try: x, y = float(it.pos().x()), float(it.pos().y())
-                        except RuntimeError: continue
-                        rect = fitz.Rect((x/iw)*pr.width, (y/ih)*pr.height,
-                                          ((x+self.SIGN_W)/iw)*pr.width, ((y+self.SIGN_H)/ih)*pr.height)
-                        ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
-                        it.pixmap().save(buf, "PNG"); dst.insert_image(rect, stream=ba.data())
-            finally: src.close()
+                        try:
+                            x, y = float(it.pos().x()), float(it.pos().y())
+                        except RuntimeError:
+                            continue
+                        painter.drawPixmap(int(x), int(y), it.pixmap())
+                    painter.end()
+                    final_pm = composed
+                else:
+                    final_pm = base_pm
+
+                # QPixmap → PNG bytes
+                ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
+                final_pm.save(buf, "PNG"); buf.close()
+
+                # A4 비율 유지하며 PDF 페이지 생성
+                scale = min(A4_W / max(1, iw), A4_H / max(1, ih))
+                pw, ph = iw * scale, ih * scale
+                page = final.new_page(width=pw, height=ph)
+                page.insert_image(fitz.Rect(0, 0, pw, ph), stream=bytes(ba))
+
         final.save(out); final.close()

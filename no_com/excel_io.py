@@ -644,3 +644,57 @@ def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
 
     with ExcelCOM() as xl:
         return _process(xl.app)
+
+
+def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
+                                  xl_app=None) -> List[str]:
+    """
+    xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
+    ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
+
+    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
+    반환: 저장된 PNG 경로 리스트 (순서 = ESIGN_TARGET 순서)
+    """
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        logger.error("Pillow(PIL) 없음 — pip install pillow")
+        return []
+
+    png_paths: List[str] = []
+
+    def _process(app) -> List[str]:
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
+        try:
+            for idx, name in enumerate(SheetName.ESIGN_TARGET):
+                try:
+                    ws = wb.Worksheets(name)
+                except Exception:
+                    continue
+                if int(ws.Visible) != -1:   # xlSheetVisible = -1
+                    continue
+                safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
+                png_path = os.path.join(
+                    tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
+                try:
+                    ws.UsedRange.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
+                    img = ImageGrab.grabclipboard()
+                    if img is not None:
+                        img.save(png_path, "PNG")
+                        png_paths.append(png_path)
+                    else:
+                        logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
+                except Exception as e:
+                    logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
+        finally:
+            try:
+                wb.Close(False)
+            except Exception:
+                pass
+        return png_paths
+
+    if xl_app is not None:
+        return _process(xl_app)
+
+    with ExcelCOM() as xl:
+        return _process(xl.app)

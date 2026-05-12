@@ -1840,13 +1840,19 @@ class RackPurchaseRequestPage(QWidget):
         self._highlight_request_row(row, "#FFCDD2")
 
     def _on_request_row_clicked(self, row: int, _col: int) -> None:
-        """클릭한 행을 파스텔 파랑으로 하이라이트 (이미 생성된 행은 유지)."""
-        for col in range(1, self.request_data_table.columnCount()):
-            item = self.request_data_table.item(row, col)
-            if item:
-                bg = item.background().color().name()
-                if bg != "#ffcdd2":  # 생성 완료 색은 유지
-                    item.setBackground(QBrush(QColor("#E3F2FD")))
+        """클릭한 행만 파스텔 파랑; 이전 클릭 행 색 해제 (생성완료·체크 행 제외)."""
+        n = self.request_data_table.rowCount()
+        for r in range(n):
+            item1 = self.request_data_table.item(r, 1)
+            if item1 is None:
+                continue
+            bg = item1.background().color().name()
+            if r == row:
+                if bg != "#ffcdd2":
+                    self._highlight_request_row(r, "#E3F2FD")
+            else:
+                if bg == "#e3f2fd" and not self._is_request_checked(r):
+                    self._highlight_request_row(r, "")
 
     def _on_request_target_changed(self, row: int) -> None:
         if self._is_request_checked(row):
@@ -2234,16 +2240,43 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_strip_external_ref_formulas(files: dict) -> dict:
-        """모든 워크시트에서 [N] 외부 링크 참조를 포함한 <f> 태그를 제거 (캐시값 <v> 유지)."""
+        """워크시트에서 [N] 외부링크 참조 수식의 <f> 태그와 고아 공유수식 인스턴스를 제거."""
         for name in list(files.keys()):
             if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
                 continue
             xml = files[name].decode('utf-8', errors='replace')
+
+            # Step 1: 외부링크 공유수식 마스터의 si 인덱스 수집
+            dead_si: set = set()
+            for m in re.finditer(r'<f\b([^>]*)>(.*?)</f>', xml, flags=re.DOTALL):
+                if re.search(r'\[\d+\]', m.group(2)):
+                    si_m = re.search(r'\bsi="(\d+)"', m.group(1))
+                    if si_m:
+                        dead_si.add(si_m.group(1))
+
+            # Step 2: 외부링크 포함 <f>...</f> 제거
             def _drop(m: re.Match) -> str:
                 return '' if re.search(r'\[\d+\]', m.group(0)) else m.group(0)
             new_xml = re.sub(r'<f(?:\s[^>]*)?>.*?</f>', _drop, xml, flags=re.DOTALL)
+
+            # Step 3: 고아 공유수식 인스턴스 (자체종결 <f si="N"/>) 제거
+            for si in dead_si:
+                new_xml = re.sub(rf'<f\b[^>]*\bsi="{re.escape(si)}"[^>]*/>', '', new_xml)
+
             if new_xml != xml:
                 files[name] = new_xml.encode('utf-8')
+        return files
+
+    @staticmethod
+    def _xlsx_strip_all_formulas(files: dict) -> dict:
+        """모든 워크시트의 수식(<f> 태그 전체)을 제거해 완전 정적 값으로 변환."""
+        for name in list(files.keys()):
+            if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
+                continue
+            xml = files[name].decode('utf-8', errors='replace')
+            xml = re.sub(r'<f(?:\s[^>]*)?>.*?</f>', '', xml, flags=re.DOTALL)
+            xml = re.sub(r'<f\b[^>]*/>', '', xml)  # 공유수식 인스턴스 (자체종결)
+            files[name] = xml.encode('utf-8')
         return files
 
     @staticmethod
@@ -2388,8 +2421,12 @@ class RackPurchaseRequestPage(QWidget):
     # ── xlsx 생성 / 통합양식 업데이트 ──────────────────────────────────────
 
     @staticmethod
-    def _xlsx_load_and_clean(path: str) -> Tuple[dict, list]:
-        """xlsx ZIP을 읽어 calcChain·externalLinks를 제거한 (files, names) 반환."""
+    def _xlsx_load_and_clean(path: str, *, strip_all_formulas: bool = False) -> Tuple[dict, list]:
+        """xlsx ZIP을 읽어 calcChain·externalLinks를 제거한 (files, names) 반환.
+
+        strip_all_formulas=True: 모든 수식 제거 (출력 파일용 — 복구 메시지 원천 차단)
+        strip_all_formulas=False: 외부링크+고아 공유수식만 제거 (템플릿 업데이트용)
+        """
         import zipfile as _zf
         with _zf.ZipFile(path, 'r') as zf:
             names = zf.namelist()
@@ -2397,7 +2434,10 @@ class RackPurchaseRequestPage(QWidget):
         files.pop('xl/calcChain.xml', None)
         names = [n for n in names if n != 'xl/calcChain.xml']
         files, names = RackPurchaseRequestPage._xlsx_remove_external_links(files, names)
-        files = RackPurchaseRequestPage._xlsx_strip_external_ref_formulas(files)
+        if strip_all_formulas:
+            files = RackPurchaseRequestPage._xlsx_strip_all_formulas(files)
+        else:
+            files = RackPurchaseRequestPage._xlsx_strip_external_ref_formulas(files)
         return files, names
 
     @staticmethod
@@ -2428,7 +2468,7 @@ class RackPurchaseRequestPage(QWidget):
         """drawings 손상·calcChain 오류 없이 xlsx를 직접 수정 (regex 방식)."""
         from openpyxl.utils import get_column_letter as _gcl
 
-        files, names = self._xlsx_load_and_clean(path)
+        files, names = self._xlsx_load_and_clean(path, strip_all_formulas=True)
 
         wb_bytes   = files.get('xl/workbook.xml', b'')
         rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
@@ -2553,7 +2593,7 @@ class RackPurchaseRequestPage(QWidget):
                     all_row_vals.append({})
 
             shutil.copy2(paths[0], out_path)
-            files, names = self._xlsx_load_and_clean(out_path)
+            files, names = self._xlsx_load_and_clean(out_path, strip_all_formulas=True)
 
             wb_bytes   = files.get('xl/workbook.xml', b'')
             rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')

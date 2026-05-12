@@ -2279,20 +2279,38 @@ class RackPurchaseRequestPage(QWidget):
             # 2. 자체종결 공유수식 인스턴스 <f ... /> 제거
             xml = re.sub(r'<f\b[^>]*/>', '', xml)
 
-            # 3. t="str" 셀 → t="inlineStr" 변환
+            # 3. 비자체종결 t="str" 셀 → t="inlineStr" 변환 또는 빈 셀
             #    수식 없이 t="str" 만 남으면 Excel이 "제거된 레코드: 셀 정보" 복구 메시지 발생
-            #    여기서는 t="str"이 반드시 opening tag에 있어야 하는 패턴을 직접 매칭
             def _to_inline(m: re.Match) -> str:
                 pre, suf, body = m.group(1), m.group(2), m.group(3)
                 vm = re.search(r'<v>(.*?)</v>', body, re.DOTALL)
                 if vm:
                     val = vm.group(1)
                     body = re.sub(r'<v>.*?</v>', f'<is><t>{val}</t></is>', body, flags=re.DOTALL)
-                return f'<c{pre}t="inlineStr"{suf}>{body}</c>'
+                    return f'<c{pre}t="inlineStr"{suf}>{body}</c>'
+                # <v> 없음: t 속성 제거 → 빈 숫자형 셀 (inlineStr without <is> also invalid)
+                return f'<c{(pre + suf).rstrip()}/>'
 
             xml = re.sub(
                 r'<c\b([^>]*)\bt="str"([^>]*)>(.*?)</c>',
                 _to_inline,
+                xml,
+                flags=re.DOTALL,
+            )
+
+            # 4. 안전망: 자체종결 <c ... t="str" .../> 에서 t="str" 제거 → 빈 셀
+            xml = re.sub(r'(<c\b[^>]*?)\s+t="str"([^>]*/>)', r'\1\2', xml)
+
+            # 5. t="inlineStr" 이지만 <is> 없는 셀 → 빈 <is><t/> 추가
+            def _ensure_is(m: re.Match) -> str:
+                if '<is' in m.group(3):
+                    return m.group(0)
+                pre, suf, body = m.group(1), m.group(2), m.group(3)
+                return f'<c{pre}t="inlineStr"{suf}>{body}<is><t/></is></c>'
+
+            xml = re.sub(
+                r'<c\b([^>]*)\bt="inlineStr"([^>]*)>(.*?)</c>',
+                _ensure_is,
                 xml,
                 flags=re.DOTALL,
             )

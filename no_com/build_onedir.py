@@ -58,6 +58,7 @@ def _make_spec(app_name: str, icon: str) -> str:
 
         openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
         fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
+        pil_d,      pil_b,      pil_h      = collect_all("PIL")
 
         # pythoncom / pywintypes DLL 직접 수집 (ordinal 오류 방지)
         _pywin32_dlls = []
@@ -73,11 +74,13 @@ def _make_spec(app_name: str, icon: str) -> str:
             binaries=[
                 *openpyxl_b,
                 *fitz_b,
+                *pil_b,
                 *_pywin32_dlls,
             ],
             datas=[
                 *openpyxl_d,
                 *fitz_d,
+                *pil_d,
             ],
             hiddenimports=[
                 "PySide6.QtCore",
@@ -88,6 +91,10 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "openpyxl.cell._writer",
                 *openpyxl_h,
                 *fitz_h,
+                *pil_h,
+                "PIL",
+                "PIL.ImageGrab",
+                "PIL.Image",
                 "pythoncom",
                 "pywintypes",
                 "win32api",
@@ -99,7 +106,7 @@ def _make_spec(app_name: str, icon: str) -> str:
             ],
             hookspath=[],
             runtime_hooks=[],
-            excludes=["tkinter", "matplotlib", "numpy", "scipy", "PIL"],
+            excludes=["tkinter", "matplotlib", "numpy", "scipy"],
             noarchive=False,
             optimize=1,
         )

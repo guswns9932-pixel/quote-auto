@@ -29,10 +29,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-
 import excel_io
 from core import (
     QuoteState, SheetName,
@@ -95,6 +91,7 @@ class _TemplateLoaderThread(QThread):
         self.path = path
     def run(self) -> None:
         try:
+            from openpyxl import load_workbook
             wb = load_workbook(self.path, data_only=False)
             rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(wb[SheetName.ITEMS])
             cmap = excel_io.parse_code_map_sheet(wb[SheetName.CODE_MAP])
@@ -786,6 +783,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             return
         # 시트명 사전 검증 (빠름 — 메타만 읽음)
         try:
+            from openpyxl import load_workbook
             wb_meta = load_workbook(path, read_only=True, data_only=False)
             missing = [n for n in SheetName.REQUIRED if n not in wb_meta.sheetnames]
             wb_meta.close()
@@ -1512,7 +1510,8 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
         self.btn_upload_history.clicked.connect(self._upload_order_history)
 
-        self._refresh_req_list()
+        # UI 렌더링 완료 후 파일 스캔 (블로킹 방지)
+        QTimer.singleShot(0, self._refresh_req_list)
 
     def _build_request_data_panel(self) -> QFrame:
         """불러온 견적의뢰DATA를 표시하는 붉은 박스 영역."""
@@ -1545,6 +1544,13 @@ class RackPurchaseRequestPage(QWidget):
         return frame
 
     def _populate_table(self) -> None:
+        self.table.setUpdatesEnabled(False)
+        try:
+            self._populate_table_inner()
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+    def _populate_table_inner(self) -> None:
         self._set_item(0, self.COL_LABEL, "", "#DDE2E6", bold=True, editable=False)
         self._set_item(0, self.COL_ITEM, "RACK구매요청서", "#C7EAF4", bold=True, editable=False)
         self._set_item(0, self.COL_REF_ITEM, "Ref.", "#DDE2E6", bold=True, editable=False)
@@ -1683,6 +1689,7 @@ class RackPurchaseRequestPage(QWidget):
         self.table.setCellWidget(27, self.COL_REF_ITEM, combo_83)
 
         self._set_default_values()
+        # _populate_table_inner 끝 — setUpdatesEnabled(True)는 _populate_table에서 처리
 
     def _set_default_values(self) -> None:
         """견적의뢰DATA와 무관한 기본값 설정 (통합양식 로드 후에도 재적용)."""
@@ -1881,6 +1888,7 @@ class RackPurchaseRequestPage(QWidget):
             return
         required = ["RACK발주", "RACK발주양식", "FSC All List"]
         try:
+            from openpyxl import load_workbook
             wb = load_workbook(path, data_only=True)
             missing = [name for name in required if name not in wb.sheetnames]
             if missing:
@@ -2950,6 +2958,7 @@ class RackPurchaseRequestPage(QWidget):
             all_row_vals: List[Dict[int, Any]] = []
             for path in paths:
                 try:
+                    from openpyxl import load_workbook
                     src_wb = load_workbook(path, data_only=True)
                     ws_r   = src_wb["RACK발주양식"]
                     rv = {c: ws_r.cell(2, c).value

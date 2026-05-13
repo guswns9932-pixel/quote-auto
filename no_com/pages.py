@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
-    QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
+    QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -1443,7 +1443,17 @@ class RackPurchaseRequestPage(QWidget):
 
         self.lbl_template_status = info_label("통합양식: 미로드")
         outer.addWidget(self.lbl_template_status)
-        outer.addWidget(self._build_request_data_panel())
+
+        # ── 좌우 분할: 좌=의뢰DATA+테이블 / 우=생성된 요청서 목록(420px) ──
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        # 좌측: 기존 의뢰파일DATA 패널 + 메인 테이블
+        left_w = QWidget()
+        left_v = QVBoxLayout(left_w)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.setSpacing(6)
+        left_v.addWidget(self._build_request_data_panel())
 
         self.table = QTableWidget(32, 7)
         self.table.verticalHeader().setVisible(False)
@@ -1467,7 +1477,33 @@ class RackPurchaseRequestPage(QWidget):
         for r in range(self.table.rowCount()):
             self.table.setRowHeight(r, 24)
         self.table.setRowHeight(0, 30)
-        outer.addWidget(self.table, 1)
+        left_v.addWidget(self.table, 1)
+        splitter.addWidget(left_w)
+
+        # 우측: 생성된 요청서 목록 (420px 고정)
+        right_w = QWidget()
+        right_w.setFixedWidth(420)
+        right_v = QVBoxLayout(right_w)
+        right_v.setContentsMargins(6, 0, 0, 0)
+        right_v.setSpacing(4)
+
+        req_title_row = QHBoxLayout()
+        req_title_lbl = bold_label("생성된 요청서", size=11)
+        self.btn_refresh_req_list = QPushButton("새로고침")
+        self.btn_refresh_req_list.setFixedHeight(24)
+        self.btn_refresh_req_list.clicked.connect(self._refresh_req_list)
+        req_title_row.addWidget(req_title_lbl)
+        req_title_row.addStretch(1)
+        req_title_row.addWidget(self.btn_refresh_req_list)
+        right_v.addLayout(req_title_row)
+
+        self.req_list = QListWidget()
+        self.req_list.setToolTip("더블클릭하면 파일을 열 수 있습니다.")
+        self.req_list.itemDoubleClicked.connect(self._open_req_file)
+        right_v.addWidget(self.req_list, 1)
+        splitter.addWidget(right_w)
+
+        outer.addWidget(splitter, 1)
 
         self.btn_load_template.clicked.connect(self._load_rack_template)
         self.btn_generate.clicked.connect(self._generate_request)
@@ -1475,6 +1511,8 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_load_quote.clicked.connect(self._load_quote_data)
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
         self.btn_upload_history.clicked.connect(self._upload_order_history)
+
+        self._refresh_req_list()
 
     def _build_request_data_panel(self) -> QFrame:
         """불러온 견적의뢰DATA를 표시하는 붉은 박스 영역."""
@@ -2257,6 +2295,34 @@ class RackPurchaseRequestPage(QWidget):
             QMessageBox.critical(self, "업로드 오류", f"발주이력 업로드 중 오류:\n{e}")
             logger.error("발주이력 업로드 오류", exc_info=True)
 
+    def _refresh_req_list(self) -> None:
+        """RACK구매요청서 폴더의 xlsx 파일 목록을 우측 패널에 갱신."""
+        root = os.path.join(exe_dir(), "RACK구매요청서")
+        self.req_list.clear()
+        if not os.path.isdir(root):
+            return
+        files = []
+        for dirpath, _, filenames in os.walk(root):
+            for fn in filenames:
+                if fn.endswith(".xlsx") and not fn.startswith("~$"):
+                    full = os.path.join(dirpath, fn)
+                    files.append((os.path.getmtime(full), full))
+        files.sort(reverse=True)  # 최신순
+        for _, full in files:
+            rel = os.path.relpath(full, root)
+            item = QListWidgetItem(rel)
+            item.setData(Qt.UserRole, full)
+            item.setToolTip(full)
+            self.req_list.addItem(item)
+
+    def _open_req_file(self, item: QListWidgetItem) -> None:
+        """더블클릭한 요청서 파일을 기본 프로그램으로 열기."""
+        path = item.data(Qt.UserRole)
+        if path and os.path.exists(path):
+            os.startfile(path)
+        else:
+            QMessageBox.warning(self, "파일 없음", f"파일을 찾을 수 없습니다:\n{path}")
+
     @staticmethod
     def _is_file_writable(path: str) -> bool:
         """파일이 쓰기 가능한지 확인 (다른 프로세스에 잠겨 있으면 False)."""
@@ -2313,6 +2379,7 @@ class RackPurchaseRequestPage(QWidget):
             if errors:
                 msg += f"\n\n실패 {len(errors)}건:\n" + "\n".join(errors)
             QMessageBox.information(self, "생성 완료", msg)
+        self._refresh_req_list()
 
     def _generate_overseas_request(self) -> None:
         """국외요청서 생성: 의뢰파일DATA 체크 여부와 무관하게 현재 입력값으로 요청서 1개 생성."""
@@ -2326,6 +2393,7 @@ class RackPurchaseRequestPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류:\n{e}")
             logger.error("국외요청서 생성 오류", exc_info=True)
+        self._refresh_req_list()
 
     # ── xlsx 직접 조작 helper (ET 미사용, regex/raw bytes) ────────────────
 

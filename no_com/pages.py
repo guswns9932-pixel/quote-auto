@@ -1549,7 +1549,7 @@ class RackPurchaseRequestPage(QWidget):
         self._set_item(0, self.COL_ITEM, "RACK구매요청서", "#C7EAF4", bold=True, editable=False)
         self._set_item(0, self.COL_REF_ITEM, "Ref.", "#DDE2E6", bold=True, editable=False)
         self._set_item(0, self.COL_REF_APPLY, "", "#00B050", bold=True, editable=False)
-        self.btn_apply_ref = QPushButton("Ref. 적용")
+        self.btn_apply_ref = QPushButton("적용")
         self.btn_apply_ref.setStyleSheet(
             "QPushButton {"
             "  background-color: #00E676; color: #000; border: 2px solid #00C853;"

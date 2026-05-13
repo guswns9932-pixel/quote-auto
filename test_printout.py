@@ -43,6 +43,7 @@ try:
                 print(f"  {name!r}  → 건너뜀 ({VISIBLE_LABEL.get(v, v)})")
                 continue
 
+            ws.Activate()
             pa = ws.PageSetup.PrintArea
             rng = ws.Range(pa) if pa else ws.UsedRange
             print(f"  {name!r}  → 캡처 시도 (범위: {rng.Address})", end="", flush=True)

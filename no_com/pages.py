@@ -2354,17 +2354,19 @@ class RackPurchaseRequestPage(QWidget):
 
         checked_rows = self._checked_request_rows()
 
-        if not checked_rows:
-            # 체크 없음 → 현재 테이블 상태로 단독 생성
+        if not checked_rows or len(checked_rows) == 1:
+            # 체크 없음 또는 1개 → 현재 테이블 상태 그대로 생성 (수기 수정 반영)
             try:
                 out_path = self._do_generate_one()
                 QMessageBox.information(self, "완료",
                     f"RACK 구매요청서 생성 완료\n{os.path.basename(out_path)}")
+                if checked_rows:
+                    self._mark_request_generated(checked_rows[0])
             except Exception as e:
                 QMessageBox.critical(self, "생성 오류", f"요청서 생성 중 오류:\n{e}")
                 logger.error("요청서 생성 오류", exc_info=True)
         else:
-            # 체크된 행 모두 순서대로 생성
+            # 체크된 행 여러 개 → 각 행 적용 후 순서대로 생성
             success, errors = [], []
             for row in checked_rows:
                 try:

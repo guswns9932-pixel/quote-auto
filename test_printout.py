@@ -1,6 +1,25 @@
 import win32com.client
 import os
+import re
 import traceback
+
+
+def _print_area_range(ws):
+    pa = ws.PageSetup.PrintArea
+    if not pa:
+        return ws.UsedRange
+    if "!" in pa:
+        pa = pa.split("!")[-1]
+    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
+    if m:
+        r1, c1 = int(m.group(1)), int(m.group(2))
+        r2 = int(m.group(3)) if m.group(3) else r1
+        c2 = int(m.group(4)) if m.group(4) else c1
+        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
+    try:
+        return ws.Range(pa)
+    except Exception:
+        return ws.UsedRange
 
 try:
     from PIL import ImageGrab
@@ -45,14 +64,8 @@ try:
 
             ws.Activate()
             pa_raw = ws.PageSetup.PrintArea
-            pa = pa_raw
-            if pa and "!" in pa:
-                pa = pa.split("!")[-1]
-            print(f"  {name!r}  PrintArea raw={pa_raw!r}  → 사용={pa!r}", flush=True)
-            try:
-                rng = ws.Range(pa) if pa else ws.UsedRange
-            except Exception:
-                rng = ws.UsedRange
+            print(f"  {name!r}  PrintArea raw={pa_raw!r}", flush=True)
+            rng = _print_area_range(ws)
             print(f"           캡처 범위: {rng.Address}", end="", flush=True)
             try:
                 rng.CopyPicture(Appearance=1, Format=2)

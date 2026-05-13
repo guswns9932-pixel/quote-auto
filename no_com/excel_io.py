@@ -646,6 +646,28 @@ def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
         return _process(xl.app)
 
 
+def _print_area_range(ws):
+    """PrintArea(R1C1 또는 A1 형식)를 Range 객체로 반환. 없으면 UsedRange."""
+    import re
+    pa = ws.PageSetup.PrintArea
+    if not pa:
+        return ws.UsedRange
+    if "!" in pa:
+        pa = pa.split("!")[-1]
+    # R1C1 형식 감지: "R숫자C숫자:R숫자C숫자" 또는 단일 "R숫자C숫자"
+    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
+    if m:
+        r1, c1 = int(m.group(1)), int(m.group(2))
+        r2 = int(m.group(3)) if m.group(3) else r1
+        c2 = int(m.group(4)) if m.group(4) else c1
+        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
+    # A1 형식
+    try:
+        return ws.Range(pa)
+    except Exception:
+        return ws.UsedRange
+
+
 def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                                   xl_app=None) -> List[str]:
     """
@@ -678,13 +700,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
                     ws.Activate()
-                    pa = ws.PageSetup.PrintArea
-                    if pa and "!" in pa:
-                        pa = pa.split("!")[-1]
-                    try:
-                        rng = ws.Range(pa) if pa else ws.UsedRange
-                    except Exception:
-                        rng = ws.UsedRange
+                    rng = _print_area_range(ws)
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()
                     if img is not None:

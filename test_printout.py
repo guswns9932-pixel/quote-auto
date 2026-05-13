@@ -45,7 +45,12 @@ try:
 
             ws.Activate()
             pa = ws.PageSetup.PrintArea
-            rng = ws.Range(pa) if pa else ws.UsedRange
+            if pa and "!" in pa:
+                pa = pa.split("!")[-1]  # "시트명!$A$1:$Z$50" → "$A$1:$Z$50"
+            try:
+                rng = ws.Range(pa) if pa else ws.UsedRange
+            except Exception:
+                rng = ws.UsedRange
             print(f"  {name!r}  → 캡처 시도 (범위: {rng.Address})", end="", flush=True)
             try:
                 rng.CopyPicture(Appearance=1, Format=2)

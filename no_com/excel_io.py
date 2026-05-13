@@ -671,7 +671,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     ws = wb.Worksheets(name)
                 except Exception:
                     continue
-                if int(ws.Visible) != -1:   # xlSheetVisible = -1
+                if int(ws.Visible) != -1:   # 보이는 시트만 캡처
                     continue
                 safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
                 png_path = os.path.join(
@@ -679,7 +679,12 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                 try:
                     ws.Activate()
                     pa = ws.PageSetup.PrintArea
-                    rng = ws.Range(pa) if pa else ws.UsedRange
+                    if pa and "!" in pa:
+                        pa = pa.split("!")[-1]
+                    try:
+                        rng = ws.Range(pa) if pa else ws.UsedRange
+                    except Exception:
+                        rng = ws.UsedRange
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()
                     if img is not None:

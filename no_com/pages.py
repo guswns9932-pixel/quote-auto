@@ -3196,8 +3196,9 @@ class ESignPage(QWidget):
 
     def _build_pdf(self, out: str) -> None:
         import fitz
-        from PySide6.QtGui import QPainter
-        A4_W, A4_H = 595.0, 842.0   # A4 in points (1pt = 1/72 inch)
+        from PySide6.QtGui import QPainter, QImage
+        A4_W, A4_H = 595.0, 842.0       # A4 in points (1pt = 1/72 inch)
+        MAX_PX = int(A4_W * 150 / 72)   # 방안A: A4 150 DPI 기준 최대 너비 ≈ 1240px
         final = fitz.open()
 
         for fi, pngs in enumerate(self._sheet_pngs):
@@ -3225,6 +3226,20 @@ class ESignPage(QWidget):
                     final_pm = composed
                 else:
                     final_pm = base_pm
+
+                # 방안A: 해상도 상한 (너비 MAX_PX 초과 시 축소)
+                if final_pm.width() > MAX_PX:
+                    final_pm = final_pm.scaled(
+                        MAX_PX, MAX_PX * 10,
+                        Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+                # 방안B: 입고검수확인서만 그레이스케일 변환
+                if "입고검수확인서" in png_path:
+                    gray_img = final_pm.toImage().convertToFormat(
+                        QImage.Format_Grayscale8)
+                    final_pm = QPixmap.fromImage(gray_img)
+
+                iw, ih = final_pm.width(), final_pm.height()
 
                 # QPixmap → JPEG bytes
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)

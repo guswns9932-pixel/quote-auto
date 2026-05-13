@@ -700,6 +700,11 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
                     ws.Activate()
+                    # 페이지 나누기 미리보기 → 기본(기본 보기)으로 전환 후 캡처
+                    try:
+                        app.ActiveWindow.View = 1  # xlNormalView
+                    except Exception:
+                        pass
                     rng = _print_area_range(ws)
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()

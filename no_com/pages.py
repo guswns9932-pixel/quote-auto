@@ -2899,8 +2899,8 @@ class RackPurchaseRequestPage(QWidget):
 
 class ESignPage(QWidget):
 
-    SIGN_W = 346
-    SIGN_H = 86
+    SIGN_W = 170
+    SIGN_H = 40
 
     def __init__(self) -> None:
         super().__init__()

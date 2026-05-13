@@ -44,14 +44,16 @@ try:
                 continue
 
             ws.Activate()
-            pa = ws.PageSetup.PrintArea
+            pa_raw = ws.PageSetup.PrintArea
+            pa = pa_raw
             if pa and "!" in pa:
-                pa = pa.split("!")[-1]  # "시트명!$A$1:$Z$50" → "$A$1:$Z$50"
+                pa = pa.split("!")[-1]
+            print(f"  {name!r}  PrintArea raw={pa_raw!r}  → 사용={pa!r}", flush=True)
             try:
                 rng = ws.Range(pa) if pa else ws.UsedRange
             except Exception:
                 rng = ws.UsedRange
-            print(f"  {name!r}  → 캡처 시도 (범위: {rng.Address})", end="", flush=True)
+            print(f"           캡처 범위: {rng.Address}", end="", flush=True)
             try:
                 rng.CopyPicture(Appearance=1, Format=2)
                 img = ImageGrab.grabclipboard()

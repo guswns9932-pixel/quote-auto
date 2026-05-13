@@ -150,6 +150,54 @@ class _GenCoverThread(QThread):
             self.done.emit(e)
 
 
+class _BgWorker(QThread):
+    """범용 백그라운드 작업 스레드. UI 블로킹 없이 Excel 작업 실행."""
+    result = Signal(object)
+    error  = Signal(str)
+
+    def __init__(self, fn, *args, parent=None, **kwargs):
+        super().__init__(parent)
+        self._fn, self._args, self._kwargs = fn, args, kwargs
+
+    def run(self) -> None:
+        try:
+            self.result.emit(self._fn(*self._args, **self._kwargs))
+        except Exception as e:
+            import traceback
+            self.error.emit(f"{e}\n\n{traceback.format_exc()}")
+
+    @staticmethod
+    def run_with_progress(parent, msg: str, fn, *args,
+                          on_result=None, on_error=None, **kwargs) -> "_BgWorker":
+        """진행 다이얼로그를 띄우고 fn을 백그라운드 실행. 완료 시 콜백 호출."""
+        from PySide6.QtWidgets import QProgressDialog
+        dlg = QProgressDialog(msg, None, 0, 0, parent)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+
+        worker = _BgWorker(fn, *args, parent=parent, **kwargs)
+
+        def _on_result(r):
+            dlg.close()
+            if on_result:
+                on_result(r)
+
+        def _on_error(e):
+            dlg.close()
+            if on_error:
+                on_error(e)
+            else:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(parent, "오류", e)
+
+        worker.result.connect(_on_result)
+        worker.error.connect(_on_error)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        return worker
+
+
 class _ExcelLoaderThread(QThread):
     """전자서명 페이지용: Excel 시트를 CopyPicture로 캡처 (ExportAsFixedFormat 미사용 → RenameFile 없음)."""
     progress = Signal(int, int, str)   # (완료수, 전체수, 현재파일명)
@@ -1886,53 +1934,66 @@ class RackPurchaseRequestPage(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "통합양식 선택", "", "Excel Files (*.xlsx)")
         if not path:
             return
-        required = ["RACK발주", "RACK발주양식", "FSC All List"]
-        try:
+
+        def _do_load(p):
             from openpyxl import load_workbook
-            wb = load_workbook(path, data_only=True)
+            required = ["RACK발주", "RACK발주양식", "FSC All List"]
+            wb = load_workbook(p, data_only=True)
             missing = [name for name in required if name not in wb.sheetnames]
             if missing:
-                QMessageBox.warning(self, "통합양식 오류", "필수 시트 없음:\n" + "\n".join(missing))
                 wb.close()
-                return
+                raise ValueError("필수 시트 없음:\n" + "\n".join(missing))
             loaded: Dict[str, List[List[Any]]] = {}
             counts: List[str] = []
             for name in required:
                 ws = wb[name]
                 rows: List[List[Any]] = []
                 for row in ws.iter_rows(values_only=True):
-                    values = [cell for cell in row]
+                    values = list(row)
                     if any(s(cell) for cell in values):
                         rows.append(values)
                 loaded[name] = rows
                 counts.append(f"{name} {len(rows)}행")
             wb.close()
-        except Exception as e:
-            QMessageBox.critical(self, "불러오기 오류", f"통합양식을 읽을 수 없습니다.\n{e}")
-            return
-        self.rack_template_path = path
-        self.rack_template_sheets = loaded
-        self._populate_item_combos()
-        self._set_default_values()
-        self.lbl_template_status.setText(f"통합양식: {os.path.basename(path)} ({', '.join(counts)})")
-        QMessageBox.information(self, "완료", "통합양식 LOAD 완료\n" + "\n".join(counts))
+            return loaded, counts
+
+        def _on_result(res):
+            loaded, counts = res
+            self.rack_template_path = path
+            self.rack_template_sheets = loaded
+            self._populate_item_combos()
+            self._set_default_values()
+            self.lbl_template_status.setText(f"통합양식: {os.path.basename(path)} ({', '.join(counts)})")
+            QMessageBox.information(self, "완료", "통합양식 LOAD 완료\n" + "\n".join(counts))
+
+        def _on_error(e):
+            if "필수 시트 없음" in e:
+                QMessageBox.warning(self, "통합양식 오류", e.split("\n\n")[0])
+            else:
+                QMessageBox.critical(self, "불러오기 오류", f"통합양식을 읽을 수 없습니다.\n{e}")
+
+        _BgWorker.run_with_progress(self, "통합양식 읽는 중...", _do_load, path,
+                                    on_result=_on_result, on_error=_on_error)
 
     def _load_quote_data(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "견적의뢰DATA 선택", "", "Excel Files (*.xlsx)")
         if not path:
             return
-        try:
-            sheet_name, rows = excel_io.parse_request_xlsx(path)
-        except Exception as e:
-            QMessageBox.critical(self, "불러오기 오류", f"견적의뢰DATA를 읽을 수 없습니다.\n{e}")
-            return
-        if not rows:
-            QMessageBox.warning(self, "견적의뢰DATA", "읽을 데이터가 없습니다.")
-            return
-        self.request_rows = rows
-        self._fill_request_data_table(rows)
-        self._apply_request_row(0, show_message=False)
-        QMessageBox.information(self, "완료", f"견적의뢰DATA {len(rows)}건을 붉은 박스 영역에 표시했습니다.\n시트: {sheet_name}")
+
+        def _on_result(res):
+            sheet_name, rows = res
+            if not rows:
+                QMessageBox.warning(self, "견적의뢰DATA", "읽을 데이터가 없습니다.")
+                return
+            self.request_rows = rows
+            self._fill_request_data_table(rows)
+            self._apply_request_row(0, show_message=False)
+            QMessageBox.information(self, "완료",
+                f"견적의뢰DATA {len(rows)}건을 붉은 박스 영역에 표시했습니다.\n시트: {sheet_name}")
+
+        _BgWorker.run_with_progress(self, "견적의뢰DATA 읽는 중...",
+                                    excel_io.parse_request_xlsx, path,
+                                    on_result=_on_result)
 
     def _fill_request_data_table(self, rows: List[Dict[str, Any]]) -> None:
         self.request_data_table.setRowCount(0)
@@ -2235,25 +2296,22 @@ class RackPurchaseRequestPage(QWidget):
         if not paths:
             return
 
-        from openpyxl import load_workbook as _lw
-        from openpyxl.utils import get_column_letter as _gcl
+        tmpl_path = self.rack_template_path
 
-        try:
-            tmpl_wb = _lw(self.rack_template_path)
+        def _do_upload(tmpl, src_paths):
+            from openpyxl import load_workbook as _lw
+            tmpl_wb = _lw(tmpl)
             if "RACK발주" not in tmpl_wb.sheetnames:
-                QMessageBox.warning(self, "오류", "통합양식에 'RACK발주' 시트가 없습니다.")
                 tmpl_wb.close()
-                return
+                raise ValueError("통합양식에 'RACK발주' 시트가 없습니다.")
             ws = tmpl_wb["RACK발주"]
 
-            # C열(col=3)이 비어 있는 첫 번째 행 탐색
             first_empty = ws.max_row + 1
             for r in range(1, ws.max_row + 2):
                 if ws.cell(r, 3).value is None or str(ws.cell(r, 3).value).strip() == "":
                     first_empty = r
                     break
 
-            # 기존 데이터 행 수집 (중복 검사용)
             existing_rows: List[Dict] = []
             for r in range(1, first_empty):
                 if ws.cell(r, 3).value is not None and str(ws.cell(r, 3).value).strip():
@@ -2264,8 +2322,8 @@ class RackPurchaseRequestPage(QWidget):
 
             added = 0
             duplicates: List[str] = []
-            errors = []
-            for path in paths:
+            errors: List[str] = []
+            for path in src_paths:
                 try:
                     src_wb = _lw(path, data_only=True)
                     if "RACK발주양식" not in src_wb.sheetnames:
@@ -2277,7 +2335,6 @@ class RackPurchaseRequestPage(QWidget):
                                      for cell in src_ws[2] if cell.value is not None}
                     src_wb.close()
 
-                    # 완전히 동일한 행 있으면 중복으로 스킵
                     if any(ex == new_row for ex in existing_rows):
                         duplicates.append(os.path.basename(path))
                         continue
@@ -2290,18 +2347,21 @@ class RackPurchaseRequestPage(QWidget):
                 except Exception as e:
                     errors.append(f"{os.path.basename(path)}: {e}")
 
-            tmpl_wb.save(self.rack_template_path)
+            tmpl_wb.save(tmpl)
             tmpl_wb.close()
+            return added, duplicates, errors
 
+        def _on_result(res):
+            added, duplicates, errors = res
             msg = f"{added}건 발주이력을 RACK발주 시트에 추가했습니다."
             if duplicates:
-                msg += f"\n\n중복 항목 발견 (등록 제외됨):\n" + "\n".join(duplicates)
+                msg += "\n\n중복 항목 발견 (등록 제외됨):\n" + "\n".join(duplicates)
             if errors:
                 msg += "\n\n오류:\n" + "\n".join(errors)
             QMessageBox.information(self, "발주이력 업로드 완료", msg)
-        except Exception as e:
-            QMessageBox.critical(self, "업로드 오류", f"발주이력 업로드 중 오류:\n{e}")
-            logger.error("발주이력 업로드 오류", exc_info=True)
+
+        _BgWorker.run_with_progress(self, "발주이력 업로드 중...", _do_upload, tmpl_path, paths,
+                                    on_result=_on_result)
 
     def _refresh_req_list(self) -> None:
         """RACK구매요청서 폴더의 xlsx 파일 목록을 우측 패널에 갱신."""

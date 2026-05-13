@@ -3143,7 +3143,6 @@ class ESignPage(QWidget):
                 signs = self._sign_items.get((fi, pno), [])
 
                 if signs:
-                    # 서명 이미지를 PNG 위에 합성
                     composed = QPixmap(iw, ih)
                     composed.fill(Qt.white)
                     painter = QPainter(composed)
@@ -3159,14 +3158,16 @@ class ESignPage(QWidget):
                 else:
                     final_pm = base_pm
 
-                # QPixmap → JPEG bytes (PNG 대비 용량 대폭 감소)
+                # QPixmap → JPEG bytes
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
                 final_pm.save(buf, "JPEG", 85); buf.close()
 
-                # A4 비율 유지하며 PDF 페이지 생성
+                # 고정 A4 페이지, 이미지를 비율 유지하며 중앙 배치
+                page = final.new_page(width=A4_W, height=A4_H)
                 scale = min(A4_W / max(1, iw), A4_H / max(1, ih))
                 pw, ph = iw * scale, ih * scale
-                page = final.new_page(width=pw, height=ph)
-                page.insert_image(fitz.Rect(0, 0, pw, ph), stream=bytes(ba))
+                x0 = (A4_W - pw) / 2
+                y0 = (A4_H - ph) / 2
+                page.insert_image(fitz.Rect(x0, y0, x0 + pw, y0 + ph), stream=bytes(ba))
 
         final.save(out, deflate=True, garbage=4); final.close()

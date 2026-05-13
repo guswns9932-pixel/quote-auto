@@ -3243,7 +3243,7 @@ class ESignPage(QWidget):
 
                 # QPixmap → JPEG bytes
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
-                final_pm.save(buf, "JPEG", 60); buf.close()
+                final_pm.save(buf, "JPEG", 45); buf.close()
 
                 # 고정 A4 페이지, 이미지를 비율 유지하며 중앙 배치
                 page = final.new_page(width=A4_W, height=A4_H)

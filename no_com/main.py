@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import sys
 
-from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QMainWindow, QMessageBox,
     QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
@@ -104,7 +103,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self._page_cache: dict = {}   # index → QWidget (생성된 페이지)
 
-        # 스택에 빈 플레이스홀더를 먼저 채워 인덱스 유지
+        # 스택에 빈 플레이스홀더를 먼저 채워 인덱스 유지 (pages 1,2는 첫 탐색 시 지연 생성)
         for _ in self._PAGE_DEFS:
             self.stack.addWidget(QWidget())
 
@@ -112,8 +111,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.nav)
         layout.addWidget(self.stack, 1)
 
-        # 첫 페이지(index 0)는 시작 직후 비동기 생성
-        QTimer.singleShot(0, lambda: self._ensure_page(0))
+        # 첫 페이지(index 0)는 동기 생성 — 창이 최대화될 때 레이아웃이 올바르게 채워지도록
+        self._ensure_page(0)
 
     def _ensure_page(self, index: int) -> None:
         """index 페이지가 아직 생성되지 않았으면 지금 생성해 스택에 교체."""

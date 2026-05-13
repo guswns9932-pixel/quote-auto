@@ -3159,9 +3159,9 @@ class ESignPage(QWidget):
                 else:
                     final_pm = base_pm
 
-                # QPixmap → PNG bytes
+                # QPixmap → JPEG bytes (PNG 대비 용량 대폭 감소)
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
-                final_pm.save(buf, "PNG"); buf.close()
+                final_pm.save(buf, "JPEG", 85); buf.close()
 
                 # A4 비율 유지하며 PDF 페이지 생성
                 scale = min(A4_W / max(1, iw), A4_H / max(1, ih))
@@ -3169,4 +3169,4 @@ class ESignPage(QWidget):
                 page = final.new_page(width=pw, height=ph)
                 page.insert_image(fitz.Rect(0, 0, pw, ph), stream=bytes(ba))
 
-        final.save(out); final.close()
+        final.save(out, deflate=True, garbage=4); final.close()

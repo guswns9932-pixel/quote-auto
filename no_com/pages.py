@@ -2367,10 +2367,35 @@ class RackPurchaseRequestPage(QWidget):
                 logger.error("요청서 생성 오류", exc_info=True)
         else:
             # 체크된 행 여러 개 → 각 행 적용 후 순서대로 생성
+            # rows 17-31(RACK CH~3단모니터링Cable) 현재 값을 저장해 각 파일에 그대로 반영
+            saved_lower: Dict[Tuple[int, int], str] = {}
+            for r in range(17, 32):
+                w = self.table.cellWidget(r, self.COL_ITEM)
+                saved_lower[(r, self.COL_ITEM)] = (
+                    w.currentText() if isinstance(w, QComboBox)
+                    else (self.table.item(r, self.COL_ITEM).text()
+                          if self.table.item(r, self.COL_ITEM) else ""))
+                it_q = self.table.item(r, self.COL_QTY)
+                saved_lower[(r, self.COL_QTY)] = it_q.text() if it_q else ""
+
             success, errors = [], []
             for row in checked_rows:
                 try:
                     self._apply_request_row(row, show_message=False)
+                    # rows 17-31 복원 (의뢰DATA 적용이 덮어쓴 값 되돌리기)
+                    for r in range(17, 32):
+                        item_val = saved_lower.get((r, self.COL_ITEM), "")
+                        w = self.table.cellWidget(r, self.COL_ITEM)
+                        if isinstance(w, QComboBox):
+                            w.setCurrentText(item_val)
+                        else:
+                            it = self.table.item(r, self.COL_ITEM)
+                            if it:
+                                it.setText(item_val)
+                        qty_val = saved_lower.get((r, self.COL_QTY), "")
+                        it_q = self.table.item(r, self.COL_QTY)
+                        if it_q:
+                            it_q.setText(qty_val)
                     out_path = self._do_generate_one()
                     success.append(os.path.basename(out_path))
                     self._mark_request_generated(row)
@@ -2728,6 +2753,18 @@ class RackPurchaseRequestPage(QWidget):
         xml = re.sub(r'<dataValidation\b[^>]*sqref=""[^>]*/>', '', xml)
         xml = re.sub(r'<dataValidation\b[^>]*sqref=""[^>]*>.*?</dataValidation>',
                      '', xml, flags=re.DOTALL)
+
+        # ── sheetView 내 activeCell / topLeftCell 시프트 ─────────────────────
+        def shift_attr_cell(m: re.Match) -> str:
+            attr, cell_ref = m.group(1), m.group(2)
+            rm = re.match(r'([A-Z]+)(\d+)', cell_ref)
+            if not rm:
+                return m.group(0)
+            ci = _ci(rm.group(1))
+            if ci <= delete_count:
+                return f'{attr}="A{rm.group(2)}"'  # 삭제된 열 → A열로 리셋
+            return f'{attr}="{_cl(ci - delete_count)}{rm.group(2)}"'
+        xml = re.sub(r'\b(activeCell|topLeftCell)="([^"]+)"', shift_attr_cell, xml)
 
         return xml.encode('utf-8')
 

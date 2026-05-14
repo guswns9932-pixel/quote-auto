@@ -283,12 +283,8 @@ def run_approval(
 
         # ── STEP 2: 새 결재 진행 버튼 클릭 ──────────────────────────────────
         _log("② 새 결재 진행 버튼 클릭…")
-        btn_new = wait.until(EC.element_to_be_clickable(
-            (By.XPATH,
-             "//*[contains(text(),'새 결재 진행') or contains(text(),'새결재진행')]"
-             "[self::button or self::a or self::span or self::div]")
-        ))
-        btn_new.click()
+        btn_new = wait.until(EC.element_to_be_clickable((By.ID, "writeBtn")))
+        driver.execute_script("arguments[0].click();", btn_new)
         time.sleep(1)
 
         # ── STEP 3: 결재양식 선택 모달 - 검색 ───────────────────────────────

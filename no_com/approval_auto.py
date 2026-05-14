@@ -147,10 +147,10 @@ def _do_login(
     pw_field.clear()
     pw_field.send_keys(password)
 
-    # 비밀번호 입력 후 Enter로 폼 제출 (버튼 구조와 무관하게 동작)
-    from selenium.webdriver.common.keys import Keys
-    pw_field.send_keys(Keys.RETURN)
-    _log("로그인 제출…")
+    # 로그인 버튼 클릭
+    login_btn = wait.until(EC.element_to_be_clickable((By.ID, "login_submit")))
+    driver.execute_script("arguments[0].click();", login_btn)
+    _log("로그인 버튼 클릭…")
 
     # 로그인 완료 대기 (최대 30초)
     for _ in range(30):

@@ -3149,6 +3149,18 @@ class RackPurchaseRequestPage(QWidget):
 
         import approval_auto as _aa
 
+        # Chrome 디버그 포트가 닫혀있으면 재시작 안내
+        if not _aa.is_debug_port_open():
+            ret = QMessageBox.warning(
+                self, "Chrome 재시작 필요",
+                "현재 실행 중인 Chrome이 자동화 모드로 열려있지 않습니다.\n\n"
+                "Chrome을 종료하고 자동화 모드로 재시작합니다.\n"
+                "열려있는 Chrome 탭의 작업을 저장한 후 확인을 눌러주세요.",
+                QMessageBox.Ok | QMessageBox.Cancel,
+            )
+            if ret != QMessageBox.Ok:
+                return
+
         # 각 파일에 대해 순서대로 결재상신 (파일이 여러 개면 확인)
         if len(paths) > 1:
             reply = QMessageBox.question(
@@ -3189,7 +3201,7 @@ class RackPurchaseRequestPage(QWidget):
             )
 
         _BgWorker.run_with_progress(
-            self, "결재상신 진행 중…\n(Chrome이 열리면 로그인 후 자동으로 계속됩니다)",
+            self, "결재상신 진행 중…\n(Chrome 새 탭에서 자동으로 진행됩니다)",
             _run_all, paths,
             on_result=_on_done
         )

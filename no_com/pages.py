@@ -1434,38 +1434,27 @@ class _NoScrollComboBox(QComboBox):
 class _GroupwareLoginDialog(QDialog):
     """그룹웨어 로그인 계정/비밀번호 입력 다이얼로그."""
 
-    _CRED_PATH = os.path.join(
-        os.environ.get("APPDATA") or os.path.expanduser("~"),
-        "quote-auto", "groupware_creds.json",
-    )
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("그룹웨어 로그인")
         self.setFixedWidth(340)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        saved = self._load()
-
         layout = QFormLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(24, 20, 24, 20)
 
-        self.id_edit = QLineEdit(saved.get("username", ""))
+        self.id_edit = QLineEdit()
         self.id_edit.setPlaceholderText("계정")
         self.id_edit.setMinimumHeight(36)
 
-        self.pw_edit = QLineEdit(saved.get("password", ""))
+        self.pw_edit = QLineEdit()
         self.pw_edit.setPlaceholderText("비밀번호")
         self.pw_edit.setEchoMode(QLineEdit.Password)
         self.pw_edit.setMinimumHeight(36)
 
-        self.save_cb = QCheckBox("계정 저장")
-        self.save_cb.setChecked(bool(saved.get("username")))
-
         layout.addRow("계정", self.id_edit)
         layout.addRow("비밀번호", self.pw_edit)
-        layout.addRow("", self.save_cb)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.button(QDialogButtonBox.Ok).setText("로그인")
@@ -1473,44 +1462,12 @@ class _GroupwareLoginDialog(QDialog):
         btns.rejected.connect(self.reject)
         layout.addRow(btns)
 
-        # 엔터 키로 로그인
         self.pw_edit.returnPressed.connect(btns.button(QDialogButtonBox.Ok).click)
 
-    # ── 저장/불러오기 ─────────────────────────────────────────────────────────
-    def _load(self) -> dict:
-        try:
-            import json
-            with open(self._CRED_PATH, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _save(self, username: str, password: str) -> None:
-        try:
-            import json
-            os.makedirs(os.path.dirname(self._CRED_PATH), exist_ok=True)
-            with open(self._CRED_PATH, "w", encoding="utf-8") as f:
-                json.dump({"username": username, "password": password}, f)
-        except Exception:
-            pass
-
-    def _clear_saved(self) -> None:
-        try:
-            os.remove(self._CRED_PATH)
-        except Exception:
-            pass
-
-    # ── 확인 처리 ─────────────────────────────────────────────────────────────
     def _on_accept(self) -> None:
-        username = self.id_edit.text().strip()
-        password = self.pw_edit.text()
-        if not username or not password:
+        if not self.id_edit.text().strip() or not self.pw_edit.text():
             QMessageBox.warning(self, "입력 오류", "계정과 비밀번호를 모두 입력하세요.")
             return
-        if self.save_cb.isChecked():
-            self._save(username, password)
-        else:
-            self._clear_saved()
         self.accept()
 
     def credentials(self) -> tuple[str, str]:

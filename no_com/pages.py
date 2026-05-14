@@ -3149,15 +3149,7 @@ class RackPurchaseRequestPage(QWidget):
 
         import approval_auto as _aa
 
-        # 첫 실행 안내 (AppData 프로필이 없으면 로그인 필요)
-        profile = _aa._profile_dir()
-        if not os.path.isdir(profile) or not os.listdir(profile):
-            QMessageBox.information(
-                self, "첫 실행 안내",
-                "처음 실행 시 Chrome이 열립니다.\n"
-                "그룹웨어에 로그인하면 이후 자동으로 세션이 유지됩니다.\n\n"
-                "로그인 완료 후 이 버튼을 다시 누르세요."
-            )
+        # Chrome이 이미 로그인된 상태라면 쿠키가 자동 복사되어 별도 로그인 불필요
 
         # 각 파일에 대해 순서대로 결재상신 (파일이 여러 개면 확인)
         if len(paths) > 1:

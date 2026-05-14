@@ -37,6 +37,53 @@ def _profile_dir() -> str:
     return os.path.join(appdata, "quote-auto", "approval_profile")
 
 
+def _sync_chrome_session() -> None:
+    """
+    사용자 실제 Chrome Default 프로필의 쿠키/세션을 자동화 프로필에 동기화.
+
+    Chrome은 쿠키를 AES-256-GCM으로 암호화하고, 키는 Local State에 DPAPI로 보관.
+    같은 PC·같은 사용자 계정이면 복사한 파일을 그대로 복호화할 수 있음.
+    Chrome 실행 중에도 SQLite WAL 모드 덕분에 대부분 복사 가능.
+    """
+    import shutil
+
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    src_root  = os.path.join(local_app, "Google", "Chrome", "User Data")
+    dst_root  = _profile_dir()
+
+    if not os.path.isdir(src_root):
+        logger.warning("Chrome 사용자 데이터 경로를 찾을 수 없음: %s", src_root)
+        return
+
+    os.makedirs(dst_root, exist_ok=True)
+
+    # ── Local State (AES 암호화 키 포함) ─────────────────────────────────────
+    src_ls = os.path.join(src_root, "Local State")
+    dst_ls = os.path.join(dst_root, "Local State")
+    if os.path.isfile(src_ls):
+        try:
+            shutil.copy2(src_ls, dst_ls)
+            logger.debug("Local State 복사 완료")
+        except Exception as e:
+            logger.warning("Local State 복사 실패: %s", e)
+
+    # ── Default 프로필 쿠키 (+ WAL/SHM) ─────────────────────────────────────
+    src_prof = os.path.join(src_root, "Default")
+    dst_prof = os.path.join(dst_root, "Default")
+    os.makedirs(dst_prof, exist_ok=True)
+
+    for fname in ("Cookies", "Cookies-wal", "Cookies-shm"):
+        src = os.path.join(src_prof, fname)
+        dst = os.path.join(dst_prof, fname)
+        if os.path.isfile(src):
+            try:
+                shutil.copy2(src, dst)
+                logger.debug("쿠키 파일 복사: %s", fname)
+            except Exception as e:
+                # Chrome 실행 중 잠금이 걸릴 수 있으나 Cookies 본체는 대개 가능
+                logger.debug("쿠키 복사 실패 (%s): %s", fname, e)
+
+
 def _find_chrome_binary() -> Optional[str]:
     candidates = [
         os.path.join(os.environ.get("PROGRAMFILES", ""),
@@ -53,7 +100,8 @@ def _find_chrome_binary() -> Optional[str]:
 
 
 def _create_driver():
-    """Chrome WebDriver 생성. 앱 전용 프로필로 세션 유지."""
+    """Chrome WebDriver 생성.
+    실행 전 실제 Chrome 쿠키를 자동화 프로필에 복사하여 별도 로그인 없이 세션 유지."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -64,7 +112,10 @@ def _create_driver():
             "pip install selenium webdriver-manager"
         )
 
-    # chromedriver 확보
+    # ── 실제 Chrome 쿠키 → 자동화 프로필로 동기화 ──────────────────────────
+    _sync_chrome_session()
+
+    # ── chromedriver 확보 ────────────────────────────────────────────────────
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
@@ -76,16 +127,14 @@ def _create_driver():
 
     options = Options()
     options.add_argument(f"--user-data-dir={profile}")
-    # --profile-directory 는 제거: Default 이외 이름의 서브디렉터리가 있으면
-    # prefs 쓰기 실패가 발생하므로 Chrome이 알아서 선택하도록 함
+    options.add_argument("--profile-directory=Default")  # 쿠키를 복사한 Default 프로필 사용
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-notifications")
-    options.add_argument("--no-sandbox")               # 쓰기 권한 문제 완화
-    options.add_argument("--disable-dev-shm-usage")    # 공유 메모리 오류 방지
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--remote-allow-origins=*")   # session 생성 오류 방지
+    options.add_argument("--remote-allow-origins=*")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 

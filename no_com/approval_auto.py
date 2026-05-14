@@ -167,54 +167,6 @@ def _do_login(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 테이블 입력 헬퍼
-# ──────────────────────────────────────────────────────────────────────────────
-def _find_col_index(driver, table_elem, header_text: str) -> int:
-    from selenium.webdriver.common.by import By
-    headers = table_elem.find_elements(By.XPATH, ".//th | .//thead//td")
-    for i, th in enumerate(headers):
-        if header_text.strip() in th.text.strip():
-            return i
-    return -1
-
-
-def _fill_table_cell(driver, table_elem, header_text: str, value: str) -> bool:
-    from selenium.webdriver.common.by import By
-
-    col_idx = _find_col_index(driver, table_elem, header_text)
-    if col_idx < 0:
-        logger.warning("열 헤더를 찾지 못했습니다: %s", header_text)
-        return False
-
-    try:
-        data_rows = table_elem.find_elements(By.XPATH, ".//tbody/tr")
-        if not data_rows:
-            data_rows = table_elem.find_elements(
-                By.XPATH, ".//tr[not(ancestor::thead) and position()>1]"
-            )
-        if not data_rows:
-            return False
-
-        cells = data_rows[0].find_elements(By.XPATH, "./td")
-        if col_idx >= len(cells):
-            return False
-
-        inp_list = cells[col_idx].find_elements(By.XPATH, ".//textarea | .//input")
-        if not inp_list:
-            return False
-
-        inp = inp_list[0]
-        driver.execute_script("arguments[0].scrollIntoView(true);", inp)
-        inp.click()
-        inp.clear()
-        inp.send_keys(value)
-        return True
-    except Exception as e:
-        logger.warning("셀 입력 실패 (%s): %s", header_text, e)
-        return False
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # 메인 자동화 함수
 # ──────────────────────────────────────────────────────────────────────────────
 def run_approval(
@@ -227,6 +179,7 @@ def run_approval(
     equipment: str,
     equip_model: str,
     remark: str,
+    po_no: str = "",
     username: str = "",
     password: str = "",
     progress_cb: Optional[Callable[[str], None]] = None,
@@ -247,6 +200,18 @@ def run_approval(
         if progress_cb:
             progress_cb(msg)
 
+    def _fill_by_id(field_id: str, value: str) -> None:
+        if not value:
+            return
+        try:
+            el = driver.find_element(By.ID, field_id)
+            driver.execute_script("arguments[0].scrollIntoView(true);", el)
+            el.click()
+            el.clear()
+            el.send_keys(value)
+        except Exception as e:
+            logger.warning("필드 입력 실패 (id=%s): %s", field_id, e)
+
     driver = _create_driver()
     wait   = WebDriverWait(driver, 30)
 
@@ -261,13 +226,11 @@ def run_approval(
         if _is_login_page(driver):
             if username and password:
                 _do_login(driver, wait, username, password, progress_cb)
-                # 로그인 후 결재 페이지로 이동
                 if APPROVAL_URL not in driver.current_url:
                     driver.get(APPROVAL_URL)
                     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
                     time.sleep(2)
             else:
-                # 수동 로그인 대기 (최대 5분)
                 _log("⚠️ 로그인이 필요합니다. Chrome에서 로그인해 주세요…")
                 for _ in range(300):
                     time.sleep(1)
@@ -289,51 +252,26 @@ def run_approval(
 
         # ── STEP 3: 결재양식 선택 모달 - 검색 ───────────────────────────────
         _log("③ 결재양식 검색 중…")
-        search_input = wait.until(EC.visibility_of_element_located(
-            (By.XPATH,
-             "//input[contains(@placeholder,'검색') or contains(@placeholder,'제목')]"
-             "[ancestor::*[contains(@class,'modal') or contains(@class,'dialog')"
-             " or contains(@class,'popup') or contains(@class,'layer')]]"
-             " | //input[contains(@placeholder,'검색') or contains(@placeholder,'제목')]")
-        ))
+        search_input = wait.until(EC.visibility_of_element_located((By.ID, "searchInput")))
         search_input.click()
         search_input.clear()
         search_input.send_keys(FORM_NAME)
-        time.sleep(0.5)
-
-        try:
-            search_btn = driver.find_element(
-                By.XPATH,
-                "//button[.//i[contains(@class,'search') or contains(@class,'magnif')]"
-                " or contains(@class,'search') or contains(@class,'btn-search')]"
-                "[not(ancestor::input)]"
-            )
-            search_btn.click()
-        except Exception:
-            from selenium.webdriver.common.keys import Keys
-            search_input.send_keys(Keys.RETURN)
-
+        from selenium.webdriver.common.keys import Keys
+        search_input.send_keys(Keys.RETURN)
         time.sleep(1.5)
 
         # ── STEP 4: 구매요청서(NPN) 항목 클릭 ──────────────────────────────
         _log(f"④ '{FORM_NAME}' 항목 선택…")
-        item_el = wait.until(EC.element_to_be_clickable(
-            (By.XPATH,
-             f"//*[normalize-space(text())='{FORM_NAME}'"
-             f" or contains(text(),'{FORM_NAME}')]"
-             f"[self::span or self::li or self::td or self::a or self::div]")
-        ))
-        item_el.click()
+        item_el = wait.until(EC.element_to_be_clickable((By.ID, "FORM_8637")))
+        driver.execute_script("arguments[0].click();", item_el)
         time.sleep(0.5)
 
         # ── STEP 5: 확인 버튼 클릭 ──────────────────────────────────────────
         _log("⑤ 확인 버튼 클릭…")
         confirm_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH,
-             "//button[normalize-space(text())='확인' or normalize-space(text())='확 인']"
-             "[not(contains(@class,'cancel')) and not(contains(@class,'close'))]")
+            (By.XPATH, "//*[@id='gpopupLayer']/footer/a[1]")
         ))
-        confirm_btn.click()
+        driver.execute_script("arguments[0].click();", confirm_btn)
 
         # ── STEP 6: 팝업 창 전환 ────────────────────────────────────────────
         _log("⑥ 팝업 창 대기 중…")
@@ -348,80 +286,44 @@ def run_approval(
 
         # ── STEP 7: 제목 입력 ────────────────────────────────────────────────
         _log("⑦ 제목 입력…")
-        title_input = wait.until(EC.presence_of_element_located(
-            (By.XPATH,
-             "//tr[.//td[normalize-space(text())='제목' or normalize-space(text())='제 목']]//input"
-             " | //td[normalize-space(text())='제목' or normalize-space(text())='제 목']"
-             "/following-sibling::td[1]//input"
-             " | //label[contains(text(),'제목')]/following::input[1]")
-        ))
-        driver.execute_script("arguments[0].scrollIntoView(true);", title_input)
+        title_input = wait.until(EC.presence_of_element_located((By.ID, "subject")))
         title_input.click()
         title_input.clear()
         title_input.send_keys(title)
 
-        # ── STEP 8: NPN 신규투자 테이블 필드 입력 ───────────────────────────
+        # ── STEP 8: 구매요청 양식 데이터 입력 ───────────────────────────────
         _log("⑧ 구매요청 양식 데이터 입력…")
-        tables = driver.find_elements(By.XPATH, "//table")
-        npn_table = None
-        for tbl in tables:
-            if "PR NO" in tbl.text and "설비" in tbl.text:
-                npn_table = tbl
-                break
-
-        if npn_table is None:
-            logger.warning("NPN 테이블을 찾지 못했습니다. 텍스트 기반 폴백 사용.")
-
-        def _fill(header: str, value: str) -> None:
-            if not value:
-                return
-            if npn_table is not None and _fill_table_cell(driver, npn_table, header, value):
-                return
-            try:
-                xp = (f"//td[contains(text(),'{header}')]/following-sibling::td[1]//input"
-                      f" | //th[contains(text(),'{header}')]/following-sibling::th[1]//input"
-                      f" | //td[contains(text(),'{header}')]/following::input[1]")
-                inp = driver.find_element(By.XPATH, xp)
-                inp.click(); inp.clear(); inp.send_keys(value)
-            except Exception as e:
-                logger.warning("필드 '%s' 입력 실패: %s", header, e)
-
-        _fill("PR NO",     pr_no)
-        _fill("영업",       sales_person)
-        _fill("라인",       line)
-        _fill("공정",       process)
-        _fill("설비",       equipment)
-        _fill("설비MODEL",  equip_model)
-        _fill("비 고",      remark)
+        _fill_by_id("addContentTable_1_3",  pr_no)
+        _fill_by_id("addContentTable_1_4",  po_no)
+        _fill_by_id("addContentTable_1_5",  sales_person)
+        _fill_by_id("addContentTable_1_6",  line)
+        _fill_by_id("addContentTable_1_7",  process)
+        _fill_by_id("addContentTable_1_8",  equipment)
+        _fill_by_id("addContentTable_1_9",  equip_model)
+        _fill_by_id("addContentTable_1_10", remark)
 
         # ── STEP 9: 파일 첨부 ────────────────────────────────────────────────
         _log("⑨ 파일 첨부 중…")
         try:
-            file_inputs = driver.find_elements(By.XPATH, "//input[@type='file']")
-            if file_inputs:
-                inp_file = file_inputs[0]
-                driver.execute_script(
-                    "arguments[0].style.display='block';"
-                    "arguments[0].style.visibility='visible';",
-                    inp_file,
-                )
-                inp_file.send_keys(xlsx_path)
-                time.sleep(2)
-                _log("   파일 첨부 완료.")
-            else:
-                logger.warning("파일 input 요소를 찾지 못했습니다.")
+            drop_zone = driver.find_element(By.ID, "dropZone")
+            file_input = drop_zone.find_element(By.XPATH, ".//input[@type='file']")
+            driver.execute_script(
+                "arguments[0].style.display='block';"
+                "arguments[0].style.visibility='visible';"
+                "arguments[0].style.opacity='1';",
+                file_input,
+            )
+            file_input.send_keys(xlsx_path)
+            time.sleep(2)
+            _log("   파일 첨부 완료.")
         except Exception as e:
             logger.warning("파일 첨부 중 오류: %s", e)
 
         # ── STEP 10: 결재요청 버튼 클릭 ─────────────────────────────────────
         _log("⑩ 결재요청 버튼 클릭…")
-        submit_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH,
-             "//button[contains(text(),'결재요청') or contains(text(),'결 재요청')]"
-             "[not(contains(@class,'cancel'))]")
-        ))
+        submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "act_draft")))
         driver.execute_script("arguments[0].scrollIntoView(true);", submit_btn)
-        submit_btn.click()
+        driver.execute_script("arguments[0].click();", submit_btn)
         time.sleep(2)
 
         # ── STEP 11: 확인 팝업(alert 또는 새 창) 처리 ─────────────────────
@@ -446,7 +348,7 @@ def run_approval(
                     (By.XPATH,
                      "//button[contains(text(),'결재요청') or contains(text(),'확인')]")
                 ))
-                confirm2.click()
+                driver.execute_script("arguments[0].click();", confirm2)
                 _log("   추가 확인 창 처리 완료.")
                 time.sleep(1.5)
             except Exception as e:

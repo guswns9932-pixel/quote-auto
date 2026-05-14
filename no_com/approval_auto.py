@@ -31,8 +31,10 @@ def _exe_dir() -> str:
 
 
 def _profile_dir() -> str:
-    """앱 전용 Chrome 프로필 경로 (첫 실행 시 사용자가 로그인 → 이후 세션 유지)."""
-    return os.path.join(_exe_dir(), "approval_chrome_profile")
+    """앱 전용 Chrome 프로필 경로.
+    AppData\\Roaming 아래에 생성 — exe 디렉터리와 달리 항상 쓰기 권한이 있음."""
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(appdata, "quote-auto", "approval_profile")
 
 
 def _find_chrome_binary() -> Optional[str]:
@@ -74,10 +76,16 @@ def _create_driver():
 
     options = Options()
     options.add_argument(f"--user-data-dir={profile}")
-    options.add_argument("--profile-directory=Default")
+    # --profile-directory 는 제거: Default 이외 이름의 서브디렉터리가 있으면
+    # prefs 쓰기 실패가 발생하므로 Chrome이 알아서 선택하도록 함
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-notifications")
+    options.add_argument("--no-sandbox")               # 쓰기 권한 문제 완화
+    options.add_argument("--disable-dev-shm-usage")    # 공유 메모리 오류 방지
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--remote-allow-origins=*")   # session 생성 오류 방지
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 

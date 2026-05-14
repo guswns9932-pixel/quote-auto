@@ -3149,9 +3149,9 @@ class RackPurchaseRequestPage(QWidget):
 
         import approval_auto as _aa
 
-        # 첫 실행 안내 (프로필 새로 생성되는 경우)
+        # 첫 실행 안내 (AppData 프로필이 없으면 로그인 필요)
         profile = _aa._profile_dir()
-        if not os.path.isdir(profile):
+        if not os.path.isdir(profile) or not os.listdir(profile):
             QMessageBox.information(
                 self, "첫 실행 안내",
                 "처음 실행 시 Chrome이 열립니다.\n"

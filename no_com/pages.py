@@ -2860,17 +2860,33 @@ class RackPurchaseRequestPage(QWidget):
         xml = re.sub(r'<dataValidation\b[^>]*sqref=""[^>]*>.*?</dataValidation>',
                      '', xml, flags=re.DOTALL)
 
-        # ── sheetView 내 activeCell / topLeftCell 시프트 ─────────────────────
-        def shift_attr_cell(m: re.Match) -> str:
-            attr, cell_ref = m.group(1), m.group(2)
-            rm = re.match(r'([A-Z]+)(\d+)', cell_ref)
-            if not rm:
-                return m.group(0)
-            ci = _ci(rm.group(1))
-            if ci <= delete_count:
-                return f'{attr}="A{rm.group(2)}"'  # 삭제된 열 → A열로 리셋
-            return f'{attr}="{_cl(ci - delete_count)}{rm.group(2)}"'
-        xml = re.sub(r'\b(activeCell|topLeftCell)="([^"]+)"', shift_attr_cell, xml)
+        # ── <col> 요소 min/max 열 인덱스 시프트 ──────────────────────────────
+        def shift_col_elem(m: re.Match) -> str:
+            attrs = m.group(0)
+            min_m = re.search(r'\bmin="(\d+)"', attrs)
+            max_m = re.search(r'\bmax="(\d+)"', attrs)
+            if not min_m or not max_m:
+                return attrs
+            col_min = int(min_m.group(1))
+            col_max = int(max_m.group(1))
+            if col_max <= delete_count:
+                return ''  # 삭제 범위 내 → 제거
+            new_min = max(1, col_min - delete_count)
+            new_max = col_max - delete_count
+            attrs = re.sub(r'\bmin="\d+"', f'min="{new_min}"', attrs)
+            attrs = re.sub(r'\bmax="\d+"', f'max="{new_max}"', attrs)
+            return attrs
+        xml = re.sub(r'<col\b[^>]*/>', shift_col_elem, xml)
+        # 비어진 <cols> 블록 제거
+        xml = re.sub(r'<cols>\s*</cols>', '', xml)
+
+        # ── sheetViews 완전 초기화: 열 삭제 후 뷰 상태(selection/pane)를 ────
+        # ── 깨끗한 최소값으로 교체 — sqref="" / 잘못된 pane 오류 방지 ────────
+        xml = re.sub(
+            r'<sheetViews\b[^>]*>.*?</sheetViews>',
+            '<sheetViews><sheetView workbookViewId="0">'
+            '<selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>',
+            xml, flags=re.DOTALL)
 
         return xml.encode('utf-8')
 

@@ -250,31 +250,21 @@ def run_approval(
         driver.execute_script("arguments[0].click();", btn_new)
         time.sleep(1)
 
-        # ── STEP 3: 결재양식 선택 모달 - 검색 ───────────────────────────────
-        _log("③ 결재양식 검색 중…")
-        search_input = wait.until(EC.visibility_of_element_located((By.ID, "searchInput")))
-        search_input.click()
-        search_input.clear()
-        search_input.send_keys(FORM_NAME)
-        from selenium.webdriver.common.keys import Keys
-        search_input.send_keys(Keys.RETURN)
-        time.sleep(1.5)
-
-        # ── STEP 4: 구매요청서(NPN) 항목 클릭 ──────────────────────────────
-        _log(f"④ '{FORM_NAME}' 항목 선택…")
+        # ── STEP 3: 구매요청서(NPN) 직접 선택 ──────────────────────────────
+        _log(f"③ '{FORM_NAME}' 선택…")
         item_el = wait.until(EC.element_to_be_clickable((By.ID, "FORM_8637")))
         driver.execute_script("arguments[0].click();", item_el)
         time.sleep(0.5)
 
-        # ── STEP 5: 확인 버튼 클릭 ──────────────────────────────────────────
-        _log("⑤ 확인 버튼 클릭…")
+        # ── STEP 4: 확인 버튼 클릭 ──────────────────────────────────────────
+        _log("④ 확인 버튼 클릭…")
         confirm_btn = wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//*[@id='gpopupLayer']/footer/a[1]")
         ))
         driver.execute_script("arguments[0].click();", confirm_btn)
 
-        # ── STEP 6: 팝업 창 전환 ────────────────────────────────────────────
-        _log("⑥ 팝업 창 대기 중…")
+        # ── STEP 5: 팝업 창 전환 ────────────────────────────────────────────
+        _log("⑤ 팝업 창 대기 중…")
         main_window = driver.current_window_handle
         wait.until(lambda d: len(d.window_handles) > 1)
         popup_handle = next(
@@ -284,15 +274,15 @@ def run_approval(
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
 
-        # ── STEP 7: 제목 입력 ────────────────────────────────────────────────
-        _log("⑦ 제목 입력…")
+        # ── STEP 6: 제목 입력 ────────────────────────────────────────────────
+        _log("⑥ 제목 입력…")
         title_input = wait.until(EC.presence_of_element_located((By.ID, "subject")))
         title_input.click()
         title_input.clear()
         title_input.send_keys(title)
 
-        # ── STEP 8: 구매요청 양식 데이터 입력 ───────────────────────────────
-        _log("⑧ 구매요청 양식 데이터 입력…")
+        # ── STEP 7: 구매요청 양식 데이터 입력 ───────────────────────────────
+        _log("⑦ 구매요청 양식 데이터 입력…")
         _fill_by_id("addContentTable_1_3",  pr_no)
         _fill_by_id("addContentTable_1_4",  po_no)
         _fill_by_id("addContentTable_1_5",  sales_person)
@@ -302,8 +292,8 @@ def run_approval(
         _fill_by_id("addContentTable_1_9",  equip_model)
         _fill_by_id("addContentTable_1_10", remark)
 
-        # ── STEP 9: 파일 첨부 ────────────────────────────────────────────────
-        _log("⑨ 파일 첨부 중…")
+        # ── STEP 8: 파일 첨부 ────────────────────────────────────────────────
+        _log("⑧ 파일 첨부 중…")
         try:
             drop_zone = driver.find_element(By.ID, "dropZone")
             file_input = drop_zone.find_element(By.XPATH, ".//input[@type='file']")
@@ -319,15 +309,15 @@ def run_approval(
         except Exception as e:
             logger.warning("파일 첨부 중 오류: %s", e)
 
-        # ── STEP 10: 결재요청 버튼 클릭 ─────────────────────────────────────
-        _log("⑩ 결재요청 버튼 클릭…")
+        # ── STEP 9: 결재요청 버튼 클릭 ─────────────────────────────────────
+        _log("⑨ 결재요청 버튼 클릭…")
         submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "act_draft")))
         driver.execute_script("arguments[0].scrollIntoView(true);", submit_btn)
         driver.execute_script("arguments[0].click();", submit_btn)
         time.sleep(2)
 
-        # ── STEP 11: 확인 팝업(alert 또는 새 창) 처리 ─────────────────────
-        _log("⑪ 결재 확인 처리…")
+        # ── STEP 10: 확인 팝업(alert 또는 새 창) 처리 ─────────────────────
+        _log("⑩ 결재 확인 처리…")
         try:
             driver.switch_to.alert.accept()
             _log("   alert 확인.")

@@ -6,9 +6,8 @@ Selenium 기반 전자결재 자동화 모듈.
 
 연결 방식
 ---------
-현재 실행 중인 Chrome에 Remote Debugging Protocol(CDP)로 연결한다.
-Chrome이 디버그 포트 없이 실행 중이면 종료 후 재시작(실제 프로필 유지).
-기존 Chrome 창/탭은 그대로 유지하고 새 탭만 열어 작업한다.
+앱 전용 Chrome 프로필을 별도로 실행한다(기존 Chrome 창에 영향 없음).
+ID/PW를 받아 자동 로그인 후 결재상신을 진행한다.
 
 요구 패키지:
     pip install selenium webdriver-manager
@@ -18,31 +17,22 @@ from __future__ import annotations
 import os
 import sys
 import time
-import socket
 import logging
-import subprocess
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Dict, Optional
 
 logger = logging.getLogger("QuoteApp.approval")
 
 APPROVAL_URL = "https://groupware.lotvacuum.com/app/approval"
 FORM_NAME    = "구매요청서(NPN)"
-DEBUG_PORT   = 9222
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Chrome 프로세스 / 디버그 포트 유틸
+# 내부 유틸
 # ──────────────────────────────────────────────────────────────────────────────
-def is_debug_port_open() -> bool:
-    """Chrome 디버그 포트(9222)가 열려있으면 True."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1)
-        result = s.connect_ex(("127.0.0.1", DEBUG_PORT))
-        s.close()
-        return result == 0
-    except Exception:
-        return False
+def _profile_dir() -> str:
+    """앱 전용 Chrome 프로필 경로 (AppData\\Roaming — 쓰기 권한 보장)."""
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(appdata, "quote-auto", "approval_profile")
 
 
 def _find_chrome_binary() -> Optional[str]:
@@ -60,97 +50,11 @@ def _find_chrome_binary() -> Optional[str]:
     return None
 
 
-def _real_user_data_dir() -> str:
-    local_app = os.environ.get("LOCALAPPDATA", "")
-    return os.path.join(local_app, "Google", "Chrome", "User Data")
-
-
-def kill_chrome() -> None:
-    """실행 중인 모든 Chrome 프로세스를 강제 종료한다."""
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "chrome.exe"],
-            capture_output=True, timeout=15,
-        )
-        time.sleep(2)
-    except Exception as e:
-        logger.warning("Chrome 종료 실패: %s", e)
-
-
-def launch_chrome_with_debug() -> bool:
-    """
-    실제 Chrome 프로필로 디버그 포트를 열어 Chrome을 실행한다.
-    Chrome이 이미 실행 중이면 kill_chrome()을 먼저 호출해야 한다.
-    성공하면 True.
-    """
-    chrome_bin = _find_chrome_binary()
-    if not chrome_bin:
-        logger.error("Chrome 실행 파일을 찾을 수 없습니다.")
-        return False
-
-    user_data = _real_user_data_dir()
-    args = [
-        chrome_bin,
-        f"--remote-debugging-port={DEBUG_PORT}",
-        f"--user-data-dir={user_data}",
-        "--profile-directory=Default",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-    ]
-    try:
-        flags = 0x00000008 if sys.platform == "win32" else 0   # DETACHED_PROCESS
-        subprocess.Popen(args, creationflags=flags)
-        logger.info("Chrome 디버그 모드로 실행: port=%d", DEBUG_PORT)
-        return True
-    except Exception as e:
-        logger.error("Chrome 실행 실패: %s", e)
-        return False
-
-
-def ensure_chrome_debug(progress_cb: Optional[Callable[[str], None]] = None) -> None:
-    """
-    Chrome이 디버그 포트로 실행 중인지 확인한다.
-    아니면 kill → relaunch 후 포트가 열릴 때까지 최대 30초 대기.
-    """
-    def _log(msg: str) -> None:
-        logger.info(msg)
-        if progress_cb:
-            progress_cb(msg)
-
-    if is_debug_port_open():
-        _log("기존 Chrome 디버그 포트에 연결합니다…")
-        return
-
-    _log("Chrome을 디버그 모드로 재시작합니다…")
-    kill_chrome()
-
-    if not launch_chrome_with_debug():
-        raise RuntimeError(
-            "Chrome을 찾을 수 없습니다. Google Chrome이 설치되어 있는지 확인하세요."
-        )
-
-    for _ in range(30):
-        time.sleep(1)
-        if is_debug_port_open():
-            _log("Chrome 디버그 포트 연결 완료.")
-            time.sleep(1)  # 추가 안정화
-            return
-
-    raise RuntimeError(
-        "Chrome 디버그 포트 대기 시간 초과(30초). "
-        "Chrome을 수동으로 종료 후 다시 시도하세요."
-    )
-
-
 # ──────────────────────────────────────────────────────────────────────────────
-# WebDriver 생성 (기존 Chrome에 연결)
+# WebDriver 생성
 # ──────────────────────────────────────────────────────────────────────────────
-def _create_driver(progress_cb: Optional[Callable[[str], None]] = None):
-    """
-    현재 실행 중인 Chrome에 CDP로 연결한 WebDriver를 반환한다.
-    Chrome이 디버그 포트 없이 실행 중이면 재시작한다.
-    """
+def _create_driver():
+    """앱 전용 프로필로 Chrome WebDriver를 생성한다 (기존 Chrome과 독립)."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -161,62 +65,107 @@ def _create_driver(progress_cb: Optional[Callable[[str], None]] = None):
             "pip install selenium webdriver-manager"
         )
 
-    ensure_chrome_debug(progress_cb)
-
-    options = Options()
-    options.add_experimental_option("debuggerAddress", f"127.0.0.1:{DEBUG_PORT}")
-
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
     except Exception:
         service = Service()
 
+    profile = _profile_dir()
+    os.makedirs(profile, exist_ok=True)
+
+    options = Options()
+    options.add_argument(f"--user-data-dir={profile}")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--remote-allow-origins=*")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    chrome_bin = _find_chrome_binary()
+    if chrome_bin:
+        options.binary_location = chrome_bin
+
+    from selenium import webdriver
     driver = webdriver.Chrome(service=service, options=options)
+    driver.set_window_size(1400, 950)
     return driver
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 로그인 감지 및 대기
+# 로그인
 # ──────────────────────────────────────────────────────────────────────────────
-def _wait_for_login(
+def _is_login_page(driver) -> bool:
+    try:
+        url = driver.current_url.lower()
+        if any(kw in url for kw in ("login", "signin", "auth", "sso")):
+            return True
+        src = driver.page_source.lower()
+        return 'type="password"' in src or 'id="password"' in src
+    except Exception:
+        return False
+
+
+def _do_login(
     driver,
+    wait,
+    username: str,
+    password: str,
     progress_cb: Optional[Callable[[str], None]] = None,
-    timeout: int = 300,
 ) -> None:
-    """
-    현재 탭이 로그인 페이지면 사용자가 로그인할 때까지 최대 timeout초 대기.
-    실제 Chrome 프로필 사용 시 이미 로그인되어 있으면 즉시 반환한다.
-    """
+    """로그인 페이지에서 계정/비밀번호를 자동 입력하고 로그인한다."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+
     def _log(msg: str) -> None:
         logger.info(msg)
         if progress_cb:
             progress_cb(msg)
 
-    def _is_login_page() -> bool:
-        try:
-            url = driver.current_url.lower()
-            if any(kw in url for kw in ("login", "signin", "auth", "sso", "account")):
-                return True
-            src = driver.page_source.lower()
-            return 'type="password"' in src or 'id="password"' in src
-        except Exception:
-            return False
+    _log("로그인 정보 입력 중…")
 
-    if not _is_login_page():
-        return
+    # 계정 입력
+    account_field = wait.until(EC.presence_of_element_located(
+        (By.XPATH,
+         "//input[@placeholder='계정' or @name='userId' or @name='username'"
+         " or @id='userId' or @id='username'"
+         " or (@type='text' and not(contains(@style,'display:none')))]")
+    ))
+    account_field.click()
+    account_field.clear()
+    account_field.send_keys(username)
 
-    _log("⚠️ 로그인이 필요합니다. Chrome 브라우저에서 로그인해 주세요… (최대 5분 대기)")
+    # 비밀번호 입력
+    pw_field = driver.find_element(
+        By.XPATH, "//input[@type='password' or @placeholder='비밀번호']"
+    )
+    pw_field.click()
+    pw_field.clear()
+    pw_field.send_keys(password)
 
-    for _ in range(timeout):
+    # 로그인 버튼 클릭
+    login_btn = driver.find_element(
+        By.XPATH,
+        "//button[contains(text(),'로그인') or @type='submit']"
+    )
+    login_btn.click()
+    _log("로그인 버튼 클릭…")
+
+    # 로그인 완료 대기 (최대 30초)
+    for _ in range(30):
         time.sleep(1)
-        if not _is_login_page():
-            _log("로그인 완료! 계속 진행합니다…")
+        if not _is_login_page(driver):
+            _log("로그인 완료!")
+            time.sleep(1)
             return
 
-    raise TimeoutError(
-        f"로그인 대기 시간 초과 ({timeout // 60}분). "
-        "Chrome에서 로그인 후 다시 시도하세요."
+    raise RuntimeError(
+        "로그인 실패. 계정/비밀번호를 확인하세요.\n"
+        "로그인 페이지에서 벗어나지 못했습니다."
     )
 
 
@@ -281,13 +230,16 @@ def run_approval(
     equipment: str,
     equip_model: str,
     remark: str,
+    username: str = "",
+    password: str = "",
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> None:
     """
     전자결재 구매요청서(NPN) 결재상신 자동화.
 
-    기존 Chrome에 새 탭을 열어 작업한다.
-    완료 후 자동화 탭만 닫고 Chrome은 그대로 유지한다.
+    Parameters
+    ----------
+    username / password : 그룹웨어 로그인 계정 (없으면 수동 로그인 대기)
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -298,19 +250,8 @@ def run_approval(
         if progress_cb:
             progress_cb(msg)
 
-    driver = _create_driver(progress_cb)
+    driver = _create_driver()
     wait   = WebDriverWait(driver, 30)
-
-    # 자동화 전 존재하던 탭 핸들 기록 (작업 후 해당 탭만 닫기 위함)
-    initial_handles: Set[str] = set(driver.window_handles)
-
-    # 새 탭 열기
-    driver.execute_script("window.open('about:blank', '_blank');")
-    time.sleep(0.5)
-    new_tab = next(h for h in driver.window_handles if h not in initial_handles)
-    driver.switch_to.window(new_tab)
-
-    auto_handles: Set[str] = {new_tab}   # 자동화 중 열린 탭 추적
 
     try:
         # ── STEP 1: 결재 홈 이동 ─────────────────────────────────────────────
@@ -319,14 +260,29 @@ def run_approval(
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
 
-        # 로그인 여부 확인 — 실제 프로필이므로 대부분 이미 로그인 상태
-        _wait_for_login(driver, progress_cb=progress_cb)
-
-        # 로그인 후 결재 페이지가 아니면 재이동
-        if APPROVAL_URL not in driver.current_url:
-            driver.get(APPROVAL_URL)
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            time.sleep(2)
+        # ── 로그인 처리 ───────────────────────────────────────────────────────
+        if _is_login_page(driver):
+            if username and password:
+                _do_login(driver, wait, username, password, progress_cb)
+                # 로그인 후 결재 페이지로 이동
+                if APPROVAL_URL not in driver.current_url:
+                    driver.get(APPROVAL_URL)
+                    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    time.sleep(2)
+            else:
+                # 수동 로그인 대기 (최대 5분)
+                _log("⚠️ 로그인이 필요합니다. Chrome에서 로그인해 주세요…")
+                for _ in range(300):
+                    time.sleep(1)
+                    if not _is_login_page(driver):
+                        _log("로그인 완료!")
+                        break
+                else:
+                    raise TimeoutError("로그인 대기 시간 초과 (5분)")
+                if APPROVAL_URL not in driver.current_url:
+                    driver.get(APPROVAL_URL)
+                    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    time.sleep(2)
 
         # ── STEP 2: 새 결재 진행 버튼 클릭 ──────────────────────────────────
         _log("② 새 결재 진행 버튼 클릭…")
@@ -388,12 +344,11 @@ def run_approval(
 
         # ── STEP 6: 팝업 창 전환 ────────────────────────────────────────────
         _log("⑥ 팝업 창 대기 중…")
-        wait.until(lambda d: len(d.window_handles) > len(auto_handles) + len(initial_handles) - 1)
+        main_window = driver.current_window_handle
+        wait.until(lambda d: len(d.window_handles) > 1)
         popup_handle = next(
-            h for h in driver.window_handles
-            if h not in initial_handles and h != new_tab
+            h for h in driver.window_handles if h != main_window
         )
-        auto_handles.add(popup_handle)
         driver.switch_to.window(popup_handle)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
@@ -487,10 +442,9 @@ def run_approval(
 
         extra_handles = [
             h for h in driver.window_handles
-            if h not in initial_handles and h not in auto_handles
+            if h not in (main_window, popup_handle)
         ]
         if extra_handles:
-            auto_handles.add(extra_handles[0])
             driver.switch_to.window(extra_handles[0])
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             time.sleep(1)
@@ -514,19 +468,8 @@ def run_approval(
         ) from e
     finally:
         time.sleep(2)
-        # 자동화 탭만 닫기 — 기존 Chrome 창/탭은 유지
-        for h in list(auto_handles):
-            try:
-                if h in driver.window_handles:
-                    driver.switch_to.window(h)
-                    driver.close()
-            except Exception:
-                pass
-        # 원래 탭으로 포커스 복귀 (있는 경우)
         try:
-            remaining = [h for h in driver.window_handles if h in initial_handles]
-            if remaining:
-                driver.switch_to.window(remaining[0])
+            driver.quit()
         except Exception:
             pass
 

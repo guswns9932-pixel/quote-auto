@@ -647,6 +647,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         grid.setRowStretch(1, 10)
         outer.addLayout(grid, 1)
 
+        QTimer.singleShot(0, self._refresh_quote_list)
+
     @staticmethod
     def _action_btn(label: str, slot) -> QPushButton:
         btn = QPushButton(label); btn.setMinimumHeight(110)
@@ -766,10 +768,22 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         return frame
 
     def _build_step7(self) -> QFrame:
-        frame = labeled_frame("견적서LIST", min_h=260)
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(260)
+        v = QVBoxLayout(frame); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(8)
+        title_row = QHBoxLayout()
+        lbl = bold_label("견적서LIST", size=12)
+        lbl.setFixedHeight(32)
+        lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn_refresh = QPushButton("새로고침")
+        btn_refresh.setFixedHeight(24)
+        btn_refresh.clicked.connect(self._refresh_quote_list)
+        title_row.addWidget(lbl); title_row.addWidget(btn_refresh)
+        v.addLayout(title_row)
         self.list_done = QListWidget()
         self.list_done.itemDoubleClicked.connect(self._open_done)
-        frame.layout().addWidget(self.list_done, 1); return frame
+        v.addWidget(self.list_done, 1)
+        return frame
 
     def _build_worklog(self) -> QFrame:
         frame = labeled_frame("작업로그", min_h=140)
@@ -1368,14 +1382,34 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 it.setBackground(color)
 
     def _add_done(self, path: str) -> None:
-        it = QListWidgetItem(os.path.basename(path)); it.setData(Qt.UserRole, path); self.list_done.addItem(it)
+        self._refresh_quote_list()
 
     def _add_done_cover(self, path: str) -> None:
-        it = QListWidgetItem(os.path.basename(path))
-        it.setData(Qt.UserRole, path)
-        it.setBackground(QBrush(QColor(255, 180, 180)))
-        self.list_done.addItem(it)
-        self.list_done.scrollToItem(it)
+        self._refresh_quote_list()
+        if self.list_done.count() > 0:
+            self.list_done.scrollToTop()
+
+    def _refresh_quote_list(self) -> None:
+        """견적서 폴더를 스캔하여 LIST를 최신순으로 갱신."""
+        root = os.path.join(exe_dir(), "견적서")
+        self.list_done.clear()
+        if not os.path.isdir(root):
+            return
+        files = []
+        for dirpath, _, filenames in os.walk(root):
+            for fn in filenames:
+                if fn.endswith(".xlsx") and not fn.startswith("~$"):
+                    full = os.path.join(dirpath, fn)
+                    files.append((os.path.getmtime(full), full))
+        files.sort(reverse=True)
+        for _, full in files:
+            rel = os.path.relpath(full, root)
+            item = QListWidgetItem(rel)
+            item.setData(Qt.UserRole, full)
+            item.setToolTip(full)
+            if os.path.basename(full).endswith("_갑지.xlsx"):
+                item.setBackground(QBrush(QColor(248, 187, 208)))  # 연분홍 — 갑지
+            self.list_done.addItem(item)
 
     def _open_done(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)
@@ -2364,7 +2398,8 @@ class RackPurchaseRequestPage(QWidget):
                                     on_result=_on_result)
 
     def _refresh_req_list(self) -> None:
-        """RACK구매요청서 폴더의 xlsx 파일 목록을 우측 패널에 갱신."""
+        """RACK구매요청서 폴더의 xlsx 파일 목록을 우측 패널에 갱신.
+        결재상신용 파일(연주황 음영)과 일반 요청서를 구분하여 표시."""
         root = os.path.join(exe_dir(), "RACK구매요청서")
         self.req_list.clear()
         if not os.path.isdir(root):
@@ -2381,6 +2416,9 @@ class RackPurchaseRequestPage(QWidget):
             item = QListWidgetItem(rel)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
+            # 결재상신용: _RACK구매요청서.xlsx 로 끝나지 않는 파일 → 연주황 음영
+            if not os.path.basename(full).endswith("_RACK구매요청서.xlsx"):
+                item.setBackground(QBrush(QColor(255, 224, 178)))  # #FFE0B2 연주황
             self.req_list.addItem(item)
 
     def _open_req_file(self, item: QListWidgetItem) -> None:
@@ -3061,6 +3099,7 @@ class RackPurchaseRequestPage(QWidget):
 
             self._xlsx_save(out_path, files, names)
 
+            self._refresh_req_list()
             QMessageBox.information(self, "완료",
                 f"결재상신용 생성 완료\n{os.path.basename(out_path)}")
         except Exception as e:

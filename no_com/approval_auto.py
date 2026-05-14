@@ -37,51 +37,48 @@ def _profile_dir() -> str:
     return os.path.join(appdata, "quote-auto", "approval_profile")
 
 
-def _sync_chrome_session() -> None:
+def _wait_for_login(
+    driver,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    timeout: int = 300,
+) -> None:
     """
-    사용자 실제 Chrome Default 프로필의 쿠키/세션을 자동화 프로필에 동기화.
+    로그인 페이지가 감지되면 사용자가 직접 로그인할 때까지 대기.
 
-    Chrome은 쿠키를 AES-256-GCM으로 암호화하고, 키는 Local State에 DPAPI로 보관.
-    같은 PC·같은 사용자 계정이면 복사한 파일을 그대로 복호화할 수 있음.
-    Chrome 실행 중에도 SQLite WAL 모드 덕분에 대부분 복사 가능.
+    Chrome에 사이트가 열리면 사용자가 그 창에서 로그인하면 된다.
+    로그인 완료 후 자동으로 결재 페이지로 이동한다.
+    이 방식은 SSO / SAML / 세션쿠키 등 어떤 인증 방식도 처리한다.
     """
-    import shutil
+    def _log(msg: str) -> None:
+        logger.info(msg)
+        if progress_cb:
+            progress_cb(msg)
 
-    local_app = os.environ.get("LOCALAPPDATA", "")
-    src_root  = os.path.join(local_app, "Google", "Chrome", "User Data")
-    dst_root  = _profile_dir()
+    def _is_login_page() -> bool:
+        try:
+            url = driver.current_url.lower()
+            if any(kw in url for kw in ("login", "signin", "auth", "sso", "account")):
+                return True
+            src = driver.page_source.lower()
+            return 'type="password"' in src or 'id="password"' in src
+        except Exception:
+            return False
 
-    if not os.path.isdir(src_root):
-        logger.warning("Chrome 사용자 데이터 경로를 찾을 수 없음: %s", src_root)
+    if not _is_login_page():
         return
 
-    os.makedirs(dst_root, exist_ok=True)
+    _log("⚠️ 로그인이 필요합니다. Chrome 브라우저에서 로그인 후 계속하세요…")
 
-    # ── Local State (AES 암호화 키 포함) ─────────────────────────────────────
-    src_ls = os.path.join(src_root, "Local State")
-    dst_ls = os.path.join(dst_root, "Local State")
-    if os.path.isfile(src_ls):
-        try:
-            shutil.copy2(src_ls, dst_ls)
-            logger.debug("Local State 복사 완료")
-        except Exception as e:
-            logger.warning("Local State 복사 실패: %s", e)
+    for _ in range(timeout):
+        time.sleep(1)
+        if not _is_login_page():
+            _log("로그인 완료! 결재 페이지로 이동 중…")
+            return
 
-    # ── Default 프로필 쿠키 (+ WAL/SHM) ─────────────────────────────────────
-    src_prof = os.path.join(src_root, "Default")
-    dst_prof = os.path.join(dst_root, "Default")
-    os.makedirs(dst_prof, exist_ok=True)
-
-    for fname in ("Cookies", "Cookies-wal", "Cookies-shm"):
-        src = os.path.join(src_prof, fname)
-        dst = os.path.join(dst_prof, fname)
-        if os.path.isfile(src):
-            try:
-                shutil.copy2(src, dst)
-                logger.debug("쿠키 파일 복사: %s", fname)
-            except Exception as e:
-                # Chrome 실행 중 잠금이 걸릴 수 있으나 Cookies 본체는 대개 가능
-                logger.debug("쿠키 복사 실패 (%s): %s", fname, e)
+    raise TimeoutError(
+        f"로그인 대기 시간 초과 ({timeout}초). "
+        "Chrome 브라우저에서 로그인 후 다시 시도하세요."
+    )
 
 
 def _find_chrome_binary() -> Optional[str]:
@@ -100,8 +97,11 @@ def _find_chrome_binary() -> Optional[str]:
 
 
 def _create_driver():
-    """Chrome WebDriver 생성.
-    실행 전 실제 Chrome 쿠키를 자동화 프로필에 복사하여 별도 로그인 없이 세션 유지."""
+    """
+    Chrome WebDriver 생성.
+    앱 전용 프로필을 사용하므로 기존 Chrome 창에 영향을 주지 않는다.
+    로그인 세션은 최초 로그인 후 프로필에 저장되어 다음 실행부터 유지된다.
+    """
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -112,22 +112,18 @@ def _create_driver():
             "pip install selenium webdriver-manager"
         )
 
-    # ── 실제 Chrome 쿠키 → 자동화 프로필로 동기화 ──────────────────────────
-    _sync_chrome_session()
-
     # ── chromedriver 확보 ────────────────────────────────────────────────────
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
     except Exception:
-        service = Service()   # PATH에 있는 chromedriver 사용
+        service = Service()
 
     profile = _profile_dir()
     os.makedirs(profile, exist_ok=True)
 
     options = Options()
     options.add_argument(f"--user-data-dir={profile}")
-    options.add_argument("--profile-directory=Default")  # 쿠키를 복사한 Default 프로필 사용
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-notifications")
@@ -252,6 +248,15 @@ def run_approval(
         driver.get(APPROVAL_URL)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
+
+        # 로그인이 필요하면 사용자가 직접 로그인할 때까지 대기 (최대 5분)
+        _wait_for_login(driver, progress_cb=progress_cb)
+
+        # 로그인 후 approval 페이지가 아니면 다시 이동
+        if APPROVAL_URL not in driver.current_url:
+            driver.get(APPROVAL_URL)
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            time.sleep(2)
 
         # ── STEP 2: 새 결재 진행 버튼 클릭 ──────────────────────────────────
         _log("② 새 결재 진행 버튼 클릭…")

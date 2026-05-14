@@ -3149,8 +3149,6 @@ class RackPurchaseRequestPage(QWidget):
 
         import approval_auto as _aa
 
-        # Chrome이 이미 로그인된 상태라면 쿠키가 자동 복사되어 별도 로그인 불필요
-
         # 각 파일에 대해 순서대로 결재상신 (파일이 여러 개면 확인)
         if len(paths) > 1:
             reply = QMessageBox.question(
@@ -3191,7 +3189,7 @@ class RackPurchaseRequestPage(QWidget):
             )
 
         _BgWorker.run_with_progress(
-            self, "결재상신 진행 중… (Chrome이 자동으로 실행됩니다)",
+            self, "결재상신 진행 중…\n(Chrome이 열리면 로그인 후 자동으로 계속됩니다)",
             _run_all, paths,
             on_result=_on_done
         )

@@ -150,6 +150,38 @@ class _GenCoverThread(QThread):
             self.done.emit(e)
 
 
+class _ScrollableErrorDialog(QDialog):
+    """긴 오류 메시지를 스크롤·드래그로 볼 수 있는 오류 다이얼로그."""
+
+    def __init__(self, parent=None, message: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("오류")
+        self.resize(640, 400)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(message)
+        text.setLineWrapMode(QTextEdit.NoWrap)
+        f = text.font()
+        f.setFamily("Consolas")
+        f.setPointSize(9)
+        text.setFont(f)
+        layout.addWidget(text)
+
+        btn = QPushButton("확인")
+        btn.setFixedWidth(80)
+        btn.clicked.connect(self.accept)
+        h = QHBoxLayout()
+        h.addStretch()
+        h.addWidget(btn)
+        layout.addLayout(h)
+
+
 class _BgWorker(QThread):
     """범용 백그라운드 작업 스레드. UI 블로킹 없이 Excel 작업 실행."""
     result = Signal(object)
@@ -188,8 +220,7 @@ class _BgWorker(QThread):
             if on_error:
                 on_error(e)
             else:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(parent, "오류", e)
+                _ScrollableErrorDialog(parent, e).exec()
 
         worker.result.connect(_on_result)
         worker.error.connect(_on_error)

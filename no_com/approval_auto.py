@@ -147,10 +147,12 @@ def _do_login(
     pw_field.clear()
     pw_field.send_keys(password)
 
-    # 로그인 버튼 클릭
+    # 로그인 버튼 클릭 (text()는 직계 텍스트만 매칭 → .으로 자손 포함 검색)
     login_btn = driver.find_element(
         By.XPATH,
-        "//button[contains(text(),'로그인') or @type='submit']"
+        "//button[contains(.,'로그인')]"
+        " | //input[@type='submit']"
+        " | //button[@type='submit']"
     )
     login_btn.click()
     _log("로그인 버튼 클릭…")

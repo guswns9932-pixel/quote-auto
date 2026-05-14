@@ -1505,14 +1505,16 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate = QPushButton("요청서 생성")
         self.btn_generate_overseas = QPushButton("국외요청서 생성")
         self.btn_generate_approval = QPushButton("결재상신용 생성")
+        self.btn_approval_submit   = QPushButton("결재상신")
         self.btn_upload_history = QPushButton("발주이력 업로드")
         for btn, color in [
-            (self.btn_load_template, "#C8E6C9"),
-            (self.btn_load_quote, "#BBDEFB"),
-            (self.btn_generate, "#FFF176"),
-            (self.btn_generate_overseas, "#B3E5FC"),
-            (self.btn_generate_approval, "#FFE0B2"),
-            (self.btn_upload_history, "#E1BEE7"),
+            (self.btn_load_template,    "#C8E6C9"),
+            (self.btn_load_quote,       "#BBDEFB"),
+            (self.btn_generate,         "#FFF176"),
+            (self.btn_generate_overseas,"#B3E5FC"),
+            (self.btn_generate_approval,"#FFE0B2"),
+            (self.btn_approval_submit,  "#F8BBD0"),
+            (self.btn_upload_history,   "#E1BEE7"),
         ]:
             btn.setMinimumHeight(42)
             f = btn.font(); f.setPointSize(11); f.setBold(True); btn.setFont(f)
@@ -1590,6 +1592,7 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate_overseas.clicked.connect(self._generate_overseas_request)
         self.btn_load_quote.clicked.connect(self._load_quote_data)
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
+        self.btn_approval_submit.clicked.connect(self._do_approval_submit)
         self.btn_upload_history.clicked.connect(self._upload_order_history)
 
         # UI 렌더링 완료 후 파일 스캔 (블로킹 방지)
@@ -3121,6 +3124,85 @@ class RackPurchaseRequestPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "생성 오류", f"결재상신용 생성 중 오류:\n{e}")
             logger.error("결재상신용 생성 오류", exc_info=True)
+
+    # ── 결재상신 자동화 ────────────────────────────────────────────────────────
+    def _do_approval_submit(self) -> None:
+        """결재상신용 xlsx를 선택 → 전자결재 시스템에 자동으로 구매요청서(NPN) 결재상신."""
+        start_dir = self._last_generated_folder or exe_dir()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "결재상신할 RACK 구매요청서 선택", start_dir, "Excel Files (*.xlsx)"
+        )
+        if not paths:
+            return
+
+        # selenium/webdriver-manager 설치 확인
+        try:
+            import selenium  # noqa: F401
+        except ImportError:
+            QMessageBox.critical(
+                self, "패키지 없음",
+                "결재상신 기능에는 selenium 패키지가 필요합니다.\n\n"
+                "pip install selenium webdriver-manager\n\n"
+                "설치 후 프로그램을 재시작하세요."
+            )
+            return
+
+        import approval_auto as _aa
+
+        # 첫 실행 안내 (프로필 새로 생성되는 경우)
+        profile = _aa._profile_dir()
+        if not os.path.isdir(profile):
+            QMessageBox.information(
+                self, "첫 실행 안내",
+                "처음 실행 시 Chrome이 열립니다.\n"
+                "그룹웨어에 로그인하면 이후 자동으로 세션이 유지됩니다.\n\n"
+                "로그인 완료 후 이 버튼을 다시 누르세요."
+            )
+
+        # 각 파일에 대해 순서대로 결재상신 (파일이 여러 개면 확인)
+        if len(paths) > 1:
+            reply = QMessageBox.question(
+                self, "다중 파일",
+                f"{len(paths)}개 파일에 대해 순서대로 결재상신을 진행합니다.\n"
+                "계속하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        def _run_all(file_paths):
+            results = []
+            for fp in file_paths:
+                try:
+                    data = _aa.read_rack_row2(fp)
+                    fname = os.path.splitext(os.path.basename(fp))[0]
+                    _aa.run_approval(
+                        xlsx_path   = fp,
+                        title       = fname,
+                        pr_no       = data["pr_no"],
+                        sales_person= data["sales_person"],
+                        line        = data["line"],
+                        process     = data["process"],
+                        equipment   = data["equipment"],
+                        equip_model = data["equip_model"],
+                        remark      = "세부List 유첨 (총 1건)",
+                    )
+                    results.append(f"✅ {fname}")
+                except Exception as e:
+                    results.append(f"❌ {os.path.basename(fp)}: {e}")
+            return results
+
+        def _on_done(results):
+            QMessageBox.information(
+                self, "결재상신 완료",
+                "\n".join(results)
+            )
+
+        _BgWorker.run_with_progress(
+            self, "결재상신 진행 중… (Chrome이 자동으로 실행됩니다)",
+            _run_all, paths,
+            on_result=_on_done
+        )
 
 
 

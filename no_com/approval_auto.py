@@ -147,15 +147,10 @@ def _do_login(
     pw_field.clear()
     pw_field.send_keys(password)
 
-    # 로그인 버튼 클릭 (text()는 직계 텍스트만 매칭 → .으로 자손 포함 검색)
-    login_btn = driver.find_element(
-        By.XPATH,
-        "//button[contains(.,'로그인')]"
-        " | //input[@type='submit']"
-        " | //button[@type='submit']"
-    )
-    login_btn.click()
-    _log("로그인 버튼 클릭…")
+    # 비밀번호 입력 후 Enter로 폼 제출 (버튼 구조와 무관하게 동작)
+    from selenium.webdriver.common.keys import Keys
+    pw_field.send_keys(Keys.RETURN)
+    _log("로그인 제출…")
 
     # 로그인 완료 대기 (최대 30초)
     for _ in range(30):

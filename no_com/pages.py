@@ -3109,32 +3109,41 @@ class RackPurchaseRequestPage(QWidget):
         # 기존 sharedStrings 읽기
         if SS_KEY in files:
             ss_xml = files[SS_KEY].decode('utf-8', errors='replace')
-            si_list: list = re.findall(r'<si\b[^>]*>.*?</si>', ss_xml, flags=re.DOTALL)
         else:
             ss_xml = (
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
                 f'<sst xmlns="{SS_NS}" count="0" uniqueCount="0"></sst>'
             )
-            si_list = []
 
-        # 기존 문자열 → 인덱스 맵
+        # 기존 항목 수 파악 (정규식으로 <si> 개수 카운트)
+        uc_m = re.search(r'\buniqueCount="(\d+)"', ss_xml)
+        existing_count = int(uc_m.group(1)) if uc_m else len(re.findall(r'<si\b', ss_xml))
+
+        # 기존 문자열 → 인덱스 맵 (단순 <t>...</t> 패턴만 매핑)
         str_to_idx: Dict[str, int] = {}
-        for idx, si in enumerate(si_list):
-            tm = re.search(r'<t[^>]*>(.*?)</t>', si, re.DOTALL)
+        for m in re.finditer(r'<si\b[^>]*>(.*?)</si>', ss_xml, flags=re.DOTALL):
+            idx_val = len(str_to_idx)  # 순서대로 인덱스 부여
+            tm = re.search(r'<t[^>]*>(.*?)</t>', m.group(1), re.DOTALL)
             if tm:
                 raw = tm.group(1)
                 plain = (raw.replace('&amp;', '&').replace('&lt;', '<')
                          .replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'"))
-                str_to_idx[plain] = idx
+                str_to_idx[plain] = idx_val
+
+        # 새로 추가할 항목만 별도 리스트에 쌓음 (기존 항목은 절대 삭제하지 않음)
+        new_strings: list = []
+        new_str_to_idx: Dict[str, int] = {}
 
         def _get_idx(plain: str) -> int:
-            if plain not in str_to_idx:
-                idx = len(si_list)
-                str_to_idx[plain] = idx
+            if plain in str_to_idx:
+                return str_to_idx[plain]
+            if plain not in new_str_to_idx:
+                idx = existing_count + len(new_strings)
+                new_str_to_idx[plain] = idx
                 esc = (plain.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;'))
-                si_list.append(f'<si><t>{esc}</t></si>')
-            return str_to_idx[plain]
+                new_strings.append(f'<si><t>{esc}</t></si>')
+            return new_str_to_idx[plain]
 
         changed_any = False
         for name in list(files.keys()):
@@ -3167,12 +3176,12 @@ class RackPurchaseRequestPage(QWidget):
                 changed_any = True
 
         if changed_any:
-            total = len(si_list)
-            new_body = ''.join(si_list)
+            total = existing_count + len(new_strings)
             ss_xml = re.sub(r'\bcount="\d+"', f'count="{total}"', ss_xml)
             ss_xml = re.sub(r'\buniqueCount="\d+"', f'uniqueCount="{total}"', ss_xml)
-            ss_xml = re.sub(r'<si\b.*?</si>', '', ss_xml, flags=re.DOTALL)
-            ss_xml = ss_xml.replace('</sst>', new_body + '</sst>')
+            # 기존 <si> 항목은 절대 삭제하지 않고, 새 항목만 뒤에 추가
+            if new_strings:
+                ss_xml = ss_xml.replace('</sst>', ''.join(new_strings) + '</sst>')
             files[SS_KEY] = ss_xml.encode('utf-8')
 
             # Content_Types에 sharedStrings 없으면 추가

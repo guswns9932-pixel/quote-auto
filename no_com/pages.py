@@ -3077,12 +3077,21 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_save(path: str, files: dict, names: list) -> None:
-        """(files, names)를 xlsx ZIP으로 저장."""
+        """(files, names)를 xlsx ZIP으로 저장.
+        OOXML 스펙에 따라 [Content_Types].xml 은 ZIP_STORED(비압축) 필수.
+        Synap 등 엄격한 뷰어는 이를 압축하면 미리보기 오류를 낸다.
+        """
         import zipfile as _zf
+        # [Content_Types].xml 을 항상 첫 번째로, 비압축으로 기록
+        ordered = ['[Content_Types].xml'] + [n for n in names if n != '[Content_Types].xml']
         with _zf.ZipFile(path, 'w', _zf.ZIP_DEFLATED) as zf:
-            for name in names:
-                if name in files:
-                    zf.writestr(name, files[name])
+            for name in ordered:
+                if name not in files:
+                    continue
+                compress = _zf.ZIP_STORED if name == '[Content_Types].xml' else _zf.ZIP_DEFLATED
+                info = _zf.ZipInfo(name)
+                info.compress_type = compress
+                zf.writestr(info, files[name])
 
     @staticmethod
     def _xlsx_collect_row_styles(sheet_xml: str, row_num: int) -> Dict[str, str]:

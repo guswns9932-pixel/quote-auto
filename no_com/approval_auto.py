@@ -105,10 +105,14 @@ def _patch_chrome_shortcut() -> bool:
         return False
 
 
-def _find_cloudoc_extension() -> Optional[str]:
-    """
-    사용자 Chrome 프로필에서 ClouDoc Chrome Ext 경로를 찾아 반환한다.
-    """
+def _automation_profile_dir() -> str:
+    """자동화 전용 Chrome 프로필 경로."""
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(appdata, "quote-auto", "chrome_profile")
+
+
+def _find_cloudoc_extension_id() -> Optional[str]:
+    """사용자 기본 Chrome 프로필에서 ClouDoc 확장프로그램 ID를 찾아 반환한다."""
     import json
 
     ext_base = os.path.join(
@@ -130,24 +134,49 @@ def _find_cloudoc_extension() -> Optional[str]:
                 with open(manifest_path, encoding="utf-8") as f:
                     manifest = json.load(f)
                 name = manifest.get("name", "").lower()
-                if "cloudoc" in name or "clou" in name:
-                    ext_path = os.path.join(ext_id_path, version)
-                    logger.info("ClouDoc 확장프로그램 발견: %s", ext_path)
-                    return ext_path
+                if "cloudoc" in name:
+                    logger.info("ClouDoc 확장프로그램 ID 발견: %s", ext_id)
+                    return ext_id
             except Exception:
                 continue
     return None
 
 
+def _is_cloudoc_installed_in_profile(profile_dir: str) -> bool:
+    """자동화 프로필에 ClouDoc이 설치되어 있는지 확인한다."""
+    import json
+
+    ext_base = os.path.join(profile_dir, "Default", "Extensions")
+    if not os.path.isdir(ext_base):
+        return False
+
+    for ext_id in os.listdir(ext_base):
+        for version in os.listdir(os.path.join(ext_base, ext_id)):
+            manifest_path = os.path.join(ext_base, ext_id, version, "manifest.json")
+            if not os.path.isfile(manifest_path):
+                continue
+            try:
+                with open(manifest_path, encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if "cloudoc" in manifest.get("name", "").lower():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def _create_driver(offscreen: bool = False):
     """
-    ClouDoc 확장프로그램을 로드한 Chrome을 Selenium으로 실행한다.
-    확장프로그램을 찾지 못하면 오류를 발생시킨다.
+    자동화 전용 Chrome 프로필로 WebDriver를 생성한다.
+    ClouDoc 확장프로그램이 프로필에 없으면 웹스토어에서 자동 설치 후 재시작한다.
     """
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
     except ImportError:
         raise RuntimeError(
             "selenium 패키지가 없습니다.\n"
@@ -164,26 +193,52 @@ def _create_driver(offscreen: bool = False):
     if not chrome_bin:
         raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
 
-    cloudoc_path = _find_cloudoc_extension()
-    if not cloudoc_path:
-        raise RuntimeError(
-            "ClouDoc Chrome Ext 확장프로그램을 찾을 수 없습니다.\n"
-            "Chrome에 ClouDoc 확장프로그램이 설치되어 있는지 확인해 주세요."
-        )
+    profile_dir = _automation_profile_dir()
+    os.makedirs(profile_dir, exist_ok=True)
 
-    opts = Options()
-    opts.binary_location = chrome_bin
-    opts.add_argument(f"--load-extension={cloudoc_path}")
-    opts.add_argument("--no-first-run")
-    opts.add_argument("--no-default-browser-check")
-    opts.add_argument("--disable-notifications")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
+    def _build_opts(visible: bool = True) -> Options:
+        opts = Options()
+        opts.binary_location = chrome_bin
+        opts.add_argument(f"--user-data-dir={profile_dir}")
+        opts.add_argument("--profile-directory=Default")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-notifications")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        if not visible:
+            opts.add_argument("--window-position=-10000,-10000")
+        return opts
 
-    driver = webdriver.Chrome(service=service, options=opts)
-    if offscreen:
-        driver.set_window_position(-10000, -10000)
-    else:
+    # ClouDoc 설치 여부 확인 → 없으면 웹스토어에서 설치
+    if not _is_cloudoc_installed_in_profile(profile_dir):
+        logger.info("ClouDoc 미설치 → 웹스토어 설치 시작")
+        ext_id = _find_cloudoc_extension_id()
+
+        driver = webdriver.Chrome(service=service, options=_build_opts(visible=True))
+        driver.set_window_size(1000, 700)
+
+        if ext_id:
+            store_url = f"https://chromewebstore.google.com/detail/{ext_id}"
+        else:
+            store_url = "https://chromewebstore.google.com/search/ClouDoc"
+
+        driver.get(store_url)
+
+        # 설치 완료 대기 (최대 3분)
+        wait = WebDriverWait(driver, 180)
+        try:
+            wait.until(lambda d: _is_cloudoc_installed_in_profile(profile_dir))
+            logger.info("ClouDoc 설치 완료.")
+        except Exception:
+            logger.warning("ClouDoc 설치 대기 시간 초과.")
+        finally:
+            driver.quit()
+            time.sleep(1)
+
+    # 정상 실행
+    driver = webdriver.Chrome(service=service, options=_build_opts(visible=not offscreen))
+    if not offscreen:
         driver.set_window_size(1400, 950)
     return driver
 

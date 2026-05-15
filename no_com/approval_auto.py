@@ -55,8 +55,10 @@ def _find_chrome_binary() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 def _patch_chrome_shortcut() -> bool:
     """
-    바탕화면 Chrome 바로가기에 --remote-debugging-port=9222 를 추가한다.
-    이미 추가되어 있으면 True, 새로 추가했으면 True, 실패 시 False 반환.
+    사용자 바탕화면에 Chrome 디버깅 바로가기를 만든다.
+    - 사용자 바탕화면의 기존 Chrome 바로가기 수정 시도
+    - 실패(권한 없음)하면 사용자 바탕화면에 새 바로가기 생성
+    반환값: 성공 True / 실패 False
     """
     import glob
     try:
@@ -65,27 +67,42 @@ def _patch_chrome_shortcut() -> bool:
         return False
 
     shell = win32com.client.Dispatch("WScript.Shell")
-    desktops = [
-        shell.SpecialFolders("Desktop"),
-        os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop"),
-    ]
-    found = False
-    for desktop in desktops:
-        for lnk in glob.glob(os.path.join(desktop, "*.lnk")):
-            try:
-                sc = shell.CreateShortcut(lnk)
-                if "chrome" not in (sc.TargetPath or "").lower():
-                    continue
-                found = True
-                args = sc.Arguments or ""
-                if "--remote-debugging-port=9222" in args:
-                    continue
-                sc.Arguments = (args + " --remote-debugging-port=9222").strip()
-                sc.Save()
-                logger.info("Chrome 바로가기 수정 완료: %s", lnk)
-            except Exception as e:
-                logger.warning("바로가기 수정 실패 (%s): %s", lnk, e)
-    return found
+    user_desktop = shell.SpecialFolders("Desktop")  # 사용자 개인 바탕화면만 사용
+    debug_arg = "--remote-debugging-port=9222"
+
+    # ① 사용자 바탕화면의 Chrome 바로가기 수정 시도
+    for lnk in glob.glob(os.path.join(user_desktop, "*.lnk")):
+        try:
+            sc = shell.CreateShortcut(lnk)
+            if "chrome" not in (sc.TargetPath or "").lower():
+                continue
+            if debug_arg in (sc.Arguments or ""):
+                logger.info("Chrome 바로가기 이미 설정됨: %s", lnk)
+                return True
+            sc.Arguments = ((sc.Arguments or "") + " " + debug_arg).strip()
+            sc.Save()
+            logger.info("Chrome 바로가기 수정 완료: %s", lnk)
+            return True
+        except Exception as e:
+            logger.warning("바로가기 수정 실패 (%s): %s", lnk, e)
+
+    # ② 수정 실패 또는 바로가기 없음 → 사용자 바탕화면에 새 바로가기 생성
+    chrome_bin = _find_chrome_binary()
+    if not chrome_bin:
+        return False
+    try:
+        new_lnk = os.path.join(user_desktop, "Google Chrome (결재).lnk")
+        sc = shell.CreateShortcut(new_lnk)
+        sc.TargetPath = chrome_bin
+        sc.Arguments = debug_arg
+        sc.WorkingDirectory = os.path.dirname(chrome_bin)
+        sc.Description = "Chrome (결재상신용)"
+        sc.Save()
+        logger.info("Chrome 바로가기 새로 생성: %s", new_lnk)
+        return True
+    except Exception as e:
+        logger.warning("바로가기 생성 실패: %s", e)
+        return False
 
 
 def _create_driver():
@@ -123,11 +140,11 @@ def _create_driver():
     _patch_chrome_shortcut()
     raise RuntimeError(
         "Chrome 연결 실패\n\n"
-        "Chrome 바탕화면 바로가기가 자동으로 업데이트되었습니다.\n\n"
+        "바탕화면에 'Google Chrome (결재)' 바로가기가 생성되었습니다.\n\n"
         "① Chrome을 완전히 종료해 주세요\n"
-        "② 바탕화면의 Chrome 바로가기로 다시 실행해 주세요\n"
+        "② 바탕화면의 'Google Chrome (결재)' 바로가기로 Chrome을 여세요\n"
         "③ 결재상신을 다시 시도해 주세요\n\n"
-        "(이후에는 바로가기로 Chrome을 열면 자동 연결됩니다)"
+        "(이후에는 해당 바로가기로 Chrome을 열면 자동 연결됩니다)"
     )
 
 

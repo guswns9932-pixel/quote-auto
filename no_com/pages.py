@@ -3255,7 +3255,7 @@ class RackPurchaseRequestPage(QWidget):
                         process      = data["process"],
                         equipment    = data["equipment"],
                         equip_model  = data["equip_model"],
-                        remark       = "세부List 유첨 (총 1건)",
+                        remark       = data["remark"],
                         po_no        = "-",
                         username     = username,
                         password     = password,

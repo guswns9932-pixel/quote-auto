@@ -304,22 +304,15 @@ def run_approval(
         # ── STEP 8: 파일 첨부 ────────────────────────────────────────────────
         _log("⑧ 파일 첨부 중…")
         try:
-            import pyperclip
-            import pyautogui
-
-            # 파일 선택 버튼 클릭 → Windows 파일 열기 다이얼로그 오픈
-            file_btn = driver.find_element(
-                By.XPATH, '//*[@id="dropZone"]/div[1]/span[2]/span[1]'
+            drop_zone = driver.find_element(By.ID, "dropZone")
+            file_input = drop_zone.find_element(By.XPATH, ".//input[@type='file']")
+            driver.execute_script(
+                "arguments[0].style.display='block';"
+                "arguments[0].style.visibility='visible';"
+                "arguments[0].style.opacity='1';",
+                file_input,
             )
-            driver.execute_script("arguments[0].scrollIntoView(true);", file_btn)
-            driver.execute_script("arguments[0].click();", file_btn)
-            time.sleep(2.5)  # 다이얼로그 로딩 대기
-
-            # 경로를 클립보드에 복사 → 파일이름 입력란에 붙여넣기
-            pyperclip.copy(xlsx_path)
-            pyautogui.hotkey("ctrl", "v")   # 경로 붙여넣기
-            time.sleep(0.8)
-            pyautogui.press("enter")        # 열기 버튼
+            file_input.send_keys(xlsx_path)
             time.sleep(2)
             _log("   파일 첨부 완료.")
         except Exception as e:
@@ -358,24 +351,31 @@ def run_approval(
 def read_rack_row2(xlsx_path: str) -> Dict[str, str]:
     """
     RACK발주양식 시트 2행에서 결재상신에 필요한 컬럼 값을 반환.
-    반환 키: pr_no, sales_person, process, line, equipment, equip_model
+    반환 키: pr_no, sales_person, line, process, equipment, equip_model, remark
     """
     from openpyxl import load_workbook
     wb = load_workbook(xlsx_path, data_only=True)
     ws = wb["RACK발주양식"] if "RACK발주양식" in wb.sheetnames else wb.active
-    row = ws[2]
+    row2 = ws[2]
 
     def _cell(col_idx: int) -> str:
-        v = row[col_idx - 1].value if col_idx <= len(row) else None
+        v = row2[col_idx - 1].value if col_idx <= len(row2) else None
         return str(v).strip() if v is not None else ""
 
+    # Z열(26번째) 전체에서 비어있지 않은 셀 수 - 1 (헤더 제외)
+    z_count = sum(
+        1 for r in ws.iter_rows(min_col=26, max_col=26, values_only=True)
+        if r[0] is not None and str(r[0]).strip() != ""
+    ) - 1
+
     result = {
-        "pr_no":        _cell(9),    # I열
-        "sales_person": _cell(11),   # K열
-        "process":      _cell(23),   # W열
-        "line":         _cell(25),   # Y열
-        "equipment":    _cell(26),   # Z열
-        "equip_model":  _cell(27),   # AA열
+        "pr_no":        _cell(7),    # G열
+        "sales_person": _cell(9),    # I열
+        "line":         _cell(23),   # W열
+        "process":      _cell(21),   # U열
+        "equipment":    _cell(24),   # X열
+        "equip_model":  _cell(25),   # Y열
+        "remark":       f"세부List 유첨 (총 {max(z_count, 0)}건)",
     }
     wb.close()
     return result

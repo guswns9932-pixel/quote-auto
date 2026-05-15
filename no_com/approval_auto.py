@@ -53,47 +53,9 @@ def _find_chrome_binary() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 # WebDriver 생성
 # ──────────────────────────────────────────────────────────────────────────────
-def _patch_chrome_shortcut() -> None:
-    """바탕화면 Chrome 바로가기에 --remote-debugging-port=9222 를 자동으로 추가한다."""
-    import glob
-    try:
-        import win32com.client
-    except ImportError:
-        logger.warning("pywin32 없음 - 바로가기 자동 수정 건너뜀 (pip install pywin32)")
-        return
-
-    shell = win32com.client.Dispatch("WScript.Shell")
-    desktops = [
-        shell.SpecialFolders("Desktop"),
-        os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop"),
-    ]
-
-    for desktop in desktops:
-        for lnk in glob.glob(os.path.join(desktop, "*.lnk")):
-            try:
-                sc = shell.CreateShortcut(lnk)
-                if "chrome" not in (sc.TargetPath or "").lower():
-                    continue
-                args = sc.Arguments or ""
-                if "--remote-debugging-port=9222" in args:
-                    continue
-                sc.Arguments = (args + " --remote-debugging-port=9222").strip()
-                sc.Save()
-                logger.info("Chrome 바로가기 수정 완료: %s", lnk)
-            except Exception as e:
-                logger.warning("바로가기 수정 실패 (%s): %s", lnk, e)
-
-
 def _create_driver():
-    """
-    원격 디버깅 포트로 실행 중인 Chrome에 연결하거나,
-    없으면 subprocess로 Chrome을 직접 실행 후 연결한다.
-
-    사전 준비 (최초 1회):
-        Chrome 바탕화면 바로가기 대상에 --remote-debugging-port=9222 추가
-        예) "C:\\...\\chrome.exe" --remote-debugging-port=9222
-    """
-    _patch_chrome_shortcut()  # 바로가기에 디버깅 포트 자동 추가
+    """chrome.exe를 직접 실행하고 원격 디버깅 포트로 Selenium에 연결한다."""
+    import subprocess
 
     try:
         from selenium import webdriver
@@ -111,25 +73,26 @@ def _create_driver():
     except Exception:
         service = Service()
 
+    chrome_bin = _find_chrome_binary()
+    if not chrome_bin:
+        raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
+
     debug_port = 9222
 
-    # 이미 디버깅 포트로 실행 중인 Chrome에 연결 시도
-    try:
-        opts = Options()
-        opts.debugger_address = f"localhost:{debug_port}"
-        driver = webdriver.Chrome(service=service, options=opts)
-        driver.set_window_size(1400, 950)
-        return driver
-    except Exception:
-        pass
+    # chrome.exe 직접 실행
+    subprocess.Popen([
+        chrome_bin,
+        f"--remote-debugging-port={debug_port}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ])
+    time.sleep(3)  # Chrome 기동 대기
 
-    # 연결 실패 → 바로가기를 이미 패치했으므로 재시작 안내
-    raise RuntimeError(
-        "Chrome에 연결할 수 없습니다.\n\n"
-        "바탕화면 Chrome 바로가기가 자동으로 업데이트되었습니다.\n"
-        "Chrome을 완전히 닫은 후 바탕화면 바로가기로 다시 열고\n"
-        "결재상신을 다시 시도해 주세요."
-    )
+    opts = Options()
+    opts.debugger_address = f"localhost:{debug_port}"
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_window_size(1400, 950)
+    return driver
 
 
 # ──────────────────────────────────────────────────────────────────────────────

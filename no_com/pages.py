@@ -1668,6 +1668,8 @@ class RackPurchaseRequestPage(QWidget):
         _lf.addRow("ID", self._ed_gw_id)
         _lf.addRow("PW", self._ed_gw_pw)
         _lf.addRow("", self._btn_gw_login)
+        self._ed_gw_id.returnPressed.connect(self._btn_gw_login.click)
+        self._ed_gw_pw.returnPressed.connect(self._btn_gw_login.click)
         login_box_v.addWidget(self._login_form_w)
 
         # 로그인 완료 상태 위젯 (숨김)

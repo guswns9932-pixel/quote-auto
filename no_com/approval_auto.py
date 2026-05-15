@@ -236,6 +236,14 @@ def _create_driver(offscreen: bool = False):
             )
             driver.execute_script("arguments[0].click();", install_btn)
             logger.info("설치하기 버튼 클릭.")
+            # 확장 프로그램 추가 확인 팝업 → Enter 키로 처리 (네이티브 다이얼로그)
+            time.sleep(1.5)
+            try:
+                import pyautogui
+                pyautogui.press("enter")
+                logger.info("확장 프로그램 추가 확인 팝업 Enter 처리.")
+            except Exception as e:
+                logger.warning("확인 팝업 Enter 실패: %s", e)
         except Exception as e:
             logger.warning("설치하기 버튼 클릭 실패: %s", e)
 

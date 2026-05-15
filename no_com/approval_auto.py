@@ -192,6 +192,7 @@ def _kill_chrome_using_profile(profile_dir: str) -> None:
 def _create_driver(offscreen: bool = False):
     """
     자동화 전용 Chrome 프로필로 WebDriver를 생성한다.
+    기존 세션이 살아있으면 재사용(크래시 방지), 없을 때만 새로 시작한다.
     ClouDoc 확장프로그램이 프로필에 없으면 웹스토어에서 자동 설치 후 재시작한다.
     """
     try:
@@ -218,20 +219,36 @@ def _create_driver(offscreen: bool = False):
         raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
 
     profile_dir = _automation_profile_dir()
-
-    # 이전 드라이버가 열려 있으면 종료 (프로필 잠금 해제)
     global _active_driver
+
+    # ── 기존 세션 재사용 ──────────────────────────────────────────────────────
+    # Chrome을 종료 후 재시작하면 프로필 상태 손상으로 크래시 발생.
+    # 살아있는 세션은 그대로 재사용하고 이전 팝업 창만 닫는다.
     if _active_driver is not None:
         try:
-            _active_driver.quit()
+            handles = _active_driver.window_handles  # 생존 확인 (죽었으면 예외)
+            main_handle = handles[0]
+            # 이전 실행에서 열린 팝업 창 닫기
+            for handle in handles[1:]:
+                try:
+                    _active_driver.switch_to.window(handle)
+                    _active_driver.close()
+                except Exception:
+                    pass
+            _active_driver.switch_to.window(main_handle)
+            logger.info("기존 Chrome 세션 재사용")
+            return _active_driver
         except Exception:
-            pass
-        _active_driver = None
-        time.sleep(1)
+            logger.info("기존 Chrome 세션 종료됨 → 새 세션 생성")
+            try:
+                _active_driver.quit()
+            except Exception:
+                pass
+            _active_driver = None
+            # Chrome이 스스로 닫힌 경우: 프로세스 잔존 확인 후 정리
+            _kill_chrome_using_profile(profile_dir)
+            time.sleep(3)
 
-    # quit() 후에도 Chrome 프로세스가 남아 프로필을 잠그고 있을 수 있으므로 강제 종료
-    _kill_chrome_using_profile(profile_dir)
-    time.sleep(2)  # 프로세스 종료 후 잠금 해제 대기
     os.makedirs(profile_dir, exist_ok=True)
 
     def _build_opts() -> Options:
@@ -242,7 +259,6 @@ def _create_driver(offscreen: bool = False):
         opts.add_argument("--no-first-run")
         opts.add_argument("--no-default-browser-check")
         opts.add_argument("--disable-notifications")
-        # 보안 정책(AppContainer/GetHandleVerifier)으로 인한 Chrome 즉시 종료 방지
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -300,15 +316,14 @@ def _create_driver(offscreen: bool = False):
             driver.quit()
             time.sleep(1)
 
-    # 정상 실행 (시작 플래그 없이 생성 → 이후 minimize_window()로 숨김)
+    # 정상 실행
     driver = webdriver.Chrome(service=service, options=_build_opts())
     if offscreen:
-        driver.minimize_window()   # 시작 플래그 대신 API로 최소화
+        driver.minimize_window()
     else:
         driver.set_window_size(1400, 950)
     _active_driver = driver
     return driver
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 로그인

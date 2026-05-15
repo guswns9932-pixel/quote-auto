@@ -54,9 +54,7 @@ def _find_chrome_binary() -> Optional[str]:
 # WebDriver 생성
 # ──────────────────────────────────────────────────────────────────────────────
 def _create_driver():
-    """chrome.exe를 직접 실행하고 원격 디버깅 포트로 Selenium에 연결한다."""
-    import subprocess
-
+    """Selenium이 chrome.exe를 직접 관리하는 표준 방식으로 WebDriver를 생성한다."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -77,19 +75,14 @@ def _create_driver():
     if not chrome_bin:
         raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
 
-    debug_port = 9222
-
-    # chrome.exe 직접 실행
-    subprocess.Popen([
-        chrome_bin,
-        f"--remote-debugging-port={debug_port}",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ])
-    time.sleep(3)  # Chrome 기동 대기
-
     opts = Options()
-    opts.debugger_address = f"localhost:{debug_port}"
+    opts.binary_location = chrome_bin
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-default-browser-check")
+    opts.add_argument("--disable-notifications")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_window_size(1400, 950)
     return driver

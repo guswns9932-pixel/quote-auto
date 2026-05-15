@@ -105,10 +105,44 @@ def _patch_chrome_shortcut() -> bool:
         return False
 
 
+def _find_cloudoc_extension() -> Optional[str]:
+    """
+    사용자 Chrome 프로필에서 ClouDoc Chrome Ext 경로를 찾아 반환한다.
+    """
+    import json
+
+    ext_base = os.path.join(
+        os.environ.get("LOCALAPPDATA", ""),
+        "Google", "Chrome", "User Data", "Default", "Extensions"
+    )
+    if not os.path.isdir(ext_base):
+        return None
+
+    for ext_id in os.listdir(ext_base):
+        ext_id_path = os.path.join(ext_base, ext_id)
+        if not os.path.isdir(ext_id_path):
+            continue
+        for version in os.listdir(ext_id_path):
+            manifest_path = os.path.join(ext_id_path, version, "manifest.json")
+            if not os.path.isfile(manifest_path):
+                continue
+            try:
+                with open(manifest_path, encoding="utf-8") as f:
+                    manifest = json.load(f)
+                name = manifest.get("name", "").lower()
+                if "cloudoc" in name or "clou" in name:
+                    ext_path = os.path.join(ext_id_path, version)
+                    logger.info("ClouDoc 확장프로그램 발견: %s", ext_path)
+                    return ext_path
+            except Exception:
+                continue
+    return None
+
+
 def _create_driver():
     """
-    사용자가 바로가기로 열어 둔 Chrome(보안 클라우드 포함)에 Selenium으로 연결한다.
-    Chrome이 디버깅 포트 없이 실행 중이면 바로가기를 패치하고 재시작을 안내한다.
+    ClouDoc 확장프로그램을 로드한 Chrome을 Selenium으로 실행한다.
+    확장프로그램을 찾지 못하면 오류를 발생시킨다.
     """
     try:
         from selenium import webdriver
@@ -126,26 +160,29 @@ def _create_driver():
     except Exception:
         service = Service()
 
-    # 실행 중인 Chrome(포트 9222)에 연결 시도
-    try:
-        opts = Options()
-        opts.debugger_address = "localhost:9222"
-        driver = webdriver.Chrome(service=service, options=opts)
-        driver.set_window_size(1400, 950)
-        return driver
-    except Exception:
-        pass
+    chrome_bin = _find_chrome_binary()
+    if not chrome_bin:
+        raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
 
-    # 연결 실패 → 바로가기에 디버깅 포트 추가 후 재시작 안내
-    _patch_chrome_shortcut()
-    raise RuntimeError(
-        "Chrome 연결 실패\n\n"
-        "바탕화면에 'Google Chrome (결재)' 바로가기가 생성되었습니다.\n\n"
-        "① Chrome을 완전히 종료해 주세요\n"
-        "② 바탕화면의 'Google Chrome (결재)' 바로가기로 Chrome을 여세요\n"
-        "③ 결재상신을 다시 시도해 주세요\n\n"
-        "(이후에는 해당 바로가기로 Chrome을 열면 자동 연결됩니다)"
-    )
+    cloudoc_path = _find_cloudoc_extension()
+    if not cloudoc_path:
+        raise RuntimeError(
+            "ClouDoc Chrome Ext 확장프로그램을 찾을 수 없습니다.\n"
+            "Chrome에 ClouDoc 확장프로그램이 설치되어 있는지 확인해 주세요."
+        )
+
+    opts = Options()
+    opts.binary_location = chrome_bin
+    opts.add_argument(f"--load-extension={cloudoc_path}")
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-default-browser-check")
+    opts.add_argument("--disable-notifications")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_window_size(1400, 950)
+    return driver
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -569,7 +569,9 @@ def _create_login_driver():
     opts.add_argument("--no-default-browser-check")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-extensions")  # ClouDoc 불필요
-    opts.add_argument("--start-minimized")
+    opts.add_argument("--headless=new")         # 완전 숨김 (창 없음)
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1280,800")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
 

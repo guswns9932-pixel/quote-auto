@@ -1557,6 +1557,8 @@ class RackPurchaseRequestPage(QWidget):
         self.request_rows: List[Dict[str, Any]] = []
         self._last_generated_folder: Optional[str] = None
         self._matched_rack_row: Optional[List[Any]] = None
+        self._gw_username: str = ""
+        self._gw_password: str = ""
         self._build_ui()
         self._populate_table()
 
@@ -1643,6 +1645,47 @@ class RackPurchaseRequestPage(QWidget):
         right_v.setContentsMargins(6, 0, 0, 0)
         right_v.setSpacing(4)
 
+        # ── 그룹웨어 로그인 패널 ──────────────────────────────────────────────
+        from PySide6.QtWidgets import QGroupBox, QFormLayout
+        login_box = QGroupBox("그룹웨어 로그인")
+        login_box.setStyleSheet("QGroupBox { font-weight: bold; }")
+        login_box_v = QVBoxLayout(login_box)
+        login_box_v.setSpacing(4)
+
+        # 미로그인 상태 위젯
+        self._login_form_w = QWidget()
+        _lf = QFormLayout(self._login_form_w)
+        _lf.setContentsMargins(0, 0, 0, 0)
+        _lf.setSpacing(4)
+        self._ed_gw_id = QLineEdit()
+        self._ed_gw_id.setPlaceholderText("아이디")
+        self._ed_gw_pw = QLineEdit()
+        self._ed_gw_pw.setPlaceholderText("비밀번호")
+        self._ed_gw_pw.setEchoMode(QLineEdit.Password)
+        self._btn_gw_login = QPushButton("로그인")
+        self._btn_gw_login.setFixedHeight(30)
+        tint_button(self._btn_gw_login, "#C8E6C9")
+        _lf.addRow("ID", self._ed_gw_id)
+        _lf.addRow("PW", self._ed_gw_pw)
+        _lf.addRow("", self._btn_gw_login)
+        login_box_v.addWidget(self._login_form_w)
+
+        # 로그인 완료 상태 위젯 (숨김)
+        self._login_status_w = QWidget()
+        _ls = QHBoxLayout(self._login_status_w)
+        _ls.setContentsMargins(0, 0, 0, 0)
+        self._lbl_gw_user = QLabel("로그인됨: -")
+        self._lbl_gw_user.setStyleSheet("color:#2e7d32; font-weight:bold;")
+        self._btn_gw_logout = QPushButton("로그아웃")
+        self._btn_gw_logout.setFixedHeight(26)
+        tint_button(self._btn_gw_logout, "#FFCDD2")
+        _ls.addWidget(self._lbl_gw_user, 1)
+        _ls.addWidget(self._btn_gw_logout)
+        login_box_v.addWidget(self._login_status_w)
+        self._login_status_w.hide()
+
+        right_v.addWidget(login_box)
+
         req_title_row = QHBoxLayout()
         req_title_lbl = bold_label("생성된 요청서", size=11)
         self.btn_refresh_req_list = QPushButton("새로고침")
@@ -1668,6 +1711,8 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
         self.btn_approval_submit.clicked.connect(self._do_approval_submit)
         self.btn_upload_history.clicked.connect(self._upload_order_history)
+        self._btn_gw_login.clicked.connect(self._do_gw_login)
+        self._btn_gw_logout.clicked.connect(self._do_gw_logout)
 
         # UI 렌더링 완료 후 파일 스캔 (블로킹 방지)
         QTimer.singleShot(0, self._refresh_req_list)
@@ -3199,6 +3244,49 @@ class RackPurchaseRequestPage(QWidget):
             QMessageBox.critical(self, "생성 오류", f"결재상신용 생성 중 오류:\n{e}")
             logger.error("결재상신용 생성 오류", exc_info=True)
 
+    # ── 그룹웨어 로그인 관리 ──────────────────────────────────────────────────
+    def _do_gw_login(self) -> None:
+        uid = self._ed_gw_id.text().strip()
+        pwd = self._ed_gw_pw.text().strip()
+        if not uid or not pwd:
+            QMessageBox.warning(self, "입력 오류", "아이디와 비밀번호를 입력해 주세요.")
+            return
+
+        import approval_auto as _aa
+
+        self._btn_gw_login.setEnabled(False)
+        self._btn_gw_login.setText("확인 중…")
+
+        def _check(_):
+            return _aa.check_login(uid, pwd)
+
+        def _on_done(result):
+            success, msg = result
+            self._btn_gw_login.setEnabled(True)
+            self._btn_gw_login.setText("로그인")
+            if success:
+                self._gw_username = uid
+                self._gw_password = pwd
+                self._lbl_gw_user.setText(f"로그인됨: {uid}")
+                self._login_form_w.hide()
+                self._login_status_w.show()
+            else:
+                QMessageBox.warning(self, "로그인 실패", f"로그인 실패\n\n{msg}")
+
+        _BgWorker.run_with_progress(
+            self, "로그인 확인 중…",
+            _check, None,
+            on_result=_on_done,
+        )
+
+    def _do_gw_logout(self) -> None:
+        self._gw_username = ""
+        self._gw_password = ""
+        self._ed_gw_id.clear()
+        self._ed_gw_pw.clear()
+        self._login_status_w.hide()
+        self._login_form_w.show()
+
     # ── 결재상신 자동화 ────────────────────────────────────────────────────────
     def _do_approval_submit(self) -> None:
         """결재상신용 xlsx를 선택 → 전자결재 시스템에 자동으로 구매요청서(NPN) 결재상신."""
@@ -3223,11 +3311,10 @@ class RackPurchaseRequestPage(QWidget):
 
         import approval_auto as _aa
 
-        # 로그인 정보 입력 다이얼로그
-        login_dlg = _GroupwareLoginDialog(self)
-        if login_dlg.exec() != QDialog.Accepted:
+        if not self._gw_username or not self._gw_password:
+            QMessageBox.warning(self, "로그인 필요", "먼저 우측 패널에서 그룹웨어 로그인을 해주세요.")
             return
-        username, password = login_dlg.credentials()
+        username, password = self._gw_username, self._gw_password
 
         # 각 파일에 대해 순서대로 결재상신 (파일이 여러 개면 확인)
         if len(paths) > 1:

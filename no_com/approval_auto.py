@@ -139,7 +139,7 @@ def _find_cloudoc_extension() -> Optional[str]:
     return None
 
 
-def _create_driver():
+def _create_driver(offscreen: bool = False):
     """
     ClouDoc 확장프로그램을 로드한 Chrome을 Selenium으로 실행한다.
     확장프로그램을 찾지 못하면 오류를 발생시킨다.
@@ -181,7 +181,10 @@ def _create_driver():
     opts.add_experimental_option("useAutomationExtension", False)
 
     driver = webdriver.Chrome(service=service, options=opts)
-    driver.set_window_size(1400, 950)
+    if offscreen:
+        driver.set_window_position(-10000, -10000)
+    else:
+        driver.set_window_size(1400, 950)
     return driver
 
 
@@ -294,7 +297,7 @@ def run_approval(
         except Exception as e:
             logger.warning("필드 입력 실패 (id=%s): %s", field_id, e)
 
-    driver = _create_driver()
+    driver = _create_driver(offscreen=True)
     wait   = WebDriverWait(driver, 30)
 
     try:
@@ -369,6 +372,8 @@ def run_approval(
             h for h in driver.window_handles if h != main_window
         )
         driver.switch_to.window(popup_handle)
+        driver.set_window_position(100, 50)
+        driver.set_window_size(1400, 900)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
 
@@ -433,6 +438,53 @@ def run_approval(
             f"결재상신 자동화 중 오류:\n{e}\n\n{traceback.format_exc()}"
         ) from e
     # finally 에서 driver.quit() 제거 → 브라우저를 열어둬서 사용자가 직접 결재요청
+
+
+def check_login(
+    username: str,
+    password: str,
+) -> tuple:
+    """
+    로그인 검증. 반환: (success: bool, message: str)
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    driver = _create_driver(offscreen=True)
+    try:
+        driver.get(APPROVAL_URL)
+        wait = WebDriverWait(driver, 15)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(1)
+
+        if _is_login_page(driver):
+            _do_login(driver, wait, username, password)
+            time.sleep(2)
+
+            # 로그인 오류 메시지 확인
+            try:
+                err_el = driver.find_element(
+                    By.XPATH,
+                    '//*[@id="loginForm"]/section/div[3]/span[2]'
+                )
+                err_text = err_el.text.strip()
+                if err_text:
+                    return False, err_text
+            except Exception:
+                pass
+
+            if _is_login_page(driver):
+                return False, "로그인 실패"
+
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 # ──────────────────────────────────────────────────────────────────────────────

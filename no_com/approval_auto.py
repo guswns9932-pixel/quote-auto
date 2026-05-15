@@ -93,8 +93,6 @@ def _create_driver():
         Chrome 바탕화면 바로가기 대상에 --remote-debugging-port=9222 추가
         예) "C:\\...\\chrome.exe" --remote-debugging-port=9222
     """
-    import subprocess
-
     _patch_chrome_shortcut()  # 바로가기에 디버깅 포트 자동 추가
 
     try:
@@ -115,41 +113,23 @@ def _create_driver():
 
     debug_port = 9222
 
-    def _connect(port: int):
-        opts = Options()
-        opts.debugger_address = f"localhost:{port}"
-        return webdriver.Chrome(service=service, options=opts)
-
-    # ① 이미 디버깅 포트로 실행 중인 Chrome에 연결 시도
+    # 이미 디버깅 포트로 실행 중인 Chrome에 연결 시도
     try:
-        driver = _connect(debug_port)
+        opts = Options()
+        opts.debugger_address = f"localhost:{debug_port}"
+        driver = webdriver.Chrome(service=service, options=opts)
         driver.set_window_size(1400, 950)
         return driver
     except Exception:
         pass
 
-    # ② 연결 실패 → subprocess로 Chrome 직접 실행
-    chrome_bin = _find_chrome_binary()
-    if not chrome_bin:
-        raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
-
-    default_profile = os.path.join(
-        os.environ.get("LOCALAPPDATA", ""),
-        "Google", "Chrome", "User Data"
+    # 연결 실패 → 바로가기를 이미 패치했으므로 재시작 안내
+    raise RuntimeError(
+        "Chrome에 연결할 수 없습니다.\n\n"
+        "바탕화면 Chrome 바로가기가 자동으로 업데이트되었습니다.\n"
+        "Chrome을 완전히 닫은 후 바탕화면 바로가기로 다시 열고\n"
+        "결재상신을 다시 시도해 주세요."
     )
-    subprocess.Popen([
-        chrome_bin,
-        f"--remote-debugging-port={debug_port}",
-        f"--user-data-dir={default_profile}",
-        "--profile-directory=Default",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ])
-    time.sleep(3)  # Chrome 기동 대기
-
-    driver = _connect(debug_port)
-    driver.set_window_size(1400, 950)
-    return driver
 
 
 # ──────────────────────────────────────────────────────────────────────────────

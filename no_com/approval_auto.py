@@ -168,26 +168,23 @@ def _is_cloudoc_installed_in_profile(profile_dir: str) -> bool:
 
 
 def _kill_chrome_using_profile(profile_dir: str) -> None:
-    """해당 프로필 경로를 사용 중인 Chrome 프로세스만 골라 강제 종료한다."""
+    """해당 프로필 경로를 사용 중인 Chrome 프로세스만 골라 강제 종료한다.
+    wmic가 없는 Windows 11 환경에서는 PowerShell Get-CimInstance로 대체한다."""
     import subprocess
-    profile_marker = profile_dir.lower()
+    profile_marker = profile_dir.replace("\\", "\\\\")
+
+    # PowerShell Get-CimInstance (Windows 11 포함 모든 버전에서 동작)
+    ps_script = (
+        f"Get-CimInstance Win32_Process -Filter \\\"name='chrome.exe'\\\" "
+        f"| Where-Object {{ $_.CommandLine -like '*{profile_marker}*' }} "
+        f"| ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+    )
     try:
-        result = subprocess.run(
-            ["wmic", "process", "where", "name='chrome.exe'",
-             "get", "ProcessId,CommandLine", "/format:csv"],
-            capture_output=True, text=True, timeout=10,
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True, timeout=15,
         )
-        for line in result.stdout.splitlines():
-            if profile_marker not in line.lower():
-                continue
-            parts = line.split(",")
-            pid_str = parts[-1].strip() if parts else ""
-            if pid_str.isdigit():
-                subprocess.run(
-                    ["taskkill", "/PID", pid_str, "/F"],
-                    capture_output=True, timeout=5,
-                )
-                logger.info("Chrome 프로세스 강제 종료: PID %s", pid_str)
+        logger.info("PowerShell로 Chrome 프로세스 정리 완료")
     except Exception as e:
         logger.warning("Chrome 프로세스 정리 실패: %s", e)
 
@@ -245,10 +242,11 @@ def _create_driver(offscreen: bool = False):
         opts.add_argument("--no-first-run")
         opts.add_argument("--no-default-browser-check")
         opts.add_argument("--disable-notifications")
+        # 보안 정책(AppContainer/GetHandleVerifier)으로 인한 Chrome 즉시 종료 방지
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
-        # --start-minimized / --window-position 플래그는 사용하지 않음
-        # (일부 보안 환경에서 Chrome 크래시 유발) → 생성 후 minimize_window()로 처리
         return opts
 
     # ClouDoc 설치 여부 확인 → 없으면 웹스토어에서 설치

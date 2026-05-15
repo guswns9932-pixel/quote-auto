@@ -240,8 +240,10 @@ def _create_driver(offscreen: bool = False):
             time.sleep(1.5)
             try:
                 import pyautogui
-                pyautogui.press("enter")
-                logger.info("확장 프로그램 추가 확인 팝업 Enter 처리.")
+                pyautogui.press("tab")    # 취소 → 확장 프로그램 추가 버튼으로 이동
+                time.sleep(0.3)
+                pyautogui.press("enter")  # 확장 프로그램 추가 확인
+                logger.info("확장 프로그램 추가 확인 팝업 Tab+Enter 처리.")
             except Exception as e:
                 logger.warning("확인 팝업 Enter 실패: %s", e)
         except Exception as e:

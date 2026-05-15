@@ -54,7 +54,16 @@ def _find_chrome_binary() -> Optional[str]:
 # WebDriver 생성
 # ──────────────────────────────────────────────────────────────────────────────
 def _create_driver():
-    """사용자 기본 Chrome 프로필로 WebDriver를 생성한다."""
+    """
+    원격 디버깅 포트로 실행 중인 Chrome에 연결하거나,
+    없으면 subprocess로 Chrome을 직접 실행 후 연결한다.
+
+    사전 준비 (최초 1회):
+        Chrome 바탕화면 바로가기 대상에 --remote-debugging-port=9222 추가
+        예) "C:\\...\\chrome.exe" --remote-debugging-port=9222
+    """
+    import subprocess
+
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -71,27 +80,41 @@ def _create_driver():
     except Exception:
         service = Service()
 
-    # 사용자 기본 Chrome 프로필 경로 (보안 클라우드 확장프로그램 포함)
+    debug_port = 9222
+
+    def _connect(port: int):
+        opts = Options()
+        opts.debugger_address = f"localhost:{port}"
+        return webdriver.Chrome(service=service, options=opts)
+
+    # ① 이미 디버깅 포트로 실행 중인 Chrome에 연결 시도
+    try:
+        driver = _connect(debug_port)
+        driver.set_window_size(1400, 950)
+        return driver
+    except Exception:
+        pass
+
+    # ② 연결 실패 → subprocess로 Chrome 직접 실행
+    chrome_bin = _find_chrome_binary()
+    if not chrome_bin:
+        raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
+
     default_profile = os.path.join(
         os.environ.get("LOCALAPPDATA", ""),
         "Google", "Chrome", "User Data"
     )
+    subprocess.Popen([
+        chrome_bin,
+        f"--remote-debugging-port={debug_port}",
+        f"--user-data-dir={default_profile}",
+        "--profile-directory=Default",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ])
+    time.sleep(3)  # Chrome 기동 대기
 
-    options = Options()
-    options.add_argument(f"--user-data-dir={default_profile}")
-    options.add_argument("--profile-directory=Default")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--disable-notifications")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-
-    chrome_bin = _find_chrome_binary()
-    if chrome_bin:
-        options.binary_location = chrome_bin
-
-    from selenium import webdriver
-    driver = webdriver.Chrome(service=service, options=options)
+    driver = _connect(debug_port)
     driver.set_window_size(1400, 950)
     return driver
 

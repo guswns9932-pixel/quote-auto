@@ -54,7 +54,7 @@ def _find_chrome_binary() -> Optional[str]:
 # WebDriver 생성
 # ──────────────────────────────────────────────────────────────────────────────
 def _create_driver():
-    """앱 전용 프로필로 Chrome WebDriver를 생성한다 (기존 Chrome과 독립)."""
+    """사용자 기본 Chrome 프로필로 WebDriver를 생성한다."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -71,18 +71,18 @@ def _create_driver():
     except Exception:
         service = Service()
 
-    profile = _profile_dir()
-    os.makedirs(profile, exist_ok=True)
+    # 사용자 기본 Chrome 프로필 경로 (보안 클라우드 확장프로그램 포함)
+    default_profile = os.path.join(
+        os.environ.get("LOCALAPPDATA", ""),
+        "Google", "Chrome", "User Data"
+    )
 
     options = Options()
-    options.add_argument(f"--user-data-dir={profile}")
+    options.add_argument(f"--user-data-dir={default_profile}")
+    options.add_argument("--profile-directory=Default")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-notifications")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--remote-allow-origins=*")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 

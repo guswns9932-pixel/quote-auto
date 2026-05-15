@@ -313,20 +313,19 @@ def run_approval(
             )
             driver.execute_script("arguments[0].scrollIntoView(true);", file_btn)
             driver.execute_script("arguments[0].click();", file_btn)
-            time.sleep(2)  # 다이얼로그 로딩 대기
+            time.sleep(2.5)  # 다이얼로그 로딩 대기
 
-            # 경로를 클립보드에 복사 후 붙여넣기 (한글/특수문자 안전)
+            # 경로를 클립보드에 복사 → 파일이름 입력란에 붙여넣기
             pyperclip.copy(xlsx_path)
-            pyautogui.hotkey("ctrl", "a")   # 파일이름 입력란 전체 선택
             pyautogui.hotkey("ctrl", "v")   # 경로 붙여넣기
-            time.sleep(0.5)
+            time.sleep(0.8)
             pyautogui.press("enter")        # 열기 버튼
             time.sleep(2)
             _log("   파일 첨부 완료.")
         except Exception as e:
             logger.warning("파일 첨부 중 오류: %s", e)
 
-        # ── STEP 9: 작성 완료 안내 ──────────────────────────────────────────
+        # ── STEP 9: 작성 완료 안내 (브라우저 유지) ──────────────────────────
         _log("⑨ 구매요청서 작성 완료.")
         import tkinter as tk
         from tkinter import messagebox
@@ -342,15 +341,15 @@ def run_approval(
 
     except Exception as e:
         import traceback
-        raise RuntimeError(
-            f"결재상신 자동화 중 오류:\n{e}\n\n{traceback.format_exc()}"
-        ) from e
-    finally:
-        time.sleep(2)
+        # 오류 발생 시에만 브라우저 종료
         try:
             driver.quit()
         except Exception:
             pass
+        raise RuntimeError(
+            f"결재상신 자동화 중 오류:\n{e}\n\n{traceback.format_exc()}"
+        ) from e
+    # finally 에서 driver.quit() 제거 → 브라우저를 열어둬서 사용자가 직접 결재요청
 
 
 # ──────────────────────────────────────────────────────────────────────────────

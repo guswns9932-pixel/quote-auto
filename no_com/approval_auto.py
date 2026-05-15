@@ -113,58 +113,38 @@ def _automation_profile_dir() -> str:
     return os.path.join(appdata, "quote-auto", "chrome_profile")
 
 
-def _find_cloudoc_extension_id() -> Optional[str]:
-    """사용자 기본 Chrome 프로필에서 ClouDoc 확장프로그램 ID를 찾아 반환한다."""
+def _find_cloudoc_extension_path() -> Optional[str]:
+    """사용자 기본 Chrome 프로필에서 ClouDoc 확장프로그램 디렉터리 경로를 반환한다."""
     import json
-
     ext_base = os.path.join(
         os.environ.get("LOCALAPPDATA", ""),
         "Google", "Chrome", "User Data", "Default", "Extensions"
     )
     if not os.path.isdir(ext_base):
         return None
-
     for ext_id in os.listdir(ext_base):
         ext_id_path = os.path.join(ext_base, ext_id)
         if not os.path.isdir(ext_id_path):
             continue
-        for version in os.listdir(ext_id_path):
+        try:
+            versions = [v for v in os.listdir(ext_id_path)
+                        if os.path.isdir(os.path.join(ext_id_path, v))]
+        except Exception:
+            continue
+        for version in versions:
             manifest_path = os.path.join(ext_id_path, version, "manifest.json")
             if not os.path.isfile(manifest_path):
                 continue
             try:
                 with open(manifest_path, encoding="utf-8") as f:
                     manifest = json.load(f)
-                name = manifest.get("name", "").lower()
-                if "cloudoc" in name:
-                    logger.info("ClouDoc 확장프로그램 ID 발견: %s", ext_id)
-                    return ext_id
+                if "cloudoc" in manifest.get("name", "").lower():
+                    path = os.path.join(ext_id_path, version)
+                    logger.info("ClouDoc 확장프로그램 경로 발견: %s", path)
+                    return path
             except Exception:
                 continue
     return None
-
-
-def _is_cloudoc_installed_in_profile(profile_dir: str) -> bool:
-    """자동화 프로필에 ClouDoc이 설치되어 있는지 확인한다."""
-    import json
-
-    ext_base = os.path.join(profile_dir, "Default", "Extensions")
-    if not os.path.isdir(ext_base):
-        return False
-
-    for ext_id in os.listdir(ext_base):
-        for version in os.listdir(os.path.join(ext_base, ext_id)):
-            manifest_path = os.path.join(ext_base, ext_id, version, "manifest.json")
-            if not os.path.isfile(manifest_path):
-                continue
-            try:
-                with open(manifest_path, encoding="utf-8") as f:
-                    manifest = json.load(f)
-                if "cloudoc" in manifest.get("name", "").lower():
-                    return True
-            except Exception:
-                continue
-    return False
 
 
 def _kill_chrome_using_profile(profile_dir: str) -> None:
@@ -251,6 +231,10 @@ def _create_driver(offscreen: bool = False):
 
     os.makedirs(profile_dir, exist_ok=True)
 
+    cloudoc_path = _find_cloudoc_extension_path()
+    if not cloudoc_path:
+        logger.warning("ClouDoc 확장프로그램을 찾을 수 없음 → 파일 첨부가 제한될 수 있습니다.")
+
     def _build_opts() -> Options:
         opts = Options()
         opts.binary_location = chrome_bin
@@ -261,62 +245,14 @@ def _create_driver(offscreen: bool = False):
         opts.add_argument("--disable-notifications")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
+        # Web Store 설치 대신 사용자 기본 프로필의 ClouDoc을 직접 로드
+        if cloudoc_path:
+            opts.add_argument(f"--load-extension={cloudoc_path}")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         return opts
 
-    # ClouDoc 설치 여부 확인 → 없으면 웹스토어에서 설치
-    if not _is_cloudoc_installed_in_profile(profile_dir):
-        logger.info("ClouDoc 미설치 → 웹스토어 설치 시작")
-        ext_id = _find_cloudoc_extension_id()
-
-        driver = webdriver.Chrome(service=service, options=_build_opts())
-        driver.set_window_size(1000, 700)
-
-        if ext_id:
-            store_url = f"https://chromewebstore.google.com/detail/{ext_id}"
-        else:
-            store_url = "https://chromewebstore.google.com/search/ClouDoc"
-
-        driver.get(store_url)
-
-        # 설치하기 버튼 클릭
-        INSTALL_BTN_XPATH = (
-            '//*[@id="yDmH0d"]/c-wiz/div/div/main/div'
-            '/section[1]/section/div/div[4]/div/div/button/span[4]'
-        )
-        try:
-            install_btn = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.XPATH, INSTALL_BTN_XPATH))
-            )
-            driver.execute_script("arguments[0].click();", install_btn)
-            logger.info("설치하기 버튼 클릭.")
-            # 확장 프로그램 추가 확인 팝업 → Enter 키로 처리 (네이티브 다이얼로그)
-            time.sleep(1.5)
-            try:
-                import pyautogui
-                pyautogui.press("tab")    # 취소 → 확장 프로그램 추가 버튼으로 이동
-                time.sleep(0.3)
-                pyautogui.press("enter")  # 확장 프로그램 추가 확인
-                logger.info("확장 프로그램 추가 확인 팝업 Tab+Enter 처리.")
-            except Exception as e:
-                logger.warning("확인 팝업 Enter 실패: %s", e)
-        except Exception as e:
-            logger.warning("설치하기 버튼 클릭 실패: %s", e)
-
-        # 설치 완료 대기 (최대 3분)
-        try:
-            WebDriverWait(driver, 180).until(
-                lambda d: _is_cloudoc_installed_in_profile(profile_dir)
-            )
-            logger.info("ClouDoc 설치 완료.")
-        except Exception:
-            logger.warning("ClouDoc 설치 대기 시간 초과.")
-        finally:
-            driver.quit()
-            time.sleep(1)
-
-    # 정상 실행
+    # 정상 실행 (ClouDoc은 --load-extension으로 로드)
     driver = webdriver.Chrome(service=service, options=_build_opts())
     if offscreen:
         driver.minimize_window()

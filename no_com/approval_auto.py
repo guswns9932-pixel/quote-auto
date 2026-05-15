@@ -304,15 +304,23 @@ def run_approval(
         # ── STEP 8: 파일 첨부 ────────────────────────────────────────────────
         _log("⑧ 파일 첨부 중…")
         try:
-            drop_zone = driver.find_element(By.ID, "dropZone")
-            file_input = drop_zone.find_element(By.XPATH, ".//input[@type='file']")
-            driver.execute_script(
-                "arguments[0].style.display='block';"
-                "arguments[0].style.visibility='visible';"
-                "arguments[0].style.opacity='1';",
-                file_input,
+            import pyperclip
+            import pyautogui
+
+            # 파일 선택 버튼 클릭 → Windows 파일 열기 다이얼로그 오픈
+            file_btn = driver.find_element(
+                By.XPATH, '//*[@id="dropZone"]/div[1]/span[2]/span[1]'
             )
-            file_input.send_keys(xlsx_path)
+            driver.execute_script("arguments[0].scrollIntoView(true);", file_btn)
+            driver.execute_script("arguments[0].click();", file_btn)
+            time.sleep(2)  # 다이얼로그 로딩 대기
+
+            # 경로를 클립보드에 복사 후 붙여넣기 (한글/특수문자 안전)
+            pyperclip.copy(xlsx_path)
+            pyautogui.hotkey("ctrl", "a")   # 파일이름 입력란 전체 선택
+            pyautogui.hotkey("ctrl", "v")   # 경로 붙여넣기
+            time.sleep(0.5)
+            pyautogui.press("enter")        # 열기 버튼
             time.sleep(2)
             _log("   파일 첨부 완료.")
         except Exception as e:

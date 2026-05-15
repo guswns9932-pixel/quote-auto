@@ -225,10 +225,25 @@ def _create_driver(offscreen: bool = False):
 
         driver.get(store_url)
 
-        # 설치 완료 대기 (최대 3분)
-        wait = WebDriverWait(driver, 180)
+        # 설치하기 버튼 클릭
+        INSTALL_BTN_XPATH = (
+            '//*[@id="yDmH0d"]/c-wiz/div/div/main/div'
+            '/section[1]/section/div/div[4]/div/div/button/span[4]'
+        )
         try:
-            wait.until(lambda d: _is_cloudoc_installed_in_profile(profile_dir))
+            install_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH, INSTALL_BTN_XPATH))
+            )
+            driver.execute_script("arguments[0].click();", install_btn)
+            logger.info("설치하기 버튼 클릭.")
+        except Exception as e:
+            logger.warning("설치하기 버튼 클릭 실패: %s", e)
+
+        # 설치 완료 대기 (최대 3분)
+        try:
+            WebDriverWait(driver, 180).until(
+                lambda d: _is_cloudoc_installed_in_profile(profile_dir)
+            )
             logger.info("ClouDoc 설치 완료.")
         except Exception:
             logger.warning("ClouDoc 설치 대기 시간 초과.")

@@ -688,12 +688,29 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
     def _process(app) -> List[str]:
         wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
         try:
-            for idx, name in enumerate(SheetName.ESIGN_TARGET):
+            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처
+            target_names = []
+            for name in SheetName.ESIGN_TARGET:
+                try:
+                    ws = wb.Worksheets(name)
+                    if int(ws.Visible) == -1:
+                        target_names.append(name)
+                except Exception:
+                    continue
+            if not target_names:
+                for ws in wb.Worksheets:
+                    try:
+                        if int(ws.Visible) == -1:
+                            target_names.append(ws.Name)
+                    except Exception:
+                        continue
+
+            for idx, name in enumerate(target_names):
                 try:
                     ws = wb.Worksheets(name)
                 except Exception:
                     continue
-                if int(ws.Visible) != -1:   # 보이는 시트만 캡처
+                if int(ws.Visible) != -1:
                     continue
                 safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
                 png_path = os.path.join(

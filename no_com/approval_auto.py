@@ -25,6 +25,8 @@ logger = logging.getLogger("QuoteApp.approval")
 APPROVAL_URL = "https://groupware.lotvacuum.com/app/approval"
 FORM_NAME    = "구매요청서(NPN)"
 
+_active_driver = None  # 열려 있는 드라이버 추적 (두 번째 실행 전 정리용)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 내부 유틸
@@ -193,6 +195,15 @@ def _create_driver(offscreen: bool = False):
     if not chrome_bin:
         raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
 
+    # 이전 드라이버가 열려 있으면 종료 (프로필 잠금 해제)
+    global _active_driver
+    if _active_driver is not None:
+        try:
+            _active_driver.quit()
+        except Exception:
+            pass
+        _active_driver = None
+
     profile_dir = _automation_profile_dir()
     os.makedirs(profile_dir, exist_ok=True)
 
@@ -265,6 +276,7 @@ def _create_driver(offscreen: bool = False):
     driver = webdriver.Chrome(service=service, options=_build_opts(visible=not offscreen))
     if not offscreen:
         driver.set_window_size(1400, 950)
+    _active_driver = driver
     return driver
 
 

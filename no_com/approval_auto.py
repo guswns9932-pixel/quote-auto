@@ -237,7 +237,7 @@ def _create_driver(offscreen: bool = False):
     time.sleep(2)  # 프로세스 종료 후 잠금 해제 대기
     os.makedirs(profile_dir, exist_ok=True)
 
-    def _build_opts(visible: bool = True) -> Options:
+    def _build_opts() -> Options:
         opts = Options()
         opts.binary_location = chrome_bin
         opts.add_argument(f"--user-data-dir={profile_dir}")
@@ -247,8 +247,8 @@ def _create_driver(offscreen: bool = False):
         opts.add_argument("--disable-notifications")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
-        if not visible:
-            opts.add_argument("--start-minimized")
+        # --start-minimized / --window-position 플래그는 사용하지 않음
+        # (일부 보안 환경에서 Chrome 크래시 유발) → 생성 후 minimize_window()로 처리
         return opts
 
     # ClouDoc 설치 여부 확인 → 없으면 웹스토어에서 설치
@@ -256,7 +256,7 @@ def _create_driver(offscreen: bool = False):
         logger.info("ClouDoc 미설치 → 웹스토어 설치 시작")
         ext_id = _find_cloudoc_extension_id()
 
-        driver = webdriver.Chrome(service=service, options=_build_opts(visible=True))
+        driver = webdriver.Chrome(service=service, options=_build_opts())
         driver.set_window_size(1000, 700)
 
         if ext_id:
@@ -302,9 +302,11 @@ def _create_driver(offscreen: bool = False):
             driver.quit()
             time.sleep(1)
 
-    # 정상 실행
-    driver = webdriver.Chrome(service=service, options=_build_opts(visible=not offscreen))
-    if not offscreen:
+    # 정상 실행 (시작 플래그 없이 생성 → 이후 minimize_window()로 숨김)
+    driver = webdriver.Chrome(service=service, options=_build_opts())
+    if offscreen:
+        driver.minimize_window()   # 시작 플래그 대신 API로 최소화
+    else:
         driver.set_window_size(1400, 950)
     _active_driver = driver
     return driver

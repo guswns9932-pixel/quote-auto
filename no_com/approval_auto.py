@@ -129,20 +129,13 @@ def _do_login(
     _log("로그인 정보 입력 중…")
 
     # 계정 입력
-    account_field = wait.until(EC.presence_of_element_located(
-        (By.XPATH,
-         "//input[@placeholder='계정' or @name='userId' or @name='username'"
-         " or @id='userId' or @id='username'"
-         " or (@type='text' and not(contains(@style,'display:none')))]")
-    ))
+    account_field = wait.until(EC.presence_of_element_located((By.ID, "username")))
     account_field.click()
     account_field.clear()
     account_field.send_keys(username)
 
     # 비밀번호 입력
-    pw_field = driver.find_element(
-        By.XPATH, "//input[@type='password' or @placeholder='비밀번호']"
-    )
+    pw_field = driver.find_element(By.ID, "password")
     pw_field.click()
     pw_field.clear()
     pw_field.send_keys(password)

@@ -2680,8 +2680,19 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_patch_wb_visibility(wb_bytes: bytes, visible_sheet: str) -> bytes:
-        """workbook.xml에서 visible_sheet 외 모든 시트 veryHidden 처리."""
+        """workbook.xml에서 visible_sheet 외 모든 시트 veryHidden 처리.
+        activeTab도 visible_sheet의 인덱스로 갱신하여 Synap 호환성 확보.
+        """
         xml = wb_bytes.decode('utf-8', errors='replace')
+
+        # visible_sheet의 0-based 인덱스 계산
+        sheet_tags = re.findall(r'<sheet\b[^>]*/>', xml)
+        active_idx = 0
+        for i, tag in enumerate(sheet_tags):
+            nm_m = re.search(r'\bname="([^"]*)"', tag)
+            if nm_m and nm_m.group(1) == visible_sheet:
+                active_idx = i
+                break
 
         def repl(m: re.Match) -> str:
             tag = m.group(0)
@@ -2693,6 +2704,16 @@ class RackPurchaseRequestPage(QWidget):
             return tag
 
         xml = re.sub(r'<sheet\b[^>]*/>', repl, xml)
+
+        # activeTab을 visible_sheet 인덱스로 설정 (Synap이 hidden 시트 렌더 시도 방지)
+        if re.search(r'<workbookView\b', xml):
+            def _set_tab(m: re.Match) -> str:
+                tag = m.group(0)
+                tag = re.sub(r'\bactiveTab="\d+"', f'activeTab="{active_idx}"', tag)
+                if 'activeTab=' not in tag:
+                    tag = re.sub(r'(\s*/?>)$', f' activeTab="{active_idx}"\\1', tag)
+                return tag
+            xml = re.sub(r'<workbookView\b[^>]*/>', _set_tab, xml)
 
         if 'fullCalcOnLoad' not in xml:
             if '<calcPr' in xml:

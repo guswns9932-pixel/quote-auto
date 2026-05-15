@@ -203,6 +203,7 @@ def _create_driver(offscreen: bool = False):
         except Exception:
             pass
         _active_driver = None
+        time.sleep(2)  # Chrome이 프로필 잠금을 완전히 해제할 때까지 대기
 
     profile_dir = _automation_profile_dir()
     os.makedirs(profile_dir, exist_ok=True)
@@ -573,10 +574,13 @@ def check_login(
     except Exception as e:
         return False, str(e)
     finally:
+        global _active_driver
         try:
             driver.quit()
         except Exception:
             pass
+        _active_driver = None  # 잠금 해제 후 참조 제거
+        time.sleep(1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

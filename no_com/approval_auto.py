@@ -219,7 +219,7 @@ def _create_driver(offscreen: bool = False):
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         if not visible:
-            opts.add_argument("--window-position=-10000,-10000")
+            opts.add_argument("--start-minimized")
         return opts
 
     # ClouDoc 설치 여부 확인 → 없으면 웹스토어에서 설치
@@ -533,19 +533,64 @@ def run_approval(
     # finally 에서 driver.quit() 제거 → 브라우저를 열어둬서 사용자가 직접 결재요청
 
 
+def _create_login_driver():
+    """
+    로그인 검증 전용 Chrome 드라이버.
+    별도 임시 프로필을 사용하므로 자동화 프로필 잠금과 무관하게 동작한다.
+    ClouDoc 설치 과정도 건너뛴다.
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+    except ImportError:
+        raise RuntimeError("selenium 패키지가 없습니다.\npip install selenium webdriver-manager")
+
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+    except Exception:
+        service = Service()
+
+    chrome_bin = _find_chrome_binary()
+    if not chrome_bin:
+        raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
+
+    # 로그인 전용 프로필 (자동화 프로필과 분리)
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+    login_profile_dir = os.path.join(appdata, "quote-auto", "login_profile")
+    os.makedirs(login_profile_dir, exist_ok=True)
+
+    opts = Options()
+    opts.binary_location = chrome_bin
+    opts.add_argument(f"--user-data-dir={login_profile_dir}")
+    opts.add_argument("--profile-directory=Default")
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-default-browser-check")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--disable-extensions")  # ClouDoc 불필요
+    opts.add_argument("--start-minimized")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
+    return webdriver.Chrome(service=service, options=opts)
+
+
 def check_login(
     username: str,
     password: str,
 ) -> tuple:
     """
     로그인 검증. 반환: (success: bool, message: str)
+    별도 login_profile을 사용하므로 자동화 프로필 잠금과 충돌하지 않는다.
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
-    driver = _create_driver(offscreen=True)
+    driver = None
     try:
+        driver = _create_login_driver()
         driver.get(APPROVAL_URL)
         wait = WebDriverWait(driver, 15)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
@@ -574,12 +619,11 @@ def check_login(
     except Exception as e:
         return False, str(e)
     finally:
-        global _active_driver
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        _active_driver = None  # 잠금 해제 후 참조 제거
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
         time.sleep(1)
 
 

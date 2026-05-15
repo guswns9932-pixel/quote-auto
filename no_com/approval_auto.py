@@ -53,8 +53,46 @@ def _find_chrome_binary() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 # WebDriver 생성
 # ──────────────────────────────────────────────────────────────────────────────
+def _patch_chrome_shortcut() -> bool:
+    """
+    바탕화면 Chrome 바로가기에 --remote-debugging-port=9222 를 추가한다.
+    이미 추가되어 있으면 True, 새로 추가했으면 True, 실패 시 False 반환.
+    """
+    import glob
+    try:
+        import win32com.client
+    except ImportError:
+        return False
+
+    shell = win32com.client.Dispatch("WScript.Shell")
+    desktops = [
+        shell.SpecialFolders("Desktop"),
+        os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop"),
+    ]
+    found = False
+    for desktop in desktops:
+        for lnk in glob.glob(os.path.join(desktop, "*.lnk")):
+            try:
+                sc = shell.CreateShortcut(lnk)
+                if "chrome" not in (sc.TargetPath or "").lower():
+                    continue
+                found = True
+                args = sc.Arguments or ""
+                if "--remote-debugging-port=9222" in args:
+                    continue
+                sc.Arguments = (args + " --remote-debugging-port=9222").strip()
+                sc.Save()
+                logger.info("Chrome 바로가기 수정 완료: %s", lnk)
+            except Exception as e:
+                logger.warning("바로가기 수정 실패 (%s): %s", lnk, e)
+    return found
+
+
 def _create_driver():
-    """Selenium이 chrome.exe를 직접 관리하는 표준 방식으로 WebDriver를 생성한다."""
+    """
+    사용자가 바로가기로 열어 둔 Chrome(보안 클라우드 포함)에 Selenium으로 연결한다.
+    Chrome이 디버깅 포트 없이 실행 중이면 바로가기를 패치하고 재시작을 안내한다.
+    """
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -71,21 +109,26 @@ def _create_driver():
     except Exception:
         service = Service()
 
-    chrome_bin = _find_chrome_binary()
-    if not chrome_bin:
-        raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
+    # 실행 중인 Chrome(포트 9222)에 연결 시도
+    try:
+        opts = Options()
+        opts.debugger_address = "localhost:9222"
+        driver = webdriver.Chrome(service=service, options=opts)
+        driver.set_window_size(1400, 950)
+        return driver
+    except Exception:
+        pass
 
-    opts = Options()
-    opts.binary_location = chrome_bin
-    opts.add_argument("--no-first-run")
-    opts.add_argument("--no-default-browser-check")
-    opts.add_argument("--disable-notifications")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-
-    driver = webdriver.Chrome(service=service, options=opts)
-    driver.set_window_size(1400, 950)
-    return driver
+    # 연결 실패 → 바로가기에 디버깅 포트 추가 후 재시작 안내
+    _patch_chrome_shortcut()
+    raise RuntimeError(
+        "Chrome 연결 실패\n\n"
+        "Chrome 바탕화면 바로가기가 자동으로 업데이트되었습니다.\n\n"
+        "① Chrome을 완전히 종료해 주세요\n"
+        "② 바탕화면의 Chrome 바로가기로 다시 실행해 주세요\n"
+        "③ 결재상신을 다시 시도해 주세요\n\n"
+        "(이후에는 바로가기로 Chrome을 열면 자동 연결됩니다)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

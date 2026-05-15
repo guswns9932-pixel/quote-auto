@@ -2786,7 +2786,8 @@ class RackPurchaseRequestPage(QWidget):
         elif '</sheetData>' in xml:
             xml = xml.replace('</sheetData>', row_xml + '</sheetData>', 1)
         else:
-            xml = re.sub(r'<sheetData\s*/>', f'<sheetData>{row_xml}</sheetData>', xml, count=1)
+            _rxml = row_xml
+            xml = re.sub(r'<sheetData\s*/>', lambda _: f'<sheetData>{_rxml}</sheetData>', xml, count=1)
 
         return xml.encode('utf-8')
 
@@ -2885,8 +2886,10 @@ class RackPurchaseRequestPage(QWidget):
                 if val is not None:
                     if has_tstr:
                         # 문자열 수식 결과 → inlineStr로 변환
+                        # lambda 사용: val에 백슬래시가 있어도 re.sub가 백슬래시 시퀀스로 해석하지 않음
+                        _repl = f'<is><t>{val}</t></is>'
                         body = re.sub(r'<v>.*?</v>',
-                                      f'<is><t>{val}</t></is>', body, flags=re.DOTALL)
+                                      lambda _: _repl, body, flags=re.DOTALL)
                         return f'<c{clean} t="inlineStr">{body}</c>'
                     else:
                         # 숫자/불리언 등 → 타입 없는 숫자 셀 유지
@@ -3120,15 +3123,15 @@ class RackPurchaseRequestPage(QWidget):
         existing_count = int(uc_m.group(1)) if uc_m else len(re.findall(r'<si\b', ss_xml))
 
         # 기존 문자열 → 인덱스 맵 (단순 <t>...</t> 패턴만 매핑)
+        # enumerate로 실제 <si> 순서 인덱스 사용 (rich text 등 <t> 없는 항목도 인덱스 정확히 유지)
         str_to_idx: Dict[str, int] = {}
-        for m in re.finditer(r'<si\b[^>]*>(.*?)</si>', ss_xml, flags=re.DOTALL):
-            idx_val = len(str_to_idx)  # 순서대로 인덱스 부여
+        for real_idx, m in enumerate(re.finditer(r'<si\b[^>]*>(.*?)</si>', ss_xml, flags=re.DOTALL)):
             tm = re.search(r'<t[^>]*>(.*?)</t>', m.group(1), re.DOTALL)
             if tm:
                 raw = tm.group(1)
                 plain = (raw.replace('&amp;', '&').replace('&lt;', '<')
                          .replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'"))
-                str_to_idx[plain] = idx_val
+                str_to_idx[plain] = real_idx
 
         # 새로 추가할 항목만 별도 리스트에 쌓음 (기존 항목은 절대 삭제하지 않음)
         new_strings: list = []

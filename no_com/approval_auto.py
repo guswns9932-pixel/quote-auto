@@ -245,42 +245,24 @@ def run_approval(
 
         # ── STEP 3: 구매요청서(NPN) 직접 선택 ──────────────────────────────
         _log(f"③ '{FORM_NAME}' 선택…")
+        # gpopupLayer 모달이 완전히 로드될 때까지 대기
+        wait.until(EC.visibility_of_element_located((By.ID, "gpopupLayer")))
+        time.sleep(1)
 
-        # FORM_8637 이 iframe 안에 있을 수 있으므로 모든 iframe을 순회
-        def _click_form_8637() -> bool:
-            # 먼저 최상위 컨텍스트에서 시도
-            try:
-                el = driver.find_element(By.ID, "FORM_8637")
-                driver.execute_script("arguments[0].scrollIntoView(true);", el)
-                driver.execute_script("arguments[0].click();", el)
-                return True
-            except Exception:
-                pass
-            # iframe 순회
-            frames = driver.find_elements(By.TAG_NAME, "iframe")
-            for frame in frames:
-                try:
-                    driver.switch_to.frame(frame)
-                    el = driver.find_element(By.ID, "FORM_8637")
-                    driver.execute_script("arguments[0].scrollIntoView(true);", el)
-                    driver.execute_script("arguments[0].click();", el)
-                    return True
-                except Exception:
-                    driver.switch_to.default_content()
-            return False
-
-        # 최대 15초 재시도
-        for _ in range(15):
-            if _click_form_8637():
-                break
-            time.sleep(1)
-        else:
-            raise RuntimeError(
-                f"'{FORM_NAME}' 항목(id=FORM_8637)을 찾지 못했습니다.\n"
-                "결재양식 목록이 로드되었는지 확인하세요."
-            )
-
-        driver.switch_to.default_content()
+        # Full XPath로 직접 클릭 (id 방식 폴백 포함)
+        FORM_FULL_XPATH = (
+            "/html/body/div[3]/div/div[2]/div[1]/div/div[1]"
+            "/ul/li[1]/ul/li[7]/ul/li[10]/a"
+        )
+        try:
+            item_el = wait.until(EC.element_to_be_clickable((By.XPATH, FORM_FULL_XPATH)))
+            driver.execute_script("arguments[0].scrollIntoView(true);", item_el)
+            driver.execute_script("arguments[0].click();", item_el)
+        except Exception:
+            # 폴백: id 속성으로 재시도
+            item_el = wait.until(EC.element_to_be_clickable((By.ID, "FORM_8637")))
+            driver.execute_script("arguments[0].scrollIntoView(true);", item_el)
+            driver.execute_script("arguments[0].click();", item_el)
         time.sleep(0.5)
 
         # ── STEP 4: 확인 버튼 클릭 ──────────────────────────────────────────

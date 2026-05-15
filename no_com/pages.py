@@ -3084,14 +3084,12 @@ class RackPurchaseRequestPage(QWidget):
         import zipfile as _zf
         # [Content_Types].xml 을 항상 첫 번째로, 비압축으로 기록
         ordered = ['[Content_Types].xml'] + [n for n in names if n != '[Content_Types].xml']
-        with _zf.ZipFile(path, 'w', _zf.ZIP_DEFLATED) as zf:
+        with _zf.ZipFile(path, 'w') as zf:
             for name in ordered:
                 if name not in files:
                     continue
-                compress = _zf.ZIP_STORED if name == '[Content_Types].xml' else _zf.ZIP_DEFLATED
-                info = _zf.ZipInfo(name)
-                info.compress_type = compress
-                zf.writestr(info, files[name])
+                ct = _zf.ZIP_STORED if name == '[Content_Types].xml' else _zf.ZIP_DEFLATED
+                zf.writestr(name, files[name], compress_type=ct)
 
     @staticmethod
     def _xlsx_collect_row_styles(sheet_xml: str, row_num: int) -> Dict[str, str]:
@@ -3363,16 +3361,9 @@ class RackPurchaseRequestPage(QWidget):
                     results.append(f"❌ {os.path.basename(fp)}: {e}")
             return results
 
-        def _on_done(results):
-            QMessageBox.information(
-                self, "결재상신 완료",
-                "\n".join(results)
-            )
-
         _BgWorker.run_with_progress(
             self, "결재상신 진행 중… (Chrome이 자동으로 실행됩니다)",
             _run_all, paths,
-            on_result=_on_done
         )
 
 

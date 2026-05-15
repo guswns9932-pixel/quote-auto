@@ -549,20 +549,8 @@ def run_approval(
         except Exception as e:
             logger.warning("파일 첨부 중 오류: %s", e)
 
-        # ── STEP 9: 작성 완료 안내 ──────────────────────────────────────────
-        _log("⑨ 구매요청서 작성 완료.")
-        import tkinter as tk
-        from tkinter import messagebox
-        _root = tk.Tk()
-        _root.withdraw()
-        _root.attributes("-topmost", True)
-        _root.lift()
-        messagebox.showinfo(
-            "구매요청서 작성완료",
-            "구매요청서 작성완료!\n검토 후 결재요청 버튼을 누르세요.",
-            parent=_root,
-        )
-        _root.destroy()
+        # ── STEP 9: 완료 ────────────────────────────────────────────────────────
+        _log("⑨ 구매요청서 작성 완료. 검토 후 결재요청 버튼을 눌러주세요.")
 
     except Exception as e:
         import traceback

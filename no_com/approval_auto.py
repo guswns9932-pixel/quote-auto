@@ -326,42 +326,19 @@ def run_approval(
         except Exception as e:
             logger.warning("파일 첨부 중 오류: %s", e)
 
-        # ── STEP 9: 결재요청 버튼 클릭 ─────────────────────────────────────
-        _log("⑨ 결재요청 버튼 클릭…")
-        submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "act_draft")))
-        driver.execute_script("arguments[0].scrollIntoView(true);", submit_btn)
-        driver.execute_script("arguments[0].click();", submit_btn)
-        time.sleep(2)
-
-        # ── STEP 10: 확인 팝업(alert 또는 새 창) 처리 ─────────────────────
-        _log("⑩ 결재 확인 처리…")
-        try:
-            driver.switch_to.alert.accept()
-            _log("   alert 확인.")
-            time.sleep(1)
-        except Exception:
-            pass
-
-        extra_handles = [
-            h for h in driver.window_handles
-            if h not in (main_window, popup_handle)
-        ]
-        if extra_handles:
-            driver.switch_to.window(extra_handles[0])
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            time.sleep(1)
-            try:
-                confirm2 = wait.until(EC.element_to_be_clickable(
-                    (By.XPATH,
-                     "//button[contains(text(),'결재요청') or contains(text(),'확인')]")
-                ))
-                driver.execute_script("arguments[0].click();", confirm2)
-                _log("   추가 확인 창 처리 완료.")
-                time.sleep(1.5)
-            except Exception as e:
-                logger.warning("추가 확인 창 처리 실패: %s", e)
-
-        _log("✅ 결재상신 완료!")
+        # ── STEP 9: 작성 완료 안내 ──────────────────────────────────────────
+        _log("⑨ 구매요청서 작성 완료.")
+        import tkinter as tk
+        from tkinter import messagebox
+        _root = tk.Tk()
+        _root.withdraw()
+        _root.attributes("-topmost", True)
+        messagebox.showinfo(
+            "구매요청서 작성완료",
+            "구매요청서 작성완료.\n검토 후 결재 하세요.",
+            parent=_root,
+        )
+        _root.destroy()
 
     except Exception as e:
         import traceback

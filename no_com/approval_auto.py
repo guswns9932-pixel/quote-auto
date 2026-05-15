@@ -167,6 +167,31 @@ def _is_cloudoc_installed_in_profile(profile_dir: str) -> bool:
     return False
 
 
+def _kill_chrome_using_profile(profile_dir: str) -> None:
+    """해당 프로필 경로를 사용 중인 Chrome 프로세스만 골라 강제 종료한다."""
+    import subprocess
+    profile_marker = profile_dir.lower()
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where", "name='chrome.exe'",
+             "get", "ProcessId,CommandLine", "/format:csv"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if profile_marker not in line.lower():
+                continue
+            parts = line.split(",")
+            pid_str = parts[-1].strip() if parts else ""
+            if pid_str.isdigit():
+                subprocess.run(
+                    ["taskkill", "/PID", pid_str, "/F"],
+                    capture_output=True, timeout=5,
+                )
+                logger.info("Chrome 프로세스 강제 종료: PID %s", pid_str)
+    except Exception as e:
+        logger.warning("Chrome 프로세스 정리 실패: %s", e)
+
+
 def _create_driver(offscreen: bool = False):
     """
     자동화 전용 Chrome 프로필로 WebDriver를 생성한다.
@@ -195,6 +220,8 @@ def _create_driver(offscreen: bool = False):
     if not chrome_bin:
         raise RuntimeError("Chrome 실행 파일을 찾을 수 없습니다.")
 
+    profile_dir = _automation_profile_dir()
+
     # 이전 드라이버가 열려 있으면 종료 (프로필 잠금 해제)
     global _active_driver
     if _active_driver is not None:
@@ -203,9 +230,11 @@ def _create_driver(offscreen: bool = False):
         except Exception:
             pass
         _active_driver = None
-        time.sleep(2)  # Chrome이 프로필 잠금을 완전히 해제할 때까지 대기
+        time.sleep(1)
 
-    profile_dir = _automation_profile_dir()
+    # quit() 후에도 Chrome 프로세스가 남아 프로필을 잠그고 있을 수 있으므로 강제 종료
+    _kill_chrome_using_profile(profile_dir)
+    time.sleep(2)  # 프로세스 종료 후 잠금 해제 대기
     os.makedirs(profile_dir, exist_ok=True)
 
     def _build_opts(visible: bool = True) -> Options:

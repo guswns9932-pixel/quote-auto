@@ -83,6 +83,12 @@ def _make_spec(app_name: str, icon: str) -> str:
                 *pil_d,
             ],
             hiddenimports=[
+                # 앱 모듈 (importlib.import_module 동적 로딩 → PyInstaller 자동 감지 불가)
+                "pages",
+                "excel_io",
+                "core",
+                "widgets",
+                "approval_auto",
                 "PySide6.QtCore",
                 "PySide6.QtGui",
                 "PySide6.QtWidgets",
@@ -114,7 +120,6 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "selenium.webdriver.common.keys",
                 "webdriver_manager",
                 "webdriver_manager.chrome",
-                "approval_auto",
             ],
             hookspath=[],
             runtime_hooks=[],

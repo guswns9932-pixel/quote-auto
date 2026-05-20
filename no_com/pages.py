@@ -3424,6 +3424,42 @@ class RackPurchaseRequestPage(QWidget):
                 except Exception as e:
                     logger.warning("결재상신용 행 추가 실패 (row=%d): %s", i, e)
 
+            import tempfile as _tmp, os as _os, xml.etree.ElementTree as _ET
+            _dbg_path = _os.path.join(_tmp.gettempdir(), 'quote_auto_xml_debug.txt')
+
+            def _dbg_snapshot(label: str, _files: dict):
+                """각 단계의 시트별 t="s" 잔존 개수 + XML 오류를 기록."""
+                lines = [f'\n{"="*60}', f'[단계] {label}', f'{"="*60}']
+                ss_xml = _files.get('xl/sharedStrings.xml', b'').decode('utf-8', errors='replace')
+                ss_count = len(re.findall(r'<si\b', ss_xml))
+                lines.append(f'sharedStrings <si> 개수: {ss_count}')
+                for nm in sorted(_files.keys()):
+                    if not re.match(r'xl/worksheets/sheet\d+', nm):
+                        continue
+                    raw = _files[nm].decode('utf-8', errors='replace')
+                    ts_cells = re.findall(r'<c\b[^>]*t="s"[^>]*>.*?</c>', raw, re.DOTALL)
+                    bad = [c for c in ts_cells
+                           if (vm := re.search(r'<v>(\d+)</v>', c)) and int(vm.group(1)) >= ss_count]
+                    lines.append(f'  {nm}: t="s" 셀={len(ts_cells)}, 범위초과={len(bad)}')
+                    for b in bad[:5]:
+                        lines.append(f'    → {b[:120]}')
+                    try:
+                        _ET.fromstring(_files[nm])
+                    except _ET.ParseError as pe:
+                        ln, col = pe.position
+                        s = raw; off = max(0, col - 1)
+                        lines.append(f'  [XML오류] 행{ln}:열{col}')
+                        lines.append(f'    앞: {s[max(0,off-120):off]!r}')
+                        lines.append(f'    뒤: {s[off:off+120]!r}')
+                with open(_dbg_path, 'a', encoding='utf-8') as f:
+                    f.write('\n'.join(lines) + '\n')
+
+            # 기존 로그 초기화
+            with open(_dbg_path, 'w', encoding='utf-8') as _f:
+                _f.write(f'결재상신용 생성 디버그 로그\n')
+
+            _dbg_snapshot('열 삭제 전', files)
+
             files[rack_file] = self._xlsx_delete_leading_cols(files[rack_file], 2)
             files = self._xlsx_shift_drawing_cols(files, rack_file, 2)
 
@@ -3432,37 +3468,20 @@ class RackPurchaseRequestPage(QWidget):
             sheet_str = re.sub(r'(<col\b[^>]*?)\s+hidden="1"', r'\1', sheet_str)
             files[rack_file] = sheet_str.encode('utf-8')
 
+            _dbg_snapshot('열 삭제 후 / expand 전', files)
+
             # 기존 t="s" 셀을 모두 inlineStr로 펼침 (손상된 sharedStrings 인덱스 제거)
             files = self._xlsx_expand_shared_strings(files)
+
+            _dbg_snapshot('expand 후 / inline_to_shared 전', files)
+
             # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
             files = self._xlsx_inline_to_shared(files)
 
-            # ── XML 유효성 검사 (디버그) ─────────────────────────────────────
-            import xml.etree.ElementTree as _ET, tempfile as _tmp, os as _os
-            _dbg_lines = []
-            for _name in sorted(files.keys()):
-                if not _name.endswith('.xml'):
-                    continue
-                _content = files[_name]
-                try:
-                    _ET.fromstring(_content)
-                except _ET.ParseError as _pe:
-                    _ln, _col = _pe.position
-                    _s = _content.decode('utf-8', errors='replace')
-                    _off = max(0, _col - 1)  # 1-based → 0-based
-                    _start = max(0, _off - 200)
-                    _end   = min(len(_s), _off + 200)
-                    _dbg_lines.append(
-                        f"[XML오류] {_name} @ 행{_ln}:열{_col}\n"
-                        f"앞200자: {_s[_start:_off]!r}\n"
-                        f"뒤200자: {_s[_off:_end]!r}\n")
-            if _dbg_lines:
-                _dbg_path = _os.path.join(_tmp.gettempdir(), 'quote_auto_xml_debug.txt')
-                with open(_dbg_path, 'w', encoding='utf-8') as _f:
-                    _f.write('\n'.join(_dbg_lines))
-                QMessageBox.warning(self, "XML 디버그",
-                    f"XML 오류 발견!\n파일 경로를 복사해서 알려주세요:\n{_dbg_path}")
-            # ── /XML 유효성 검사 ─────────────────────────────────────────────
+            _dbg_snapshot('inline_to_shared 후 (최종)', files)
+
+            QMessageBox.warning(self, "디버그 완료",
+                f"단계별 분석 완료. 파일을 알려주세요:\n{_dbg_path}")
 
             self._xlsx_save(out_path, files, names)
 

@@ -3381,6 +3381,33 @@ class RackPurchaseRequestPage(QWidget):
             # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
             files = self._xlsx_inline_to_shared(files)
 
+            # ── XML 유효성 검사 (디버그) ─────────────────────────────────────
+            import xml.etree.ElementTree as _ET, tempfile as _tmp, os as _os
+            _dbg_lines = []
+            for _name in sorted(files.keys()):
+                if not _name.endswith('.xml'):
+                    continue
+                _content = files[_name]
+                try:
+                    _ET.fromstring(_content)
+                except _ET.ParseError as _pe:
+                    _ln, _col = _pe.position
+                    _s = _content.decode('utf-8', errors='replace')
+                    _off = max(0, _col - 1)  # 1-based → 0-based
+                    _start = max(0, _off - 200)
+                    _end   = min(len(_s), _off + 200)
+                    _dbg_lines.append(
+                        f"[XML오류] {_name} @ 행{_ln}:열{_col}\n"
+                        f"앞200자: {_s[_start:_off]!r}\n"
+                        f"뒤200자: {_s[_off:_end]!r}\n")
+            if _dbg_lines:
+                _dbg_path = _os.path.join(_tmp.gettempdir(), 'quote_auto_xml_debug.txt')
+                with open(_dbg_path, 'w', encoding='utf-8') as _f:
+                    _f.write('\n'.join(_dbg_lines))
+                QMessageBox.warning(self, "XML 디버그",
+                    f"XML 오류 발견!\n파일 경로를 복사해서 알려주세요:\n{_dbg_path}")
+            # ── /XML 유효성 검사 ─────────────────────────────────────────────
+
             self._xlsx_save(out_path, files, names)
 
             self._refresh_req_list()

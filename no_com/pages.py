@@ -3105,6 +3105,58 @@ class RackPurchaseRequestPage(QWidget):
         return files, names
 
     @staticmethod
+    def _xlsx_expand_shared_strings(files: dict) -> dict:
+        """모든 t="s" 셀을 인라인 문자열(inlineStr)로 펼침.
+
+        손상된 sharedStrings.xml(이전 버그로 인덱스 오류)을 가진 파일을 로드할 때
+        기존 t="s" 참조를 실제 문자열로 교체하여 인덱스 오류를 원천 제거.
+        이후 _xlsx_inline_to_shared 가 깨끗한 상태에서 재구성함.
+        """
+        SS_KEY = 'xl/sharedStrings.xml'
+        if SS_KEY not in files:
+            return files
+
+        ss_xml = files[SS_KEY].decode('utf-8', errors='replace')
+
+        # 인덱스 → 텍스트 맵 구성 (단순 <t> 내용만 추출; rich-text는 첫 <t>로 대체)
+        idx_to_str: Dict[int, str] = {}
+        for idx, m in enumerate(re.finditer(r'<si\b[^>]*>(.*?)</si>', ss_xml, re.DOTALL)):
+            tm = re.search(r'<t[^>]*>(.*?)</t>', m.group(1), re.DOTALL)
+            if tm:
+                raw = tm.group(1)
+                plain = (raw.replace('&amp;', '&').replace('&lt;', '<')
+                         .replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'"))
+                idx_to_str[idx] = plain
+
+        def _expand(m: re.Match) -> str:
+            full = m.group(0)
+            if 't="s"' not in full:
+                return full
+            gt = full.index('>')
+            attrs = full[2:gt]
+            body  = full[gt + 1:-4]
+            vm = re.search(r'<v>(\d+)</v>', body)
+            if not vm:
+                return full
+            si_idx = int(vm.group(1))
+            text = idx_to_str.get(si_idx, '')
+            new_attrs = re.sub(r'\s*\bt="s"', '', attrs) + ' t="inlineStr"'
+            if not text:
+                return f'<c{re.sub(r" t=\"inlineStr\"", "", new_attrs).rstrip()}/>'
+            esc = (text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+            return f'<c{new_attrs}><is><t>{esc}</t></is></c>'
+
+        for name in list(files.keys()):
+            if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
+                continue
+            xml = files[name].decode('utf-8', errors='replace')
+            new_xml = re.sub(r'<c\b[^>]*(?<!/)>.*?</c>', _expand, xml, flags=re.DOTALL)
+            if new_xml != xml:
+                files[name] = new_xml.encode('utf-8')
+
+        return files
+
+    @staticmethod
     def _xlsx_inline_to_shared(files: dict) -> dict:
         """시트의 t="inlineStr" 셀을 sharedStrings 방식으로 변환.
         Synap Document Viewer 등 inlineStr을 지원하지 않는 뷰어와의 호환성.
@@ -3302,6 +3354,8 @@ class RackPurchaseRequestPage(QWidget):
             except Exception as e:
                 logger.warning("RACK발주양식 시트 패치 실패: %s", e)
 
+        # 기존 t="s" 셀을 모두 inlineStr로 펼침 (손상된 sharedStrings 인덱스 제거)
+        files = self._xlsx_expand_shared_strings(files)
         # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
         files = self._xlsx_inline_to_shared(files)
         self._xlsx_save(path, files, names)
@@ -3378,6 +3432,8 @@ class RackPurchaseRequestPage(QWidget):
             sheet_str = re.sub(r'(<col\b[^>]*?)\s+hidden="1"', r'\1', sheet_str)
             files[rack_file] = sheet_str.encode('utf-8')
 
+            # 기존 t="s" 셀을 모두 inlineStr로 펼침 (손상된 sharedStrings 인덱스 제거)
+            files = self._xlsx_expand_shared_strings(files)
             # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
             files = self._xlsx_inline_to_shared(files)
 

@@ -2896,7 +2896,7 @@ class RackPurchaseRequestPage(QWidget):
                     # 캐시 값 없음 → 빈 셀
                     return f'<c{clean.rstrip()}/>'
 
-            xml = re.sub(r'<c\b[^>]*>.*?</c>', _fix_cell, xml, flags=re.DOTALL)
+            xml = re.sub(r'<c\b[^>]*(?<!/)>.*?</c>', _fix_cell, xml, flags=re.DOTALL)
 
             # ── 자체종결 셀 안전망 ──────────────────────────────────────────
             # <c ... t="str" ... /> 에서 t="str" 제거 (빈 숫자형 셀)
@@ -2915,7 +2915,7 @@ class RackPurchaseRequestPage(QWidget):
 
         # ── 셀 데이터 제거 ──────────────────────────────────────────────────
         xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*/>', '', xml)
-        xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*>.*?</c>', '', xml, flags=re.DOTALL)
+        xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*(?<!/)>.*?</c>', '', xml, flags=re.DOTALL)
 
         def _shift_col(col_idx: int) -> int:
             return max(1, col_idx - delete_count)
@@ -3168,7 +3168,7 @@ class RackPurchaseRequestPage(QWidget):
                 _ch[0] = True
                 return f'<c{new_attrs}><v>{idx}</v></c>'
 
-            new_xml = re.sub(r'<c\b[^>]*>.*?</c>', _conv, xml, flags=re.DOTALL)
+            new_xml = re.sub(r'<c\b[^>]*(?<!/)>.*?</c>', _conv, xml, flags=re.DOTALL)
             if changed[0]:
                 files[name] = new_xml.encode('utf-8')
                 changed_any = True
@@ -3370,31 +3370,6 @@ class RackPurchaseRequestPage(QWidget):
 
             # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
             files = self._xlsx_inline_to_shared(files)
-
-            # ── XML 유효성 검사 (디버그) ─────────────────────────────────────
-            import xml.etree.ElementTree as _ET, tempfile as _tmp, os as _os
-            _dbg_lines = []
-            for _name, _content in files.items():
-                if not _name.endswith('.xml'):
-                    continue
-                try:
-                    _ET.fromstring(_content)
-                except _ET.ParseError as _pe:
-                    _ln, _col = _pe.position
-                    _s = _content.decode('utf-8', errors='replace')
-                    _start = max(0, _col - 100)
-                    _end   = min(len(_s), _col + 100)
-                    _dbg_lines.append(
-                        f"[XML오류] {_name} @ 행{_ln}:열{_col}\n"
-                        f"앞100자: {_s[_start:_col]!r}\n"
-                        f"뒤100자: {_s[_col:_end]!r}\n")
-            if _dbg_lines:
-                _dbg_path = _os.path.join(_tmp.gettempdir(), 'quote_auto_xml_debug.txt')
-                with open(_dbg_path, 'w', encoding='utf-8') as _f:
-                    _f.write('\n'.join(_dbg_lines))
-                QMessageBox.warning(self, "XML 디버그",
-                    f"XML 오류 발견. 다음 파일을 복사해서 알려주세요:\n{_dbg_path}")
-            # ── /XML 유효성 검사 ─────────────────────────────────────────────
 
             self._xlsx_save(out_path, files, names)
 

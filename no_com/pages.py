@@ -45,6 +45,11 @@ from widgets import (
 logger = logging.getLogger("QuoteApp")
 
 
+def _natural_key(s: str):
+    """파일명 자연 정렬 키: 숫자 부분을 수치로 비교 (10 < 20 < 100)."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+
+
 def _make_plain_table(cols: int, headers: List[str]) -> QTableWidget:
     t = QTableWidget(0, cols)
     t.setHorizontalHeaderLabels(headers)
@@ -3418,50 +3423,7 @@ class RackPurchaseRequestPage(QWidget):
                     all_row_vals.append({})
 
             shutil.copy2(paths[0], out_path)
-            # 수식 제거 없이 원본 상태로 먼저 로드 (디버그용)
-            files, names = self._xlsx_load_and_clean(out_path, strip_all_formulas=False)
-
-            import tempfile as _tmp, os as _os, xml.etree.ElementTree as _ET
-            _dbg_path = _os.path.join(_tmp.gettempdir(), 'quote_auto_xml_debug.txt')
-
-            def _dbg_snapshot(label: str, _files: dict):
-                lines = [f'\n{"="*60}', f'[단계] {label}', f'{"="*60}']
-                ss_xml = _files.get('xl/sharedStrings.xml', b'').decode('utf-8', errors='replace')
-                ss_count = len(re.findall(r'<si\b', ss_xml))
-                has_ss_file = 'xl/sharedStrings.xml' in _files
-                wr = _files.get('xl/_rels/workbook.xml.rels', b'').decode('utf-8', errors='replace')
-                lines.append(f'sharedStrings.xml 존재: {has_ss_file}, <si> 개수: {ss_count}')
-                lines.append(f'workbook.rels에 sharedStrings: {"sharedStrings" in wr}')
-                for nm in sorted(_files.keys()):
-                    if not re.match(r'xl/worksheets/sheet\d+', nm):
-                        continue
-                    raw = _files[nm].decode('utf-8', errors='replace')
-                    ts  = len(re.findall(r't="s"', raw))
-                    tis = len(re.findall(r't="inlineStr"', raw))
-                    tst = len(re.findall(r't="str"', raw))
-                    bad_cells = [c for c in re.findall(r'<c\b[^>]*t="s"[^>]*>.*?</c>', raw, re.DOTALL)
-                                 if (vm := re.search(r'<v>(\d+)</v>', c)) and int(vm.group(1)) >= ss_count]
-                    lines.append(f'  {nm}: t="s"={ts} t="inlineStr"={tis} t="str"={tst} 범위초과={len(bad_cells)}')
-                    for b in bad_cells[:3]:
-                        lines.append(f'    → {b[:100]}')
-                    try:
-                        _ET.fromstring(_files[nm])
-                    except _ET.ParseError as pe:
-                        ln, col = pe.position
-                        s = raw; off = max(0, col - 1)
-                        lines.append(f'  [XML오류] 행{ln}:열{col}')
-                        lines.append(f'    앞: {s[max(0,off-150):off]!r}')
-                        lines.append(f'    뒤: {s[off:off+150]!r}')
-                with open(_dbg_path, 'a', encoding='utf-8') as f:
-                    f.write('\n'.join(lines) + '\n')
-
-            with open(_dbg_path, 'w', encoding='utf-8') as _f:
-                _f.write('결재상신용 생성 디버그 로그\n')
-
-            _dbg_snapshot('원본 소스 파일 (수식제거 전)', files)
-
-            # 수식 제거 적용
-            files = self._xlsx_strip_all_formulas(files)
+            files, names = self._xlsx_load_and_clean(out_path, strip_all_formulas=True)
 
             wb_bytes   = files.get('xl/workbook.xml', b'')
             rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
@@ -3481,25 +3443,12 @@ class RackPurchaseRequestPage(QWidget):
                 except Exception as e:
                     logger.warning("결재상신용 행 추가 실패 (row=%d): %s", i, e)
 
-            _dbg_snapshot('수식제거+행추가 후 / 열삭제 전', files)
-
             files[rack_file] = self._xlsx_delete_leading_cols(files[rack_file], 2)
             files = self._xlsx_shift_drawing_cols(files, rack_file, 2)
 
             sheet_str = files[rack_file].decode('utf-8', errors='replace')
             sheet_str = re.sub(r'(<col\b[^>]*?)\s+hidden="1"', r'\1', sheet_str)
             files[rack_file] = sheet_str.encode('utf-8')
-
-            _dbg_snapshot('열 삭제 후', files)
-
-            files = self._xlsx_expand_shared_strings(files)
-            _dbg_snapshot('expand 후', files)
-
-            files = self._xlsx_inline_to_shared(files)
-            _dbg_snapshot('inline_to_shared 후 (최종)', files)
-
-            QMessageBox.warning(self, "디버그 완료",
-                f"단계별 분석 완료. 파일을 알려주세요:\n{_dbg_path}")
 
             self._xlsx_save(out_path, files, names)
 
@@ -3718,7 +3667,7 @@ class ESignPage(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, "엑셀 선택(다중)", "", "Excel Files (*.xlsx)")
         if not paths:
             return
-        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, os.path.basename(p).lower()))
+        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, _natural_key(os.path.basename(p))))
         base = os.path.commonpath(paths)
         if os.path.isfile(base):
             base = os.path.dirname(base)

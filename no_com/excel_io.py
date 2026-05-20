@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -487,10 +488,13 @@ def generate_cover(
     while os.path.abspath(out_path).lower() in input_abs:
         out_path = unique_path(out_path)
 
+    def _natural_key(s: str):
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+
     out_base = os.path.basename(out_path).lower()
     clean = sorted(
         [p for p in source_files if os.path.basename(p).lower() != out_base],
-        key=lambda p: os.path.basename(p).lower(),
+        key=lambda p: _natural_key(os.path.basename(p)),
     )
     if not clean:
         raise RuntimeError("처리할 엑셀 파일이 없습니다.")

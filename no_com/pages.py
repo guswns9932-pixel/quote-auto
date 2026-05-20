@@ -2885,20 +2885,15 @@ class RackPurchaseRequestPage(QWidget):
 
                 if val is not None:
                     if has_tstr:
-                        # 문자열 수식 결과 → inlineStr로 변환
-                        # lambda 사용: val에 백슬래시가 있어도 re.sub가 백슬래시 시퀀스로 해석하지 않음
-                        _repl = f'<is><t>{val}</t></is>'
-                        body = re.sub(r'<v>.*?</v>',
-                                      lambda _: _repl, body, flags=re.DOTALL)
-                        return f'<c{clean} t="inlineStr">{body}</c>'
+                        # 문자열 수식 결과 → inlineStr로 완전 재구성 (잔존 요소 없이 깔끔하게)
+                        if val:
+                            return f'<c{clean} t="inlineStr"><is><t>{val}</t></is></c>'
+                        return f'<c{clean.rstrip()}/>'
                     else:
-                        # 숫자/불리언 등 → 타입 없는 숫자 셀 유지
-                        return f'<c{clean}>{body}</c>'
+                        # 숫자/불리언 등 → <v>만 남기고 재구성
+                        return f'<c{clean}><v>{val}</v></c>'
                 else:
                     # 캐시 값 없음 → 빈 셀
-                    stripped = body.strip()
-                    if stripped:
-                        return f'<c{clean}>{stripped}</c>'
                     return f'<c{clean.rstrip()}/>'
 
             xml = re.sub(r'<c\b[^>]*>.*?</c>', _fix_cell, xml, flags=re.DOTALL)
@@ -3783,12 +3778,12 @@ class ESignPage(QWidget):
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
                 final_pm.save(buf, "JPEG", 45); buf.close()
 
-                # 고정 A4 페이지, 이미지를 비율 유지하며 중앙 배치
+                # 고정 A4 페이지, 이미지를 비율 유지하며 중앙+상단 배치
                 page = final.new_page(width=A4_W, height=A4_H)
                 scale = min(A4_W / max(1, iw), A4_H / max(1, ih))
                 pw, ph = iw * scale, ih * scale
                 x0 = (A4_W - pw) / 2
-                y0 = (A4_H - ph) / 2
+                y0 = 0.0  # 상단 정렬
                 page.insert_image(fitz.Rect(x0, y0, x0 + pw, y0 + ph), stream=bytes(ba))
 
         final.save(out, deflate=True, garbage=4); final.close()

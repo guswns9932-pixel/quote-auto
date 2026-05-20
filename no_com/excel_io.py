@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -487,10 +488,13 @@ def generate_cover(
     while os.path.abspath(out_path).lower() in input_abs:
         out_path = unique_path(out_path)
 
+    def _natural_key(s: str):
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+
     out_base = os.path.basename(out_path).lower()
     clean = sorted(
         [p for p in source_files if os.path.basename(p).lower() != out_base],
-        key=lambda p: os.path.basename(p).lower(),
+        key=lambda p: _natural_key(os.path.basename(p)),
     )
     if not clean:
         raise RuntimeError("처리할 엑셀 파일이 없습니다.")
@@ -587,47 +591,160 @@ class ExcelCOM:
 # 공개 API: 전자서명용 임시 PDF 생성 (COM 유지)
 # ═══════════════════════════════════════════════════════════════
 
-def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int) -> str:
+def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
+                        xl_app=None) -> str:
     """
-    xlsx 의 Visible 시트를 개별 PDF 로 내보낸 뒤 병합.
-    반환: 병합된 PDF 경로 (시트 없으면 "")
-    전자서명 페이지에서만 호출되며 COM 을 사용하는 유일한 함수.
+    xlsx 의 ESIGN_TARGET 시트(원래 Visible인 것)만 PDF 로 내보낸다.
+    반환: PDF 경로 (대상 시트 없으면 "")
+
+    워크북 단위 ExportAsFixedFormat 1회 호출:
+      - 비대상 시트를 일시적으로 VeryHidden 처리 → workbook 전체 export
+      - Close(False) 로 디스크 파일은 변경하지 않음
+      - RenameFile 발생 횟수: 파일당 1회 (기존 시트 수만큼 → 1회로 감소)
+
+    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
     """
-    import fitz  # PyMuPDF
+    import fitz
 
     out_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}.pdf")
 
-    with ExcelCOM() as xl:
-        wb = xl.open(xlsx_path, read_only=True)
+    def _process(app) -> str:
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=False, UpdateLinks=0, AddToMru=False)
         try:
-            merged = fitz.open()
+            target_set = set(SheetName.ESIGN_TARGET)
+            to_hide = []
+
+            # 원래 Visible 이면서 ESIGN_TARGET에 속하는 시트만 유지
+            has_visible_target = False
+            for ws in wb.Worksheets:
+                is_target  = ws.Name in target_set
+                was_visible = int(ws.Visible) == -1   # xlSheetVisible = -1
+                if is_target and was_visible:
+                    has_visible_target = True
+                else:
+                    to_hide.append(ws)
+
+            if not has_visible_target:
+                return ""
+
+            # 비대상 시트를 VeryHidden (xlVeryHidden = 2)
+            for ws in to_hide:
+                try:
+                    ws.Visible = 2
+                except Exception:
+                    pass
+
+            # 워크북 전체를 PDF 1회 export (ExportAsFixedFormat 1회 = RenameFile 1회)
+            wb.ExportAsFixedFormat(0, out_pdf)
+            return out_pdf if os.path.exists(out_pdf) else ""
+        finally:
+            try:
+                wb.Close(False)   # 디스크 파일 변경 없음
+            except Exception:
+                pass
+
+    if xl_app is not None:
+        return _process(xl_app)
+
+    with ExcelCOM() as xl:
+        return _process(xl.app)
+
+
+def _print_area_range(ws):
+    """PrintArea(R1C1 또는 A1 형식)를 Range 객체로 반환. 없으면 UsedRange."""
+    import re
+    pa = ws.PageSetup.PrintArea
+    if not pa:
+        return ws.UsedRange
+    if "!" in pa:
+        pa = pa.split("!")[-1]
+    # R1C1 형식 감지: "R숫자C숫자:R숫자C숫자" 또는 단일 "R숫자C숫자"
+    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
+    if m:
+        r1, c1 = int(m.group(1)), int(m.group(2))
+        r2 = int(m.group(3)) if m.group(3) else r1
+        c2 = int(m.group(4)) if m.group(4) else c1
+        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
+    # A1 형식
+    try:
+        return ws.Range(pa)
+    except Exception:
+        return ws.UsedRange
+
+
+def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
+                                  xl_app=None) -> List[str]:
+    """
+    xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
+    ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
+
+    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
+    반환: 저장된 PNG 경로 리스트 (순서 = ESIGN_TARGET 순서)
+    """
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        logger.error("Pillow(PIL) 없음 — pip install pillow")
+        return []
+
+    png_paths: List[str] = []
+
+    def _process(app) -> List[str]:
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
+        try:
+            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처
+            target_names = []
             for name in SheetName.ESIGN_TARGET:
+                try:
+                    ws = wb.Worksheets(name)
+                    if int(ws.Visible) == -1:
+                        target_names.append(name)
+                except Exception:
+                    continue
+            if not target_names:
+                for ws in wb.Worksheets:
+                    try:
+                        if int(ws.Visible) == -1:
+                            target_names.append(ws.Name)
+                    except Exception:
+                        continue
+
+            for idx, name in enumerate(target_names):
                 try:
                     ws = wb.Worksheets(name)
                 except Exception:
                     continue
-                if int(ws.Visible) != -1:   # -1 = xlSheetVisible
+                if int(ws.Visible) != -1:
                     continue
                 safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
-                sheet_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}_{safe_name}.pdf")
+                png_path = os.path.join(
+                    tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
-                    ws.ExportAsFixedFormat(0, sheet_pdf)
+                    ws.Activate()
+                    # 페이지 나누기 미리보기 → 기본(기본 보기)으로 전환 후 캡처
+                    try:
+                        app.ActiveWindow.View = 1  # xlNormalView
+                    except Exception:
+                        pass
+                    rng = _print_area_range(ws)
+                    rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
+                    img = ImageGrab.grabclipboard()
+                    if img is not None:
+                        img.save(png_path, "PNG")
+                        png_paths.append(png_path)
+                    else:
+                        logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
                 except Exception as e:
-                    logger.warning("PDF Export 실패 (%s): %s", name, e)
-                    continue
-                if os.path.exists(sheet_pdf):
-                    src = fitz.open(sheet_pdf)
-                    merged.insert_pdf(src)
-                    src.close()
-
-            if len(merged) == 0:
-                merged.close()
-                return ""
-            merged.save(out_pdf)
-            merged.close()
-            return out_pdf
+                    logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
         finally:
             try:
                 wb.Close(False)
             except Exception:
                 pass
+        return png_paths
+
+    if xl_app is not None:
+        return _process(xl_app)
+
+    with ExcelCOM() as xl:
+        return _process(xl.app)

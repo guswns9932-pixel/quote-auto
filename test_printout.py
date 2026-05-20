@@ -1,0 +1,91 @@
+import win32com.client
+import os
+import re
+import traceback
+
+
+def _print_area_range(ws):
+    pa = ws.PageSetup.PrintArea
+    if not pa:
+        return ws.UsedRange
+    if "!" in pa:
+        pa = pa.split("!")[-1]
+    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
+    if m:
+        r1, c1 = int(m.group(1)), int(m.group(2))
+        r2 = int(m.group(3)) if m.group(3) else r1
+        c2 = int(m.group(4)) if m.group(4) else c1
+        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
+    try:
+        return ws.Range(pa)
+    except Exception:
+        return ws.UsedRange
+
+try:
+    from PIL import ImageGrab
+except ImportError:
+    print("pillow 없음: pip install pillow")
+    input("Enter..."); raise SystemExit
+
+XLSX = r"N:\01.기본문서함\사업1팀.영업공용\☆ 공유 폴더\99. 내부자료\07. 업무자동화\01. 견적작성자동화\견적서\260430_LOT베큠_P34D_ETCH_최동섭\7269457619-20_260430_LOT베큠_P34D_ETCH_최동섭_ELP3655.xlsx"
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+ESIGN_TARGET = ["견적서 갑지", "사양서", "현업 사인용 사양서", "입고검수확인서"]
+
+# Visible 코드: -1=보임, 0=숨김, 2=매우숨김
+VISIBLE_LABEL = {-1: "보임", 0: "숨김", 2: "매우숨김"}
+
+try:
+    xl = win32com.client.Dispatch("Excel.Application")
+    xl.Visible = False
+    xl.DisplayAlerts = False
+
+    wb = xl.Workbooks.Open(XLSX, ReadOnly=True, UpdateLinks=0, AddToMru=False)
+    try:
+        print("=== 전체 시트 목록 ===")
+        for ws in wb.Worksheets:
+            v = int(ws.Visible)
+            label = VISIBLE_LABEL.get(v, str(v))
+            target = "★" if ws.Name in ESIGN_TARGET else " "
+            print(f"  {target} [{label:6s}]  {ws.Name!r}")
+
+        print("\n=== ESIGN_TARGET 캡처 시도 ===")
+        for name in ESIGN_TARGET:
+            try:
+                ws = wb.Worksheets(name)
+            except Exception:
+                print(f"  {name!r}  → 시트 없음 (이름 불일치)")
+                continue
+
+            v = int(ws.Visible)
+            if v != -1:
+                print(f"  {name!r}  → 건너뜀 ({VISIBLE_LABEL.get(v, v)})")
+                continue
+
+            ws.Activate()
+            pa_raw = ws.PageSetup.PrintArea
+            print(f"  {name!r}  PrintArea raw={pa_raw!r}", flush=True)
+            rng = _print_area_range(ws)
+            print(f"           캡처 범위: {rng.Address}", end="", flush=True)
+            try:
+                rng.CopyPicture(Appearance=1, Format=2)
+                img = ImageGrab.grabclipboard()
+                if img is not None:
+                    safe = name.replace(" ", "_")
+                    out = os.path.join(BASE, f"test_{safe}.png")
+                    img.save(out, "PNG")
+                    print(f"  → 저장 {img.size}")
+                else:
+                    print("  → 클립보드 비어있음")
+            except Exception as e:
+                print(f"  → 오류: {e}")
+
+    finally:
+        wb.Close(False)
+    xl.Quit()
+
+except Exception:
+    print("\n=== 오류 ===")
+    traceback.print_exc()
+
+input("\nEnter 키를 누르면 창이 닫힙니다...")

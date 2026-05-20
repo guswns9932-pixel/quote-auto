@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from pages import ESignPage, QuoteBuilderPage, RackPurchaseRequestPage
 from widgets import tint_button
 
 
@@ -37,7 +36,7 @@ logger = logging.getLogger("QuoteApp")
 # 왼쪽 내비게이션
 # ──────────────────────────────────────────────
 class LeftNav(QWidget):
-    def __init__(self, stack: QStackedWidget, on_reset) -> None:
+    def __init__(self, stack: QStackedWidget, on_reset, on_navigate=None) -> None:
         super().__init__()
         self.setFixedWidth(220)
 
@@ -45,10 +44,16 @@ class LeftNav(QWidget):
         v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(12)
 
+        def _go(idx):
+            if on_navigate:
+                on_navigate(idx)
+            else:
+                stack.setCurrentIndex(idx)
+
         buttons = [
-            ("견적서작성", lambda: stack.setCurrentIndex(0), "#BBDEFB"),   # 연파랑
-            ("RACK구매요청서 작성", lambda: stack.setCurrentIndex(1), "#FFF176"),
-            ("전자서명",   lambda: stack.setCurrentIndex(2), "#C8E6C9"),   # 연초록
+            ("견적서작성", lambda: _go(0), "#BBDEFB"),
+            ("RACK구매요청서 작성", lambda: _go(1), "#FFF176"),
+            ("전자서명",   lambda: _go(2), "#C8E6C9"),
         ]
         for label, slot, color in buttons:
             btn = self._nav_btn(label, slot)
@@ -78,6 +83,13 @@ class LeftNav(QWidget):
 # 메인 윈도우
 # ──────────────────────────────────────────────
 class MainWindow(QMainWindow):
+    # 인덱스 → (모듈 클래스명, 클래스 참조 캐시)
+    _PAGE_DEFS = [
+        ("pages", "QuoteBuilderPage"),
+        ("pages", "RackPurchaseRequestPage"),
+        ("pages", "ESignPage"),
+    ]
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("견적/전자서명 통합 시스템")
@@ -89,17 +101,36 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         self.stack = QStackedWidget()
-        self._populate_stack()
+        self._page_cache: dict = {}   # index → QWidget (생성된 페이지)
 
-        self.nav = LeftNav(self.stack, self.reset)
+        # 스택에 빈 플레이스홀더를 먼저 채워 인덱스 유지 (pages 1,2는 첫 탐색 시 지연 생성)
+        for _ in self._PAGE_DEFS:
+            self.stack.addWidget(QWidget())
+
+        self.nav = LeftNav(self.stack, self.reset, self._ensure_page)
         layout.addWidget(self.nav)
         layout.addWidget(self.stack, 1)
 
-    # ── 페이지 채우기 ────────────────────────────
-    def _populate_stack(self) -> None:
-        self.stack.addWidget(QuoteBuilderPage())
-        self.stack.addWidget(RackPurchaseRequestPage())
-        self.stack.addWidget(ESignPage())
+        # 첫 페이지(index 0)는 동기 생성 — 창이 최대화될 때 레이아웃이 올바르게 채워지도록
+        self._ensure_page(0)
+
+    def _ensure_page(self, index: int) -> None:
+        """index 페이지가 아직 생성되지 않았으면 지금 생성해 스택에 교체."""
+        if index in self._page_cache:
+            self.stack.setCurrentIndex(index)
+            return
+        mod_name, cls_name = self._PAGE_DEFS[index]
+        import importlib
+        mod = importlib.import_module(mod_name)
+        cls = getattr(mod, cls_name)
+        page = cls()
+        self._page_cache[index] = page
+        # 플레이스홀더와 교체
+        old = self.stack.widget(index)
+        self.stack.insertWidget(index, page)
+        self.stack.removeWidget(old)
+        old.deleteLater()
+        self.stack.setCurrentIndex(index)
 
     # ── 초기화 ───────────────────────────────────
     def reset(self) -> None:
@@ -109,12 +140,13 @@ class MainWindow(QMainWindow):
                 cur.reset_page()
                 return
             idx = self.stack.currentIndex()
-            while self.stack.count():
-                w = self.stack.widget(0)
-                self.stack.removeWidget(w)
-                w.deleteLater()
-            self._populate_stack()
-            self.stack.setCurrentIndex(max(0, min(idx, self.stack.count() - 1)))
+            # 현재 페이지만 재생성
+            if idx in self._page_cache:
+                old = self._page_cache.pop(idx)
+                self.stack.insertWidget(idx, QWidget())
+                self.stack.removeWidget(old)
+                old.deleteLater()
+            self._ensure_page(idx)
         except Exception as e:
             QMessageBox.critical(self, "초기화 오류", str(e))
 

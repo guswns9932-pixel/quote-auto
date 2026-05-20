@@ -1443,7 +1443,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             item = QListWidgetItem(rel)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
-            if os.path.basename(full).endswith("_갑지.xlsx"):
+            if re.search(r'_갑지(?:_\d+)?\.xlsx$', os.path.basename(full)):
                 item.setBackground(QBrush(QColor(248, 187, 208)))  # 연분홍 — 갑지
             self.list_done.addItem(item)
 

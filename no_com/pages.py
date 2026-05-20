@@ -3088,6 +3088,16 @@ class RackPurchaseRequestPage(QWidget):
         files.pop('xl/calcChain.xml', None)
         names = [n for n in names if n != 'xl/calcChain.xml']
         files, names = RackPurchaseRequestPage._xlsx_remove_external_links(files, names)
+        # 이전 버전 코드가 생성한 손상된 <c> 태그 수리:
+        # 자체종결 셀(/>)이 인접 셀과 합쳐져 속성 중간에 / 가 삽입된 패턴 수정
+        # 예: <c r="B2" s="364"/ t="s"> → <c r="B2" s="364" t="s">
+        for _xml_key in list(files.keys()):
+            if not _xml_key.endswith('.xml'):
+                continue
+            _raw = files[_xml_key].decode('utf-8', errors='replace')
+            _fixed = re.sub(r'(<c\b[^>]*?)"/ ([a-zA-Z])', r'\1" \2', _raw, flags=re.DOTALL)
+            if _fixed != _raw:
+                files[_xml_key] = _fixed.encode('utf-8')
         if strip_all_formulas:
             files = RackPurchaseRequestPage._xlsx_strip_all_formulas(files)
         else:
@@ -3113,9 +3123,9 @@ class RackPurchaseRequestPage(QWidget):
                 f'<sst xmlns="{SS_NS}" count="0" uniqueCount="0"></sst>'
             )
 
-        # 기존 항목 수 파악 (정규식으로 <si> 개수 카운트)
-        uc_m = re.search(r'\buniqueCount="(\d+)"', ss_xml)
-        existing_count = int(uc_m.group(1)) if uc_m else len(re.findall(r'<si\b', ss_xml))
+        # 기존 항목 수: uniqueCount 속성이 아닌 실제 <si> 개수로 계산
+        # (이전 버전 코드가 잘못된 uniqueCount를 저장했을 경우에도 안전하게 동작)
+        existing_count = len(re.findall(r'<si\b', ss_xml))
 
         # 기존 문자열 → 인덱스 맵 (단순 <t>...</t> 패턴만 매핑)
         # enumerate로 실제 <si> 순서 인덱스 사용 (rich text 등 <t> 없는 항목도 인덱스 정확히 유지)

@@ -45,6 +45,11 @@ from widgets import (
 logger = logging.getLogger("QuoteApp")
 
 
+def _natural_key(s: str):
+    """파일명 자연 정렬 키: 숫자 부분을 수치로 비교 (10 < 20 < 100)."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+
+
 def _make_plain_table(cols: int, headers: List[str]) -> QTableWidget:
     t = QTableWidget(0, cols)
     t.setHorizontalHeaderLabels(headers)
@@ -150,6 +155,38 @@ class _GenCoverThread(QThread):
             self.done.emit(e)
 
 
+class _ScrollableErrorDialog(QDialog):
+    """긴 오류 메시지를 스크롤·드래그로 볼 수 있는 오류 다이얼로그."""
+
+    def __init__(self, parent=None, message: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("오류")
+        self.resize(640, 400)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(message)
+        text.setLineWrapMode(QTextEdit.NoWrap)
+        f = text.font()
+        f.setFamily("Consolas")
+        f.setPointSize(9)
+        text.setFont(f)
+        layout.addWidget(text)
+
+        btn = QPushButton("확인")
+        btn.setFixedWidth(80)
+        btn.clicked.connect(self.accept)
+        h = QHBoxLayout()
+        h.addStretch()
+        h.addWidget(btn)
+        layout.addLayout(h)
+
+
 class _BgWorker(QThread):
     """범용 백그라운드 작업 스레드. UI 블로킹 없이 Excel 작업 실행."""
     result = Signal(object)
@@ -188,8 +225,7 @@ class _BgWorker(QThread):
             if on_error:
                 on_error(e)
             else:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(parent, "오류", e)
+                _ScrollableErrorDialog(parent, e).exec()
 
         worker.result.connect(_on_result)
         worker.error.connect(_on_error)
@@ -1407,7 +1443,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             item = QListWidgetItem(rel)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
-            if os.path.basename(full).endswith("_갑지.xlsx"):
+            if re.search(r'_갑지(?:_\d+)?\.xlsx$', os.path.basename(full)):
                 item.setBackground(QBrush(QColor(248, 187, 208)))  # 연분홍 — 갑지
             self.list_done.addItem(item)
 
@@ -1429,6 +1465,49 @@ class _NoScrollComboBox(QComboBox):
     """마우스 스크롤로 값이 바뀌지 않는 QComboBox."""
     def wheelEvent(self, e):
         e.ignore()
+
+
+class _GroupwareLoginDialog(QDialog):
+    """그룹웨어 로그인 계정/비밀번호 입력 다이얼로그."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("그룹웨어 로그인")
+        self.setFixedWidth(340)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        layout = QFormLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        self.id_edit = QLineEdit()
+        self.id_edit.setPlaceholderText("계정")
+        self.id_edit.setMinimumHeight(36)
+
+        self.pw_edit = QLineEdit()
+        self.pw_edit.setPlaceholderText("비밀번호")
+        self.pw_edit.setEchoMode(QLineEdit.Password)
+        self.pw_edit.setMinimumHeight(36)
+
+        layout.addRow("계정", self.id_edit)
+        layout.addRow("비밀번호", self.pw_edit)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("로그인")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+        self.pw_edit.returnPressed.connect(btns.button(QDialogButtonBox.Ok).click)
+
+    def _on_accept(self) -> None:
+        if not self.id_edit.text().strip() or not self.pw_edit.text():
+            QMessageBox.warning(self, "입력 오류", "계정과 비밀번호를 모두 입력하세요.")
+            return
+        self.accept()
+
+    def credentials(self) -> tuple[str, str]:
+        return self.id_edit.text().strip(), self.pw_edit.text()
 
 
 class RackPurchaseRequestPage(QWidget):
@@ -1483,6 +1562,8 @@ class RackPurchaseRequestPage(QWidget):
         self.request_rows: List[Dict[str, Any]] = []
         self._last_generated_folder: Optional[str] = None
         self._matched_rack_row: Optional[List[Any]] = None
+        self._gw_username: str = ""
+        self._gw_password: str = ""
         self._build_ui()
         self._populate_table()
 
@@ -1505,14 +1586,16 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate = QPushButton("요청서 생성")
         self.btn_generate_overseas = QPushButton("국외요청서 생성")
         self.btn_generate_approval = QPushButton("결재상신용 생성")
+        self.btn_approval_submit   = QPushButton("결재상신")
         self.btn_upload_history = QPushButton("발주이력 업로드")
         for btn, color in [
-            (self.btn_load_template, "#C8E6C9"),
-            (self.btn_load_quote, "#BBDEFB"),
-            (self.btn_generate, "#FFF176"),
-            (self.btn_generate_overseas, "#B3E5FC"),
-            (self.btn_generate_approval, "#FFE0B2"),
-            (self.btn_upload_history, "#E1BEE7"),
+            (self.btn_load_template,    "#C8E6C9"),
+            (self.btn_load_quote,       "#BBDEFB"),
+            (self.btn_generate,         "#FFF176"),
+            (self.btn_generate_overseas,"#B3E5FC"),
+            (self.btn_generate_approval,"#FFE0B2"),
+            (self.btn_approval_submit,  "#F8BBD0"),
+            (self.btn_upload_history,   "#E1BEE7"),
         ]:
             btn.setMinimumHeight(42)
             f = btn.font(); f.setPointSize(11); f.setBold(True); btn.setFont(f)
@@ -1567,6 +1650,49 @@ class RackPurchaseRequestPage(QWidget):
         right_v.setContentsMargins(6, 0, 0, 0)
         right_v.setSpacing(4)
 
+        # ── 그룹웨어 로그인 패널 ──────────────────────────────────────────────
+        from PySide6.QtWidgets import QGroupBox, QFormLayout
+        login_box = QGroupBox("그룹웨어 로그인")
+        login_box.setStyleSheet("QGroupBox { font-weight: bold; }")
+        login_box_v = QVBoxLayout(login_box)
+        login_box_v.setSpacing(4)
+
+        # 미로그인 상태 위젯
+        self._login_form_w = QWidget()
+        _lf = QFormLayout(self._login_form_w)
+        _lf.setContentsMargins(0, 0, 0, 0)
+        _lf.setSpacing(4)
+        self._ed_gw_id = QLineEdit()
+        self._ed_gw_id.setPlaceholderText("아이디")
+        self._ed_gw_pw = QLineEdit()
+        self._ed_gw_pw.setPlaceholderText("비밀번호")
+        self._ed_gw_pw.setEchoMode(QLineEdit.Password)
+        self._btn_gw_login = QPushButton("로그인")
+        self._btn_gw_login.setFixedHeight(30)
+        tint_button(self._btn_gw_login, "#C8E6C9")
+        _lf.addRow("ID", self._ed_gw_id)
+        _lf.addRow("PW", self._ed_gw_pw)
+        _lf.addRow("", self._btn_gw_login)
+        self._ed_gw_id.returnPressed.connect(self._btn_gw_login.click)
+        self._ed_gw_pw.returnPressed.connect(self._btn_gw_login.click)
+        login_box_v.addWidget(self._login_form_w)
+
+        # 로그인 완료 상태 위젯 (숨김)
+        self._login_status_w = QWidget()
+        _ls = QHBoxLayout(self._login_status_w)
+        _ls.setContentsMargins(0, 0, 0, 0)
+        self._lbl_gw_user = QLabel("로그인됨: -")
+        self._lbl_gw_user.setStyleSheet("color:#2e7d32; font-weight:bold;")
+        self._btn_gw_logout = QPushButton("로그아웃")
+        self._btn_gw_logout.setFixedHeight(26)
+        tint_button(self._btn_gw_logout, "#FFCDD2")
+        _ls.addWidget(self._lbl_gw_user, 1)
+        _ls.addWidget(self._btn_gw_logout)
+        login_box_v.addWidget(self._login_status_w)
+        self._login_status_w.hide()
+
+        right_v.addWidget(login_box)
+
         req_title_row = QHBoxLayout()
         req_title_lbl = bold_label("생성된 요청서", size=11)
         self.btn_refresh_req_list = QPushButton("새로고침")
@@ -1590,7 +1716,10 @@ class RackPurchaseRequestPage(QWidget):
         self.btn_generate_overseas.clicked.connect(self._generate_overseas_request)
         self.btn_load_quote.clicked.connect(self._load_quote_data)
         self.btn_generate_approval.clicked.connect(self._generate_approval_doc)
+        self.btn_approval_submit.clicked.connect(self._do_approval_submit)
         self.btn_upload_history.clicked.connect(self._upload_order_history)
+        self._btn_gw_login.clicked.connect(self._do_gw_login)
+        self._btn_gw_logout.clicked.connect(self._do_gw_logout)
 
         # UI 렌더링 완료 후 파일 스캔 (블로킹 방지)
         QTimer.singleShot(0, self._refresh_req_list)
@@ -2556,8 +2685,19 @@ class RackPurchaseRequestPage(QWidget):
 
     @staticmethod
     def _xlsx_patch_wb_visibility(wb_bytes: bytes, visible_sheet: str) -> bytes:
-        """workbook.xml에서 visible_sheet 외 모든 시트 veryHidden 처리."""
+        """workbook.xml에서 visible_sheet 외 모든 시트 veryHidden 처리.
+        activeTab도 visible_sheet의 인덱스로 갱신하여 Synap 호환성 확보.
+        """
         xml = wb_bytes.decode('utf-8', errors='replace')
+
+        # visible_sheet의 0-based 인덱스 계산
+        sheet_tags = re.findall(r'<sheet\b[^>]*/>', xml)
+        active_idx = 0
+        for i, tag in enumerate(sheet_tags):
+            nm_m = re.search(r'\bname="([^"]*)"', tag)
+            if nm_m and nm_m.group(1) == visible_sheet:
+                active_idx = i
+                break
 
         def repl(m: re.Match) -> str:
             tag = m.group(0)
@@ -2569,6 +2709,16 @@ class RackPurchaseRequestPage(QWidget):
             return tag
 
         xml = re.sub(r'<sheet\b[^>]*/>', repl, xml)
+
+        # activeTab을 visible_sheet 인덱스로 설정 (Synap이 hidden 시트 렌더 시도 방지)
+        if re.search(r'<workbookView\b', xml):
+            def _set_tab(m: re.Match) -> str:
+                tag = m.group(0)
+                tag = re.sub(r'\bactiveTab="\d+"', f'activeTab="{active_idx}"', tag)
+                if 'activeTab=' not in tag:
+                    tag = re.sub(r'(\s*/?>)$', f' activeTab="{active_idx}"\\1', tag)
+                return tag
+            xml = re.sub(r'<workbookView\b[^>]*/>', _set_tab, xml)
 
         if 'fullCalcOnLoad' not in xml:
             if '<calcPr' in xml:
@@ -2641,7 +2791,8 @@ class RackPurchaseRequestPage(QWidget):
         elif '</sheetData>' in xml:
             xml = xml.replace('</sheetData>', row_xml + '</sheetData>', 1)
         else:
-            xml = re.sub(r'<sheetData\s*/>', f'<sheetData>{row_xml}</sheetData>', xml, count=1)
+            _rxml = row_xml
+            xml = re.sub(r'<sheetData\s*/>', lambda _: f'<sheetData>{_rxml}</sheetData>', xml, count=1)
 
         return xml.encode('utf-8')
 
@@ -2739,21 +2890,18 @@ class RackPurchaseRequestPage(QWidget):
 
                 if val is not None:
                     if has_tstr:
-                        # 문자열 수식 결과 → inlineStr로 변환
-                        body = re.sub(r'<v>.*?</v>',
-                                      f'<is><t>{val}</t></is>', body, flags=re.DOTALL)
-                        return f'<c{clean} t="inlineStr">{body}</c>'
+                        # 문자열 수식 결과 → inlineStr로 완전 재구성 (잔존 요소 없이 깔끔하게)
+                        if val:
+                            return f'<c{clean} t="inlineStr"><is><t>{val}</t></is></c>'
+                        return f'<c{clean.rstrip()}/>'
                     else:
-                        # 숫자/불리언 등 → 타입 없는 숫자 셀 유지
-                        return f'<c{clean}>{body}</c>'
+                        # 숫자/불리언 등 → <v>만 남기고 재구성
+                        return f'<c{clean}><v>{val}</v></c>'
                 else:
                     # 캐시 값 없음 → 빈 셀
-                    stripped = body.strip()
-                    if stripped:
-                        return f'<c{clean}>{stripped}</c>'
                     return f'<c{clean.rstrip()}/>'
 
-            xml = re.sub(r'<c\b[^>]*>.*?</c>', _fix_cell, xml, flags=re.DOTALL)
+            xml = re.sub(r'<c\b[^>]*(?<!/)>.*?</c>', _fix_cell, xml, flags=re.DOTALL)
 
             # ── 자체종결 셀 안전망 ──────────────────────────────────────────
             # <c ... t="str" ... /> 에서 t="str" 제거 (빈 숫자형 셀)
@@ -2772,7 +2920,7 @@ class RackPurchaseRequestPage(QWidget):
 
         # ── 셀 데이터 제거 ──────────────────────────────────────────────────
         xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*/>', '', xml)
-        xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*>.*?</c>', '', xml, flags=re.DOTALL)
+        xml = re.sub(rf'<c\b[^>]*\br="(?:{del_pat})\d+"[^>]*(?<!/)>.*?</c>', '', xml, flags=re.DOTALL)
 
         def _shift_col(col_idx: int) -> int:
             return max(1, col_idx - delete_count)
@@ -2945,6 +3093,16 @@ class RackPurchaseRequestPage(QWidget):
         files.pop('xl/calcChain.xml', None)
         names = [n for n in names if n != 'xl/calcChain.xml']
         files, names = RackPurchaseRequestPage._xlsx_remove_external_links(files, names)
+        # 이전 버전 코드가 생성한 손상된 <c> 태그 수리:
+        # 자체종결 셀(/>)이 인접 셀과 합쳐져 속성 중간에 / 가 삽입된 패턴 수정
+        # 예: <c r="B2" s="364"/ t="s"> → <c r="B2" s="364" t="s">
+        for _xml_key in list(files.keys()):
+            if not _xml_key.endswith('.xml'):
+                continue
+            _raw = files[_xml_key].decode('utf-8', errors='replace')
+            _fixed = re.sub(r'(<c\b[^>]*?)"/ ([a-zA-Z])', r'\1" \2', _raw, flags=re.DOTALL)
+            if _fixed != _raw:
+                files[_xml_key] = _fixed.encode('utf-8')
         if strip_all_formulas:
             files = RackPurchaseRequestPage._xlsx_strip_all_formulas(files)
         else:
@@ -2952,13 +3110,189 @@ class RackPurchaseRequestPage(QWidget):
         return files, names
 
     @staticmethod
-    def _xlsx_save(path: str, files: dict, names: list) -> None:
-        """(files, names)를 xlsx ZIP으로 저장."""
+    def _xlsx_expand_shared_strings(files: dict) -> dict:
+        """모든 t="s" 셀을 인라인 문자열(inlineStr)로 펼침.
+
+        손상된 sharedStrings.xml(이전 버그로 인덱스 오류)을 가진 파일을 로드할 때
+        기존 t="s" 참조를 실제 문자열로 교체하여 인덱스 오류를 원천 제거.
+        이후 _xlsx_inline_to_shared 가 깨끗한 상태에서 재구성함.
+        """
+        SS_KEY = 'xl/sharedStrings.xml'
+        if SS_KEY not in files:
+            return files
+
+        ss_xml = files[SS_KEY].decode('utf-8', errors='replace')
+
+        # 인덱스 → 텍스트 맵 구성 (단순 <t> 내용만 추출; rich-text는 첫 <t>로 대체)
+        idx_to_str: Dict[int, str] = {}
+        for idx, m in enumerate(re.finditer(r'<si\b[^>]*>(.*?)</si>', ss_xml, re.DOTALL)):
+            tm = re.search(r'<t[^>]*>(.*?)</t>', m.group(1), re.DOTALL)
+            if tm:
+                raw = tm.group(1)
+                plain = (raw.replace('&amp;', '&').replace('&lt;', '<')
+                         .replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'"))
+                idx_to_str[idx] = plain
+
+        def _expand(m: re.Match) -> str:
+            full = m.group(0)
+            if 't="s"' not in full:
+                return full
+            gt = full.index('>')
+            attrs = full[2:gt]
+            body  = full[gt + 1:-4]
+            vm = re.search(r'<v>(\d+)</v>', body)
+            if not vm:
+                return full
+            si_idx = int(vm.group(1))
+            text = idx_to_str.get(si_idx, '')
+            new_attrs = re.sub(r'\s*\bt="s"', '', attrs) + ' t="inlineStr"'
+            if not text:
+                return f'<c{re.sub(r" t=\"inlineStr\"", "", new_attrs).rstrip()}/>'
+            esc = (text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+            return f'<c{new_attrs}><is><t>{esc}</t></is></c>'
+
+        for name in list(files.keys()):
+            if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
+                continue
+            xml = files[name].decode('utf-8', errors='replace')
+            new_xml = re.sub(r'<c\b[^>]*(?<!/)>.*?</c>', _expand, xml, flags=re.DOTALL)
+            if new_xml != xml:
+                files[name] = new_xml.encode('utf-8')
+
+        return files
+
+    @staticmethod
+    def _xlsx_inline_to_shared(files: dict) -> dict:
+        """시트의 t="inlineStr" 셀을 sharedStrings 방식으로 변환.
+        Synap Document Viewer 등 inlineStr을 지원하지 않는 뷰어와의 호환성.
+        """
         import zipfile as _zf
-        with _zf.ZipFile(path, 'w', _zf.ZIP_DEFLATED) as zf:
-            for name in names:
-                if name in files:
-                    zf.writestr(name, files[name])
+
+        SS_KEY = 'xl/sharedStrings.xml'
+        SS_NS  = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+
+        # 기존 sharedStrings 읽기
+        if SS_KEY in files:
+            ss_xml = files[SS_KEY].decode('utf-8', errors='replace')
+        else:
+            ss_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                f'<sst xmlns="{SS_NS}" count="0" uniqueCount="0"></sst>'
+            )
+
+        # 기존 항목 수: uniqueCount 속성이 아닌 실제 <si> 개수로 계산
+        # (이전 버전 코드가 잘못된 uniqueCount를 저장했을 경우에도 안전하게 동작)
+        existing_count = len(re.findall(r'<si\b', ss_xml))
+
+        # 기존 문자열 → 인덱스 맵 (단순 <t>...</t> 패턴만 매핑)
+        # enumerate로 실제 <si> 순서 인덱스 사용 (rich text 등 <t> 없는 항목도 인덱스 정확히 유지)
+        str_to_idx: Dict[str, int] = {}
+        for real_idx, m in enumerate(re.finditer(r'<si\b[^>]*>(.*?)</si>', ss_xml, flags=re.DOTALL)):
+            tm = re.search(r'<t[^>]*>(.*?)</t>', m.group(1), re.DOTALL)
+            if tm:
+                raw = tm.group(1)
+                plain = (raw.replace('&amp;', '&').replace('&lt;', '<')
+                         .replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'"))
+                str_to_idx[plain] = real_idx
+
+        # 새로 추가할 항목만 별도 리스트에 쌓음 (기존 항목은 절대 삭제하지 않음)
+        new_strings: list = []
+        new_str_to_idx: Dict[str, int] = {}
+
+        def _get_idx(plain: str) -> int:
+            if plain in str_to_idx:
+                return str_to_idx[plain]
+            if plain not in new_str_to_idx:
+                idx = existing_count + len(new_strings)
+                new_str_to_idx[plain] = idx
+                esc = (plain.replace('&', '&amp;').replace('<', '&lt;')
+                       .replace('>', '&gt;'))
+                new_strings.append(f'<si><t>{esc}</t></si>')
+            return new_str_to_idx[plain]
+
+        changed_any = False
+        for name in list(files.keys()):
+            if not re.match(r'xl/worksheets/sheet\d+\.xml$', name):
+                continue
+            xml = files[name].decode('utf-8', errors='replace')
+            changed = [False]
+
+            def _conv(m: re.Match, _ch=changed) -> str:
+                full = m.group(0)
+                if 't="inlineStr"' not in full:
+                    return full
+                gt = full.index('>')
+                attrs = full[2:gt]
+                body  = full[gt + 1:-4]
+                tm = re.search(r'<is>.*?<t[^>]*>(.*?)</t>.*?</is>', body, re.DOTALL)
+                if not tm:
+                    return full
+                raw = tm.group(1)
+                plain = (raw.replace('&amp;', '&').replace('&lt;', '<')
+                         .replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'"))
+                idx = _get_idx(plain)
+                new_attrs = re.sub(r'\s*t="inlineStr"', '', attrs) + ' t="s"'
+                _ch[0] = True
+                return f'<c{new_attrs}><v>{idx}</v></c>'
+
+            new_xml = re.sub(r'<c\b[^>]*(?<!/)>.*?</c>', _conv, xml, flags=re.DOTALL)
+            if changed[0]:
+                files[name] = new_xml.encode('utf-8')
+                changed_any = True
+
+        if changed_any:
+            total = existing_count + len(new_strings)
+            ss_xml = re.sub(r'\bcount="\d+"', f'count="{total}"', ss_xml)
+            ss_xml = re.sub(r'\buniqueCount="\d+"', f'uniqueCount="{total}"', ss_xml)
+            # 기존 <si> 항목은 절대 삭제하지 않고, 새 항목만 뒤에 추가
+            if new_strings:
+                ss_xml = ss_xml.replace('</sst>', ''.join(new_strings) + '</sst>')
+            files[SS_KEY] = ss_xml.encode('utf-8')
+
+            # Content_Types에 sharedStrings 없으면 추가
+            CT_KEY = '[Content_Types].xml'
+            if CT_KEY in files:
+                ct = files[CT_KEY].decode('utf-8', errors='replace')
+                if 'sharedStrings' not in ct:
+                    override = (
+                        '<Override PartName="/xl/sharedStrings.xml"'
+                        ' ContentType="application/vnd.openxmlformats-officedocument'
+                        '.spreadsheetml.sharedStrings+xml"/>'
+                    )
+                    ct = ct.replace('</Types>', override + '</Types>')
+                    files[CT_KEY] = ct.encode('utf-8')
+
+            # xl/_rels/workbook.xml.rels에 sharedStrings 관계 없으면 추가
+            WB_RELS = 'xl/_rels/workbook.xml.rels'
+            if WB_RELS in files:
+                wr = files[WB_RELS].decode('utf-8', errors='replace')
+                if 'sharedStrings' not in wr:
+                    rel = (
+                        '<Relationship Id="rIdSS" '
+                        'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        'relationships/sharedStrings" '
+                        'Target="sharedStrings.xml"/>'
+                    )
+                    wr = wr.replace('</Relationships>', rel + '</Relationships>')
+                    files[WB_RELS] = wr.encode('utf-8')
+
+        return files
+
+    @staticmethod
+    def _xlsx_save(path: str, files: dict, names: list) -> None:
+        """(files, names)를 xlsx ZIP으로 저장.
+        OOXML 스펙에 따라 [Content_Types].xml 은 ZIP_STORED(비압축) 필수.
+        Synap 등 엄격한 뷰어는 이를 압축하면 미리보기 오류를 낸다.
+        """
+        import zipfile as _zf
+        # [Content_Types].xml 을 항상 첫 번째로, 비압축으로 기록
+        ordered = ['[Content_Types].xml'] + [n for n in names if n != '[Content_Types].xml']
+        with _zf.ZipFile(path, 'w') as zf:
+            for name in ordered:
+                if name not in files:
+                    continue
+                ct = _zf.ZIP_STORED if name == '[Content_Types].xml' else _zf.ZIP_DEFLATED
+                zf.writestr(name, files[name], compress_type=ct)
 
     @staticmethod
     def _xlsx_collect_row_styles(sheet_xml: str, row_num: int) -> Dict[str, str]:
@@ -3039,6 +3373,10 @@ class RackPurchaseRequestPage(QWidget):
             except Exception as e:
                 logger.warning("RACK발주양식 시트 패치 실패: %s", e)
 
+        # 기존 t="s" 셀을 모두 inlineStr로 펼침 (손상된 sharedStrings 인덱스 제거)
+        files = self._xlsx_expand_shared_strings(files)
+        # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
+        files = self._xlsx_inline_to_shared(files)
         self._xlsx_save(path, files, names)
 
 
@@ -3108,7 +3446,6 @@ class RackPurchaseRequestPage(QWidget):
             files[rack_file] = self._xlsx_delete_leading_cols(files[rack_file], 2)
             files = self._xlsx_shift_drawing_cols(files, rack_file, 2)
 
-            # 열 숨기기 전체 해제 (<col hidden="1"> 속성 제거)
             sheet_str = files[rack_file].decode('utf-8', errors='replace')
             sheet_str = re.sub(r'(<col\b[^>]*?)\s+hidden="1"', r'\1', sheet_str)
             files[rack_file] = sheet_str.encode('utf-8')
@@ -3121,6 +3458,119 @@ class RackPurchaseRequestPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "생성 오류", f"결재상신용 생성 중 오류:\n{e}")
             logger.error("결재상신용 생성 오류", exc_info=True)
+
+    # ── 그룹웨어 로그인 관리 ──────────────────────────────────────────────────
+    def _do_gw_login(self) -> None:
+        uid = self._ed_gw_id.text().strip()
+        pwd = self._ed_gw_pw.text().strip()
+        if not uid or not pwd:
+            QMessageBox.warning(self, "입력 오류", "아이디와 비밀번호를 입력해 주세요.")
+            return
+
+        import approval_auto as _aa
+
+        self._btn_gw_login.setEnabled(False)
+        self._btn_gw_login.setText("확인 중…")
+
+        def _check(_):
+            return _aa.check_login(uid, pwd)
+
+        def _on_done(result):
+            success, msg = result
+            self._btn_gw_login.setEnabled(True)
+            self._btn_gw_login.setText("로그인")
+            if success:
+                self._gw_username = uid
+                self._gw_password = pwd
+                self._lbl_gw_user.setText(f"로그인됨: {uid}")
+                self._login_form_w.hide()
+                self._login_status_w.show()
+            else:
+                QMessageBox.warning(self, "로그인 실패", f"로그인 실패\n\n{msg}")
+
+        _BgWorker.run_with_progress(
+            self, "로그인 확인 중…",
+            _check, None,
+            on_result=_on_done,
+        )
+
+    def _do_gw_logout(self) -> None:
+        self._gw_username = ""
+        self._gw_password = ""
+        self._ed_gw_id.clear()
+        self._ed_gw_pw.clear()
+        self._login_status_w.hide()
+        self._login_form_w.show()
+
+    # ── 결재상신 자동화 ────────────────────────────────────────────────────────
+    def _do_approval_submit(self) -> None:
+        """결재상신용 xlsx를 선택 → 전자결재 시스템에 자동으로 구매요청서(NPN) 결재상신."""
+        start_dir = self._last_generated_folder or exe_dir()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "결재상신할 RACK 구매요청서 선택", start_dir, "Excel Files (*.xlsx)"
+        )
+        if not paths:
+            return
+
+        # selenium/webdriver-manager 설치 확인
+        try:
+            import selenium  # noqa: F401
+        except ImportError:
+            QMessageBox.critical(
+                self, "패키지 없음",
+                "결재상신 기능에는 selenium 패키지가 필요합니다.\n\n"
+                "pip install selenium webdriver-manager\n\n"
+                "설치 후 프로그램을 재시작하세요."
+            )
+            return
+
+        import approval_auto as _aa
+
+        if not self._gw_username or not self._gw_password:
+            QMessageBox.warning(self, "로그인 필요", "먼저 우측 패널에서 그룹웨어 로그인을 해주세요.")
+            return
+        username, password = self._gw_username, self._gw_password
+
+        # 각 파일에 대해 순서대로 결재상신 (파일이 여러 개면 확인)
+        if len(paths) > 1:
+            reply = QMessageBox.question(
+                self, "다중 파일",
+                f"{len(paths)}개 파일에 대해 순서대로 결재상신을 진행합니다.\n"
+                "계속하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        def _run_all(file_paths):
+            results = []
+            for fp in file_paths:
+                try:
+                    data = _aa.read_rack_row2(fp)
+                    fname = os.path.splitext(os.path.basename(fp))[0]
+                    _aa.run_approval(
+                        xlsx_path    = fp,
+                        title        = fname,
+                        pr_no        = data["pr_no"],
+                        sales_person = data["sales_person"],
+                        line         = data["line"],
+                        process      = data["process"],
+                        equipment    = data["equipment"],
+                        equip_model  = data["equip_model"],
+                        remark       = data["remark"],
+                        po_no        = "-",
+                        username     = username,
+                        password     = password,
+                    )
+                    results.append(f"✅ {fname}")
+                except Exception as e:
+                    results.append(f"❌ {os.path.basename(fp)}: {e}")
+            return results
+
+        _BgWorker.run_with_progress(
+            self, "결재상신 진행 중… (Chrome이 자동으로 실행됩니다)",
+            _run_all, paths,
+        )
 
 
 
@@ -3217,7 +3667,7 @@ class ESignPage(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, "엑셀 선택(다중)", "", "Excel Files (*.xlsx)")
         if not paths:
             return
-        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, os.path.basename(p).lower()))
+        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, _natural_key(os.path.basename(p))))
         base = os.path.commonpath(paths)
         if os.path.isfile(base):
             base = os.path.dirname(base)
@@ -3408,12 +3858,12 @@ class ESignPage(QWidget):
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
                 final_pm.save(buf, "JPEG", 45); buf.close()
 
-                # 고정 A4 페이지, 이미지를 비율 유지하며 중앙 배치
+                # 고정 A4 페이지, 이미지를 비율 유지하며 중앙+상단 배치
                 page = final.new_page(width=A4_W, height=A4_H)
                 scale = min(A4_W / max(1, iw), A4_H / max(1, ih))
                 pw, ph = iw * scale, ih * scale
                 x0 = (A4_W - pw) / 2
-                y0 = (A4_H - ph) / 2
+                y0 = 0.0  # 상단 정렬
                 page.insert_image(fitz.Rect(x0, y0, x0 + pw, y0 + ph), stream=bytes(ba))
 
         final.save(out, deflate=True, garbage=4); final.close()

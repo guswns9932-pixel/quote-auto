@@ -3370,6 +3370,24 @@ class RackPurchaseRequestPage(QWidget):
 
             # inlineStr → sharedStrings 변환 (Synap 미리보기 호환)
             files = self._xlsx_inline_to_shared(files)
+
+            # ── XML 유효성 검사 (디버그) ─────────────────────────────────────
+            import xml.etree.ElementTree as _ET
+            for _name, _content in files.items():
+                if not _name.endswith('.xml'):
+                    continue
+                try:
+                    _ET.fromstring(_content)
+                except _ET.ParseError as _pe:
+                    _ln, _col = _pe.position
+                    _s = _content.decode('utf-8', errors='replace')
+                    _start = max(0, _col - 80)
+                    _end   = min(len(_s), _col + 80)
+                    logger.error("[XML오류] %s @ L%d:C%d\n앞: %r\n뒤: %r",
+                                 _name, _ln, _col,
+                                 _s[_start:_col], _s[_col:_end])
+            # ── /XML 유효성 검사 ─────────────────────────────────────────────
+
             self._xlsx_save(out_path, files, names)
 
             self._refresh_req_list()

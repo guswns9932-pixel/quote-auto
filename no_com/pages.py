@@ -1460,66 +1460,77 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
         """파일 경로에서 (설비호기, 표시레이블) 추출.
 
-        표시레이블 형식: 라인_공정_설비호기
-        설비호기를 식별할 수 없는 파일(갑지 등)은 (None, '') 반환.
+        반환값:
+        - (None, '')    : 패턴 불일치 → 목록에서 제외
+        - ('', label)   : 갑지 파일  → label 끝이 '_갑지', 붉은색으로 표시
+        - (tool, label) : 일반 견적서 → 라인_공정_설비호기 형식
         """
         fn = os.path.basename(full_path)
         if not fn.endswith('.xlsx'):
             return None, ""
-        stem = fn[:-5]
+        stem   = fn[:-5]
+        folder = os.path.basename(os.path.dirname(full_path))
 
-        # 갑지 파일 제외
+        # ── 갑지: tool='' 로 반환해 붉은색 음영 처리 신호 ───────────
         if re.search(r'_갑지(?:_\d+)?$', stem):
-            return None, ""
+            m_dom = re.match(r'^\d{6}_LOT베큠_(.+)$', folder)
+            if m_dom:
+                lp_parts = m_dom.group(1).split('_')
+                lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else m_dom.group(1)
+                return "", f"{lineproc}_갑지"
+            m_cn = re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
+            if m_cn:
+                return "", f"중국_{m_cn.group(1)}_갑지"
+            return "", "갑지"
 
-        # 미국 Quotation: ..._{tool}_Quotation
+        # ── 미국 Quotation: ..._{tool}_Quotation ─────────────────────
         m_us = re.search(r'_([^_]+)_Quotation$', stem)
         if m_us:
-            tool   = m_us.group(1)
-            folder = os.path.basename(os.path.dirname(full_path))
-            mf     = re.match(r'^\d{6}_미국_(.+)$', folder)
-            prefix = mf.group(1) if mf else "미국"
-            return tool, f"미국_{prefix}_{tool}"
+            tool = m_us.group(1)
+            mf   = re.match(r'^\d{6}_미국_(.+)$', folder)
+            return tool, f"미국_{mf.group(1) if mf else '미국'}_{tool}"
 
-        # 국내·중국: 마지막 _구분자 이후 = 설비호기
+        # ── 국내·중국: 마지막 _구분자 이후 = 설비호기 ───────────────
         parts = stem.split('_')
         tool  = parts[-1] if parts else ""
         if not tool:
             return None, ""
 
-        folder = os.path.basename(os.path.dirname(full_path))
-
-        # 국내: {ymd}_LOT베큠_{lineproc}_{investor} 폴더
-        # investor 에는 '_' 가 없으므로 폴더명 끝 '_' 구분 마지막 부분 제거 → lineproc
         m_dom = re.match(r'^\d{6}_LOT베큠_(.+)$', folder)
         if m_dom:
-            lp_inv   = m_dom.group(1)
-            lp_parts = lp_inv.split('_')
-            lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else lp_inv
+            lp_parts = m_dom.group(1).split('_')
+            lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else m_dom.group(1)
             return tool, f"{lineproc}_{tool}"
 
-        # 중국: {ymd}_중국_SCS_{line} 폴더
         m_cn = re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
         if m_cn:
             return tool, f"중국_{m_cn.group(1)}_{tool}"
 
-        # 그 외: 설비호기만 표시
         return tool, tool
 
     def _apply_list_filter(self) -> None:
         """설비호기 필터 텍스트에 맞게 list_done을 실시간 갱신한다.
-        설비호기를 추출할 수 없는 파일(갑지 등)은 항상 제외된다."""
+
+        - 패턴 불일치 파일(tool=None): 항상 제외
+        - 동일 파일명 PDF 존재 시: 제외
+        - 갑지(tool=''): 붉은색 음영으로 표시, 필터 대상에 포함
+        """
         keyword = self.edit_list_filter.text().strip().lower()
         self.list_done.clear()
         for _, full in self._list_all_files:
             tool, label = self._parse_quote_label(full)
-            if tool is None:            # 설비호기 없음 → 표시 제외
+            if tool is None:
+                continue
+            # 동일 파일명 PDF가 있으면 제외
+            if os.path.isfile(full[:-5] + ".pdf"):
                 continue
             if keyword and keyword not in label.lower():
                 continue
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
+            if tool == "":  # 갑지
+                item.setBackground(QBrush(QColor(255, 153, 153)))  # 붉은색 음영
             self.list_done.addItem(item)
 
     def _open_done(self, item: QListWidgetItem) -> None:

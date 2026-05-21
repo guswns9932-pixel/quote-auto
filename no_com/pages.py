@@ -1442,18 +1442,34 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self.list_done.scrollToTop()
 
     def _refresh_quote_list(self) -> None:
-        """견적서 폴더를 스캔하여 파일 목록을 갱신하고 필터를 적용한다."""
+        """견적서 폴더를 스캔하여 파일 목록을 갱신하고 필터를 적용한다.
+
+        정렬 규칙:
+        1. 폴더를 '가장 최근 파일의 mtime' 기준으로 내림차순 (최신 폴더 최상단)
+        2. 같은 폴더 내 파일은 mtime 내림차순으로 묶어서 배치
+        """
         root = os.path.join(exe_dir(), "견적서")
         self._list_all_files = []
         if os.path.isdir(root):
-            files: List[Tuple[float, str]] = []
+            folder_files: Dict[str, List[Tuple[float, str]]] = {}
             for dirpath, _, filenames in os.walk(root):
                 for fn in filenames:
                     if fn.endswith(".xlsx") and not fn.startswith("~$"):
                         full = os.path.join(dirpath, fn)
-                        files.append((os.path.getmtime(full), full))
-            files.sort(reverse=True)
-            self._list_all_files = files
+                        folder_files.setdefault(dirpath, []).append(
+                            (os.path.getmtime(full), full)
+                        )
+            # 폴더 내 파일: mtime 내림차순
+            for lst in folder_files.values():
+                lst.sort(reverse=True)
+            # 폴더 순서: 폴더 내 최신 파일의 mtime 내림차순
+            sorted_folders = sorted(
+                folder_files,
+                key=lambda d: folder_files[d][0][0],  # 이미 정렬됐으므로 [0]이 최신
+                reverse=True,
+            )
+            for d in sorted_folders:
+                self._list_all_files.extend(folder_files[d])
         self._apply_list_filter()
 
     @staticmethod

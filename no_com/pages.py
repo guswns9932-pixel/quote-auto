@@ -1475,9 +1475,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if re.search(r'_갑지(?:_\d+)?$', stem):
             m_dom = re.match(r'^\d{6}_LOT베큠_(.+)$', folder)
             if m_dom:
-                lp_parts = m_dom.group(1).split('_')
-                lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else m_dom.group(1)
-                return "", f"{lineproc}_갑지"
+                return "", f"{m_dom.group(1)}_갑지"   # 라인_공정_투자자_갑지
             m_cn = re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
             if m_cn:
                 return "", f"중국_{m_cn.group(1)}_갑지"

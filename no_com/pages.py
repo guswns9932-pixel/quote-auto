@@ -1456,21 +1456,70 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self._list_all_files = files
         self._apply_list_filter()
 
+    @staticmethod
+    def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
+        """파일 경로에서 (설비호기, 표시레이블) 추출.
+
+        표시레이블 형식: 라인_공정_설비호기
+        설비호기를 식별할 수 없는 파일(갑지 등)은 (None, '') 반환.
+        """
+        fn = os.path.basename(full_path)
+        if not fn.endswith('.xlsx'):
+            return None, ""
+        stem = fn[:-5]
+
+        # 갑지 파일 제외
+        if re.search(r'_갑지(?:_\d+)?$', stem):
+            return None, ""
+
+        # 미국 Quotation: ..._{tool}_Quotation
+        m_us = re.search(r'_([^_]+)_Quotation$', stem)
+        if m_us:
+            tool   = m_us.group(1)
+            folder = os.path.basename(os.path.dirname(full_path))
+            mf     = re.match(r'^\d{6}_미국_(.+)$', folder)
+            prefix = mf.group(1) if mf else "미국"
+            return tool, f"미국_{prefix}_{tool}"
+
+        # 국내·중국: 마지막 _구분자 이후 = 설비호기
+        parts = stem.split('_')
+        tool  = parts[-1] if parts else ""
+        if not tool:
+            return None, ""
+
+        folder = os.path.basename(os.path.dirname(full_path))
+
+        # 국내: {ymd}_LOT베큠_{lineproc}_{investor} 폴더
+        # investor 에는 '_' 가 없으므로 폴더명 끝 '_' 구분 마지막 부분 제거 → lineproc
+        m_dom = re.match(r'^\d{6}_LOT베큠_(.+)$', folder)
+        if m_dom:
+            lp_inv   = m_dom.group(1)
+            lp_parts = lp_inv.split('_')
+            lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else lp_inv
+            return tool, f"{lineproc}_{tool}"
+
+        # 중국: {ymd}_중국_SCS_{line} 폴더
+        m_cn = re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
+        if m_cn:
+            return tool, f"중국_{m_cn.group(1)}_{tool}"
+
+        # 그 외: 설비호기만 표시
+        return tool, tool
+
     def _apply_list_filter(self) -> None:
-        """설비호기 필터 텍스트에 맞게 list_done을 실시간 갱신한다."""
+        """설비호기 필터 텍스트에 맞게 list_done을 실시간 갱신한다.
+        설비호기를 추출할 수 없는 파일(갑지 등)은 항상 제외된다."""
         keyword = self.edit_list_filter.text().strip().lower()
-        root = os.path.join(exe_dir(), "견적서")
         self.list_done.clear()
         for _, full in self._list_all_files:
-            fn = os.path.basename(full)
-            if keyword and keyword not in fn.lower():
+            tool, label = self._parse_quote_label(full)
+            if tool is None:            # 설비호기 없음 → 표시 제외
                 continue
-            rel = os.path.relpath(full, root)
-            item = QListWidgetItem(rel)
+            if keyword and keyword not in label.lower():
+                continue
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
-            if re.search(r'_갑지(?:_\d+)?\.xlsx$', fn):
-                item.setBackground(QBrush(QColor(248, 187, 208)))  # 연분홍 — 갑지
             self.list_done.addItem(item)
 
     def _open_done(self, item: QListWidgetItem) -> None:

@@ -629,6 +629,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._tpl_thread    : Optional[_TemplateLoaderThread] = None
         self._gen_qt_thread : Optional[_GenQuoteThread]       = None
         self._gen_cv_thread : Optional[_GenCoverThread]       = None
+        self._list_all_files: List[Tuple[float, str]]          = []
 
         self._build_ui()
         self._ensure_total()
@@ -806,16 +807,31 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _build_step7(self) -> QFrame:
         frame = QFrame()
         frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(260)
-        v = QVBoxLayout(frame); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(8)
+        v = QVBoxLayout(frame); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(6)
+
         title_row = QHBoxLayout()
         lbl = bold_label("견적서LIST", size=12)
-        lbl.setFixedHeight(32)
+        lbl.setFixedHeight(28)
         lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn_refresh = QPushButton("새로고침")
         btn_refresh.setFixedHeight(24)
         btn_refresh.clicked.connect(self._refresh_quote_list)
         title_row.addWidget(lbl); title_row.addWidget(btn_refresh)
         v.addLayout(title_row)
+
+        # ── 설비호기 실시간 필터 ──────────────────────────────────────
+        filter_row = QHBoxLayout(); filter_row.setSpacing(6)
+        filter_lbl = QLabel("설비호기:")
+        filter_lbl.setFixedWidth(52)
+        self.edit_list_filter = QLineEdit()
+        self.edit_list_filter.setPlaceholderText("설비호기 입력 → 실시간 필터")
+        self.edit_list_filter.setFixedHeight(24)
+        self.edit_list_filter.setClearButtonEnabled(True)
+        self.edit_list_filter.textChanged.connect(self._apply_list_filter)
+        filter_row.addWidget(filter_lbl)
+        filter_row.addWidget(self.edit_list_filter)
+        v.addLayout(filter_row)
+
         self.list_done = QListWidget()
         self.list_done.itemDoubleClicked.connect(self._open_done)
         v.addWidget(self.list_done, 1)
@@ -1426,24 +1442,34 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self.list_done.scrollToTop()
 
     def _refresh_quote_list(self) -> None:
-        """견적서 폴더를 스캔하여 LIST를 최신순으로 갱신."""
+        """견적서 폴더를 스캔하여 파일 목록을 갱신하고 필터를 적용한다."""
+        root = os.path.join(exe_dir(), "견적서")
+        self._list_all_files = []
+        if os.path.isdir(root):
+            files: List[Tuple[float, str]] = []
+            for dirpath, _, filenames in os.walk(root):
+                for fn in filenames:
+                    if fn.endswith(".xlsx") and not fn.startswith("~$"):
+                        full = os.path.join(dirpath, fn)
+                        files.append((os.path.getmtime(full), full))
+            files.sort(reverse=True)
+            self._list_all_files = files
+        self._apply_list_filter()
+
+    def _apply_list_filter(self) -> None:
+        """설비호기 필터 텍스트에 맞게 list_done을 실시간 갱신한다."""
+        keyword = self.edit_list_filter.text().strip().lower()
         root = os.path.join(exe_dir(), "견적서")
         self.list_done.clear()
-        if not os.path.isdir(root):
-            return
-        files = []
-        for dirpath, _, filenames in os.walk(root):
-            for fn in filenames:
-                if fn.endswith(".xlsx") and not fn.startswith("~$"):
-                    full = os.path.join(dirpath, fn)
-                    files.append((os.path.getmtime(full), full))
-        files.sort(reverse=True)
-        for _, full in files:
+        for _, full in self._list_all_files:
+            fn = os.path.basename(full)
+            if keyword and keyword not in fn.lower():
+                continue
             rel = os.path.relpath(full, root)
             item = QListWidgetItem(rel)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
-            if re.search(r'_갑지(?:_\d+)?\.xlsx$', os.path.basename(full)):
+            if re.search(r'_갑지(?:_\d+)?\.xlsx$', fn):
                 item.setBackground(QBrush(QColor(248, 187, 208)))  # 연분홍 — 갑지
             self.list_done.addItem(item)
 

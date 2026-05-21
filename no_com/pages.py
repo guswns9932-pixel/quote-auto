@@ -3427,6 +3427,7 @@ class RackPurchaseRequestPage(QWidget):
 
             wb_bytes   = files.get('xl/workbook.xml', b'')
             rels_bytes = files.get('xl/_rels/workbook.xml.rels', b'')
+            files['xl/workbook.xml'] = self._xlsx_patch_wb_visibility(wb_bytes, 'RACK발주양식')
             rack_file  = self._xlsx_find_sheet_file(wb_bytes, rels_bytes, 'RACK발주양식')
 
             if not rack_file or rack_file not in files:
@@ -3450,6 +3451,8 @@ class RackPurchaseRequestPage(QWidget):
             sheet_str = re.sub(r'(<col\b[^>]*?)\s+hidden="1"', r'\1', sheet_str)
             files[rack_file] = sheet_str.encode('utf-8')
 
+            files = self._xlsx_expand_shared_strings(files)
+            files = self._xlsx_inline_to_shared(files)
             self._xlsx_save(out_path, files, names)
 
             self._refresh_req_list()

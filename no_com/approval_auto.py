@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import logging
+import threading
 from typing import Callable, Dict, Optional
 
 logger = logging.getLogger("QuoteApp.approval")
@@ -732,3 +733,40 @@ def read_rack_row2(xlsx_path: str) -> Dict[str, str]:
     }
     wb.close()
     return result
+
+
+def start_window_monitor() -> None:
+    """활성 드라이버의 창을 감시하여 어느 창이든 닫히면 전체 브라우저를 종료한다.
+
+    모든 파일 처리가 끝난 뒤 한 번만 호출해야 한다.
+    중간에 호출하면 다음 파일 처리를 위해 팝업을 닫는 타이밍에 오탐이 발생한다.
+    """
+    global _active_driver
+    driver = _active_driver
+    if driver is None:
+        return
+
+    def _watch() -> None:
+        global _active_driver
+        try:
+            snapshot = len(driver.window_handles)
+        except Exception:
+            return
+        while True:
+            time.sleep(1)
+            try:
+                current = len(driver.window_handles)
+                if current < snapshot:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    if _active_driver is driver:
+                        _active_driver = None
+                    return
+                snapshot = current
+            except Exception:
+                return
+
+    threading.Thread(target=_watch, daemon=True).start()
+    logger.info("창 닫힘 감시 스레드 시작 (창 수: %d)", len(driver.window_handles))

@@ -3572,9 +3572,15 @@ class RackPurchaseRequestPage(QWidget):
                     results.append(f"❌ {os.path.basename(fp)}: {e}")
             return results
 
+        def _on_done(results):
+            _aa.start_window_monitor()
+            msg = "\n".join(results) if results else "완료"
+            QMessageBox.information(self, "결재상신 결과", msg)
+
         _BgWorker.run_with_progress(
             self, "결재상신 진행 중… (Chrome이 자동으로 실행됩니다)",
             _run_all, paths,
+            on_result=_on_done,
         )
 
 

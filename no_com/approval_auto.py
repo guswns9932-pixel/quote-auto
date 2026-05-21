@@ -539,14 +539,24 @@ def run_approval(
         ))
         driver.execute_script("arguments[0].click();", confirm_btn)
 
-        # ── STEP 5: 팝업 창 전환 ────────────────────────────────────────────
-        _log("⑤ 팝업 창 대기 중…")
+        # ── STEP 5: 새 창/탭 열림 또는 현재 창 내 페이지 전환 감지 ──────────
+        _log("⑤ 결재 양식 창 대기 중…")
         main_window = driver.current_window_handle
-        wait.until(lambda d: len(d.window_handles) > 1)
-        popup_handle = next(
-            h for h in driver.window_handles if h != main_window
-        )
-        driver.switch_to.window(popup_handle)
+        url_before = driver.current_url
+
+        popup_opened = False
+        for _ in range(15):
+            time.sleep(1)
+            if len(driver.window_handles) > 1:
+                popup_opened = True
+                break
+            if driver.current_url != url_before:
+                break
+
+        if popup_opened:
+            popup_handle = next(h for h in driver.window_handles if h != main_window)
+            driver.switch_to.window(popup_handle)
+
         driver.set_window_position(100, 50)
         driver.set_window_size(1400, 900)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))

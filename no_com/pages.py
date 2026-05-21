@@ -3508,12 +3508,7 @@ class RackPurchaseRequestPage(QWidget):
     # ── 결재상신 자동화 ────────────────────────────────────────────────────────
     def _do_approval_submit(self) -> None:
         """결재상신용 xlsx를 선택 → 전자결재 시스템에 자동으로 구매요청서(NPN) 결재상신."""
-        start_dir = self._last_generated_folder or exe_dir()
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "결재상신할 RACK 구매요청서 선택", start_dir, "Excel Files (*.xlsx)"
-        )
-        if not paths:
-            return
+        # 선행 조건 검사를 파일 선택 전에 수행 (순서 중요: 안내 없이 조용히 종료되는 것 방지)
 
         # selenium/webdriver-manager 설치 확인
         try:
@@ -3531,6 +3526,13 @@ class RackPurchaseRequestPage(QWidget):
 
         if not self._gw_username or not self._gw_password:
             QMessageBox.warning(self, "로그인 필요", "먼저 우측 패널에서 그룹웨어 로그인을 해주세요.")
+            return
+
+        start_dir = self._last_generated_folder or exe_dir()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "결재상신할 RACK 구매요청서 선택", start_dir, "Excel Files (*.xlsx)"
+        )
+        if not paths:
             return
         username, password = self._gw_username, self._gw_password
 

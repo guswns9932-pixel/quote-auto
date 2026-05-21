@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 
+from PySide6.QtCore import Qt, QRect
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QMainWindow, QMessageBox,
-    QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSplashScreen, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from widgets import tint_button
@@ -30,6 +33,29 @@ def _setup_logging() -> None:
 
 
 logger = logging.getLogger("QuoteApp")
+
+
+# ──────────────────────────────────────────────
+# 스플래시 스크린
+# ──────────────────────────────────────────────
+def _make_splash_pix() -> QPixmap:
+    pix = QPixmap(520, 200)
+    pix.fill(QColor("#1565C0"))
+    p = QPainter(pix)
+
+    p.setPen(QColor("#FFFFFF"))
+    f = QFont("Malgun Gothic", 20)
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, "견적/전자서명 통합 시스템")
+
+    p.setPen(QColor("#BBDEFB"))
+    f2 = QFont("Malgun Gothic", 11)
+    p.setFont(f2)
+    p.drawText(QRect(0, 130, 520, 40), Qt.AlignCenter, "초기화 중…")
+
+    p.end()
+    return pix
 
 
 # ──────────────────────────────────────────────
@@ -166,7 +192,31 @@ def main() -> None:
     f.setFamily("Malgun Gothic")
     app.setFont(f)
 
+    # ── 스플래시 스크린: 창 보이기 전에 즉시 표시 ─────────────────────
+    splash = QSplashScreen(_make_splash_pix(), Qt.WindowStaysOnTopHint)
+    splash.show()
+    app.processEvents()
+
+    # ── 백그라운드에서 무거운 모듈 프리로드 ────────────────────────────
+    # openpyxl 은 excel_io 임포트 시 함께 로드됨 (가장 느린 부분).
+    # 메인 스레드를 블로킹하지 않고 QApplication 이벤트 루프를 유지한다.
+    _ready = threading.Event()
+
+    def _preload() -> None:
+        try:
+            import excel_io  # noqa: F401 — openpyxl 포함
+        finally:
+            _ready.set()
+
+    threading.Thread(target=_preload, daemon=True).start()
+
+    while not _ready.is_set():
+        _ready.wait(0.05)
+        app.processEvents()
+
+    # ── 메인 윈도우 생성 (이 시점엔 무거운 모듈이 이미 캐시됨) ─────────
     window = MainWindow()
+    splash.finish(window)
     window.showMaximized()
 
     if _standalone:

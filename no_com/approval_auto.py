@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import socket
 import logging
 import threading
 from typing import Callable, Dict, Optional
@@ -27,6 +28,14 @@ APPROVAL_URL = "https://groupware.lotvacuum.com/app/approval"
 FORM_NAME    = "구매요청서(NPN)"
 
 _active_driver = None  # 열려 있는 드라이버 추적 (두 번째 실행 전 정리용)
+
+
+def _find_free_port() -> int:
+    """EXE 환경에서 ChromeDriver가 포트를 못 찾는 문제 방지: Python으로 직접 빈 포트 확보."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -294,9 +303,9 @@ def _create_driver(offscreen: bool = False):
 
     try:
         from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
+        service = Service(ChromeDriverManager().install(), port=_find_free_port())
     except Exception:
-        service = Service()
+        service = Service(port=_find_free_port())
 
     chrome_bin = _find_chrome_binary()
     if not chrome_bin:
@@ -628,9 +637,9 @@ def _create_login_driver():
 
     try:
         from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
+        service = Service(ChromeDriverManager().install(), port=_find_free_port())
     except Exception:
-        service = Service()
+        service = Service(port=_find_free_port())
 
     chrome_bin = _find_chrome_binary()
     if not chrome_bin:

@@ -135,7 +135,7 @@ def _make_spec(app_name: str, icon: str) -> str:
             hookspath=[],
             runtime_hooks=[],
             excludes=["tkinter", "matplotlib", "numpy", "scipy"],
-            noarchive=True,   # .pyc를 압축 아카이브 대신 파일로 저장 → OS 캐시 활용, 로드 속도 향상
+            noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
             optimize=1,
         )
 

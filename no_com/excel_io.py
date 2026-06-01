@@ -475,6 +475,7 @@ def generate_cover(
     source_files  : List[str],
     investor_name : str = "채승철",
     progress_cb   : Optional[Callable[[int, int, str], None]] = None,
+    warranty_years: int = 2,
 ) -> str:
     """
     갑지 생성.
@@ -530,6 +531,9 @@ def generate_cover(
 
     # 투자자명
     ws_cover["B7"] = f"삼성전자 ㈜ / {investor_name} 님"
+
+    # 보증기간 (기본값: 2 Year after delivery)
+    ws_cover["I12"] = f"{warranty_years} Year after delivery"
 
     # 갑지DATA A2:A31 을 직접 확인하여 빈 행을 COVER(20~49) + COVER_DATA(2~31) 양쪽에 숨기기
     for i in range(30):

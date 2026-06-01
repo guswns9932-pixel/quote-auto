@@ -138,10 +138,11 @@ class _GenCoverThread(QThread):
     done     = Signal(object)  # 저장 경로(str) 또는 Exception
 
     def __init__(self, template_path: str, folder: str, paths: list,
-                 investor_name: str, parent=None) -> None:
+                 investor_name: str, warranty_years: int = 2, parent=None) -> None:
         super().__init__(parent)
         self.template_path = template_path; self.folder = folder
         self.paths = paths; self.investor_name = investor_name
+        self.warranty_years = warranty_years
 
     def run(self) -> None:
         try:
@@ -149,7 +150,8 @@ class _GenCoverThread(QThread):
                 self.progress.emit(f"[{done}/{total}] 읽는 중: {name}")
             out = excel_io.generate_cover(
                 self.template_path, self.folder, self.paths,
-                investor_name=self.investor_name, progress_cb=_cb)
+                investor_name=self.investor_name, progress_cb=_cb,
+                warranty_years=self.warranty_years)
             self.done.emit(out)
         except Exception as e:
             self.done.emit(e)
@@ -854,17 +856,32 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         frame = labeled_frame("옵션", min_h=55)
         frame.setMaximumHeight(140); frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row = QHBoxLayout()
+
         self.btn_credit = QPushButton("Credit"); self.btn_credit.setMinimumHeight(32)
         self.btn_credit.clicked.connect(self._open_credit_dialog)
-        self.btn_investor = QPushButton("투자자 변경"); self.btn_investor.setMinimumHeight(32)
+        tint_button(self.btn_credit, "#FFF9C4")   # 연노랑
+
+        # 보증기간 변경 + 투자자 변경을 세로로 묶음
+        self.btn_warranty = QPushButton("보증기간 변경"); self.btn_warranty.setMinimumHeight(28)
+        self.btn_warranty.clicked.connect(self._change_warranty)
+        tint_button(self.btn_warranty, "#E0F2F1")   # 연민트
+
+        self.btn_investor = QPushButton("투자자 변경"); self.btn_investor.setMinimumHeight(28)
         self.btn_investor.clicked.connect(self._change_investor)
-        tint_button(self.btn_credit,   "#FFF9C4")   # 연노랑
         tint_button(self.btn_investor, "#E8EAF6")   # 연라벤더
+
+        btn_col = QVBoxLayout(); btn_col.setSpacing(4)
+        btn_col.addWidget(self.btn_warranty)
+        btn_col.addWidget(self.btn_investor)
+
         self.chk_qt_kr = QCheckBox("국내"); self.chk_qt_cn = QCheckBox("중국"); self.chk_qt_us = QCheckBox("미국")
         self.chk_qt_kr.setChecked(True)
         for chk, qt in [(self.chk_qt_kr,"국내"),(self.chk_qt_cn,"중국"),(self.chk_qt_us,"미국")]:
             chk.clicked.connect(lambda checked, t=qt: self._on_qt_checked(t, checked))
-        row.addWidget(self.btn_credit); row.addWidget(self.btn_investor); row.addSpacing(10)
+
+        row.addWidget(self.btn_credit)
+        row.addLayout(btn_col)
+        row.addSpacing(10)
         row.addWidget(QLabel("견적서 타입"))
         row.addWidget(self.chk_qt_kr); row.addWidget(self.chk_qt_cn); row.addWidget(self.chk_qt_us)
         row.addStretch(1); frame.layout().addLayout(row); return frame
@@ -1181,6 +1198,35 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             dlg.apply(); self._refresh_credits(); self._recalc_totals()
             self._sync_step4_highlight(scroll_top=False); self._log("[옵션] 입력값 반영")
 
+    def _change_warranty(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("보증기간 변경")
+        dlg.setFixedWidth(300)
+        v = QVBoxLayout(dlg)
+        v.setSpacing(10)
+
+        form = QFormLayout()
+        spin = QSpinBox()
+        spin.setRange(1, 10)
+        spin.setValue(self.state.warranty_years)
+        spin.setSuffix(" Year after delivery")
+        form.addRow("보증기간:", spin)
+        v.addLayout(form)
+
+        preview = QLabel(f"{self.state.warranty_years} Year after delivery")
+        preview.setStyleSheet("color: #555; font-size: 11px;")
+        spin.valueChanged.connect(lambda n: preview.setText(f"{n} Year after delivery"))
+        v.addWidget(preview)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+
+        if dlg.exec() == QDialog.Accepted:
+            self.state.warranty_years = spin.value()
+            self._log(f"보증기간: {self.state.warranty_years} Year after delivery")
+
     def _change_investor(self) -> None:
         name, ok = QInputDialog.getText(
             self, "투자자 변경", "투자자 이름:",
@@ -1392,7 +1438,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._log(f"갑지 생성 시작 ({len(paths)}건) …")
         self._set_gen_buttons(False)
         self._gen_cv_thread = _GenCoverThread(
-            self.state.template_path, folder, paths, self.state.investor_name, self)
+            self.state.template_path, folder, paths, self.state.investor_name,
+            self.state.warranty_years, self)
         self._gen_cv_thread.progress.connect(self._log)
         self._gen_cv_thread.done.connect(self._on_gen_cover_done)
         self._gen_cv_thread.start()

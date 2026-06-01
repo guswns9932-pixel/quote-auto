@@ -210,3 +210,4 @@ class QuoteState:
 
     last_output_dir : Optional[str] = None
     investor_name   : str            = "채승철"
+    warranty_years  : int            = 2

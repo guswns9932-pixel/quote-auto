@@ -672,10 +672,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         grid.addWidget(self._step3_frame, 0, 2)
         grid.addWidget(guide,             0, 3)
 
-        # Row 1: 의뢰 / STEP4 / 우측
+        # Row 1: 의뢰 / 우측(STEP4↑+STEP5↓+버튼+LIST)
         grid.addWidget(self._build_req_panel(),   1, 0)
-        grid.addWidget(self._build_step4_panel(), 1, 1)
-        grid.addWidget(self._build_right_panel(), 1, 2, 1, 2)
+        grid.addWidget(self._build_right_panel(), 1, 1, 1, 3)
 
         # Row 2: 로그 / 옵션+견적정보
         grid.addWidget(self._build_worklog(),            2, 0, 1, 2)
@@ -739,7 +738,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     # ── STEP4 패널 ────────────────────────────
     def _build_step4_panel(self) -> QFrame:
-        frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(420)
+        frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(150)
         v = QVBoxLayout(frame); v.setContentsMargins(12,12,12,12); v.setSpacing(8)
         v.addWidget(bold_label("STEP 4\n품목(규격/단가) + 필터  (더블클릭/드래그 → STEP5)"))
         self.ed_filter = QLineEdit(); self.ed_filter.setPlaceholderText("규격 필터(실시간) - 포함 검색")
@@ -760,12 +759,17 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         v.addWidget(self.ed_filter); v.addWidget(self.items_table, 1)
         return frame
 
-    # ── 우측 패널 (STEP5 + 버튼 + STEP7) ──────
+    # ── 우측 패널 (STEP4↑ STEP5↓ | 버튼+LIST) ──
     def _build_right_panel(self) -> QWidget:
         w = QWidget(); g = QGridLayout(w)
         g.setContentsMargins(0,0,0,0); g.setHorizontalSpacing(12)
 
-        step5 = labeled_frame("STEP5 견적작성 대상", min_h=320)
+        # STEP4(위) + STEP5(아래) — 스플리터로 높이 자유 조절
+        splitter = QSplitter(Qt.Vertical)
+
+        splitter.addWidget(self._build_step4_panel())
+
+        step5 = labeled_frame("STEP5 견적작성 대상", min_h=150)
         step5.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         sl = step5.layout()
         top5 = QHBoxLayout()
@@ -797,9 +801,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         QTimer.singleShot(0, self._step5_fit_col2)
         sl.addWidget(self.step5_table, 1)
 
+        splitter.addWidget(step5)
+        splitter.setStretchFactor(0, 2)   # STEP4: 상대 높이 2
+        splitter.setStretchFactor(1, 3)   # STEP5: 상대 높이 3
+        splitter.setSizes([300, 450])     # 초기 높이 (px)
+
         side = QWidget(); sv = QVBoxLayout(side); sv.setContentsMargins(0,0,0,0); sv.setSpacing(12)
         sv.addWidget(self._build_generate_panel()); sv.addWidget(self._build_step7(), 1)
-        g.addWidget(step5, 0, 0); g.addWidget(side, 0, 1)
+        g.addWidget(splitter, 0, 0); g.addWidget(side, 0, 1)
         g.setColumnStretch(0, 4); g.setColumnStretch(1, 2)
         return w
 

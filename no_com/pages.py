@@ -16,7 +16,7 @@ import traceback
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QPointF, QBuffer, QByteArray, QIODevice, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QPointF, QBuffer, QByteArray, QIODevice, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QDialog,
@@ -784,15 +784,17 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.step5_table.drop_callback = self._on_drop_to_step5
         h5 = self.step5_table.horizontalHeader()
         h5.setSectionResizeMode(0, QHeaderView.Fixed)
-        for i in range(1, 6):
-            h5.setSectionResizeMode(i, QHeaderView.Interactive)
+        for i in [1, 3, 4, 5]:
+            h5.setSectionResizeMode(i, QHeaderView.Fixed)
+        h5.setSectionResizeMode(2, QHeaderView.Interactive)
         h5.setStretchLastSection(False)
+        self.step5_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.step5_table.setColumnWidth(0, 46)
-        self.step5_table.setColumnWidth(1, 80)
-        self.step5_table.setColumnWidth(2, 300)
-        self.step5_table.setColumnWidth(3, 60)
-        self.step5_table.setColumnWidth(4, 110)
-        self.step5_table.setColumnWidth(5, 110)
+        for c in [1, 3, 4, 5]:
+            self.step5_table.resizeColumnToContents(c)
+        h5.sectionResized.connect(self._on_step5_col2_resized)
+        self.step5_table.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self._step5_fit_col2)
         sl.addWidget(self.step5_table, 1)
 
         side = QWidget(); sv = QVBoxLayout(side); sv.setContentsMargins(0,0,0,0); sv.setSpacing(12)
@@ -1204,6 +1206,54 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if dlg.exec() == QDialog.Accepted:
             dlg.apply(); self._refresh_credits(); self._recalc_totals()
             self._sync_step4_highlight(scroll_top=False); self._log("[옵션] 입력값 반영")
+
+    # ── STEP5 컬럼 너비 관리 ─────────────────────────────────────────
+    _S5_ADJ = [1, 3, 4, 5]   # 품목 변경 시 비례 조정되는 컬럼들
+    _S5_ADJ_MIN = 28          # 비례 컬럼 최소 너비(px)
+    _S5_COL2_MIN = 60         # 품목 최소 너비(px)
+
+    def _step5_fit_col2(self) -> None:
+        """뷰포트 너비에 맞게 품목(col 2) 너비를 채운다."""
+        total  = self.step5_table.viewport().width()
+        others = sum(self.step5_table.columnWidth(c) for c in [0] + self._S5_ADJ)
+        col2   = max(self._S5_COL2_MIN, total - others)
+        h5 = self.step5_table.horizontalHeader()
+        h5.blockSignals(True)
+        self.step5_table.setColumnWidth(2, col2)
+        h5.blockSignals(False)
+
+    def _on_step5_col2_resized(self, logical: int, _old: int, new_size: int) -> None:
+        """품목(col 2) 드래그 시 나머지 컬럼들을 현재 비율 그대로 비례 조정."""
+        if logical != 2:
+            return
+        total    = self.step5_table.viewport().width()
+        col0_w   = self.step5_table.columnWidth(0)
+        min_adj  = self._S5_ADJ_MIN
+        # 품목 너비 범위 제한
+        max_col2 = total - col0_w - len(self._S5_ADJ) * min_adj
+        clamped  = max(self._S5_COL2_MIN, min(new_size, max_col2))
+        remaining = total - col0_w - clamped
+
+        old_ws = [self.step5_table.columnWidth(c) for c in self._S5_ADJ]
+        s = sum(old_ws) or 1
+        new_ws = [max(min_adj, round(w / s * remaining)) for w in old_ws]
+        # 마지막 컬럼이 반올림 오차 흡수
+        new_ws[-1] = max(min_adj, remaining - sum(new_ws[:-1]))
+
+        h5 = self.step5_table.horizontalHeader()
+        h5.blockSignals(True)
+        for c, w in zip(self._S5_ADJ, new_ws):
+            self.step5_table.setColumnWidth(c, w)
+        if clamped != new_size:
+            self.step5_table.setColumnWidth(2, clamped)
+        h5.blockSignals(False)
+
+    def eventFilter(self, obj, event) -> bool:
+        if (hasattr(self, 'step5_table')
+                and obj is self.step5_table.viewport()
+                and event.type() == QEvent.Resize):
+            self._step5_fit_col2()
+        return super().eventFilter(obj, event)
 
     def _change_warranty(self) -> None:
         dlg = QDialog(self)

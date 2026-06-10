@@ -783,9 +783,16 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.step5_table.cellDoubleClicked.connect(self._on_step5_double_click)
         self.step5_table.drop_callback = self._on_drop_to_step5
         h5 = self.step5_table.horizontalHeader()
-        for i, mode in enumerate([QHeaderView.ResizeToContents]*2 + [QHeaderView.Stretch] + [QHeaderView.ResizeToContents]*3):
-            h5.setSectionResizeMode(i, mode)
+        h5.setSectionResizeMode(0, QHeaderView.Fixed)
+        for i in range(1, 6):
+            h5.setSectionResizeMode(i, QHeaderView.Interactive)
+        h5.setStretchLastSection(False)
         self.step5_table.setColumnWidth(0, 46)
+        self.step5_table.setColumnWidth(1, 80)
+        self.step5_table.setColumnWidth(2, 300)
+        self.step5_table.setColumnWidth(3, 60)
+        self.step5_table.setColumnWidth(4, 110)
+        self.step5_table.setColumnWidth(5, 110)
         sl.addWidget(self.step5_table, 1)
 
         side = QWidget(); sv = QVBoxLayout(side); sv.setContentsMargins(0,0,0,0); sv.setSpacing(12)

@@ -7,7 +7,6 @@ main.py
 from __future__ import annotations
 
 import logging
-import os
 import sys
 
 from PySide6.QtWidgets import (
@@ -15,8 +14,8 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from core import LogDB, ensure_dir, exe_dir, migrate_db
-from pages import ESignPage, LogPage, QuoteBuilderPage
+from pages import ESignPage, QuoteBuilderPage
+from widgets import tint_button
 
 
 # ──────────────────────────────────────────────
@@ -47,17 +46,18 @@ class LeftNav(QWidget):
         v.setSpacing(12)
 
         buttons = [
-            ("견적서작성", lambda: stack.setCurrentIndex(0)),
-            ("전자서명",   lambda: stack.setCurrentIndex(1)),
-            ("견적LOG",    lambda: stack.setCurrentIndex(2)),
+            ("견적서작성", lambda: stack.setCurrentIndex(0), "#BBDEFB"),   # 연파랑
+            ("전자서명",   lambda: stack.setCurrentIndex(1), "#C8E6C9"),   # 연초록
         ]
-        for label, slot in buttons:
+        for label, slot, color in buttons:
             btn = self._nav_btn(label, slot)
+            tint_button(btn, color)
             v.addWidget(btn)
 
         v.addStretch(1)
 
         reset_btn = self._nav_btn("초기화", on_reset)
+        tint_button(reset_btn, "#FFCCBC")   # 연주황(리셋 강조)
         v.addWidget(reset_btn)
 
     @staticmethod
@@ -81,16 +81,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("견적/전자서명 통합 시스템")
 
-        # DB 초기화 (마이그레이션 포함)
-        log_dir = ensure_dir(os.path.join(exe_dir(), "quote_log"))
-        status, src = migrate_db(log_dir, exe_dir())
-        logger.info("DB migrate: status=%s src=%s", status, src)
-
-        self.db = LogDB(os.path.join(log_dir, "quote_log.db"))
-        logger.debug("DB tables: %s", self.db.table_names())
-        logger.debug("DB counts: logs=%d items=%d", self.db.count_logs(), self.db.count_items())
-
-        # 레이아웃
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
@@ -106,9 +96,8 @@ class MainWindow(QMainWindow):
 
     # ── 페이지 채우기 ────────────────────────────
     def _populate_stack(self) -> None:
-        self.stack.addWidget(QuoteBuilderPage(db=self.db))
+        self.stack.addWidget(QuoteBuilderPage())
         self.stack.addWidget(ESignPage())
-        self.stack.addWidget(LogPage(db=self.db))
 
     # ── 초기화 ───────────────────────────────────
     def reset(self) -> None:
@@ -128,16 +117,33 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────
 def main() -> None:
     _setup_logging()
-    app = QApplication(sys.argv)
 
-    # 한글 폰트
+    # 런처에서 in-process로 호출되면 QApplication이 이미 존재한다.
+    # 그 경우 새로 생성하지 않고 기존 인스턴스를 재사용한다.
+    _standalone = QApplication.instance() is None
+    app = QApplication(sys.argv) if _standalone else QApplication.instance()
+
     f = app.font()
     f.setFamily("Malgun Gothic")
     app.setFont(f)
 
     window = MainWindow()
     window.showMaximized()
-    sys.exit(app.exec())
+
+    if _standalone:
+        sys.exit(app.exec())
+    else:
+        # 런처 내부 실행: 독립 QEventLoop 사용.
+        # 앱 창이 모두 닫히면(lastWindowClosed) 루프를 종료하고
+        # 제어를 런처로 반환한다.
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        app.lastWindowClosed.connect(loop.quit)
+        loop.exec()
+        try:
+            app.lastWindowClosed.disconnect(loop.quit)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

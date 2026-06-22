@@ -610,6 +610,87 @@ class Step5Manager:
 
 
 # ══════════════════════════════════════════════
+# 견적서 LIST 독립 창
+# ══════════════════════════════════════════════
+
+class _QuoteListWindow(QWidget):
+    """견적서 LIST를 보여주는 독립(플로팅) 창."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle("견적서 LIST")
+        self.resize(480, 620)
+        self._all_files: List[Tuple[float, str]] = []
+        self._build()
+
+    def _build(self) -> None:
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12); v.setSpacing(6)
+
+        title_row = QHBoxLayout()
+        lbl = QLabel("견적서 LIST")
+        f = lbl.font(); f.setPointSize(12); f.setBold(True); lbl.setFont(f)
+        btn_refresh = QPushButton("새로고침"); btn_refresh.setFixedHeight(24)
+        btn_refresh.clicked.connect(self._on_refresh)
+        title_row.addWidget(lbl); title_row.addWidget(btn_refresh)
+        v.addLayout(title_row)
+
+        filter_row = QHBoxLayout(); filter_row.setSpacing(6)
+        lbl_f = QLabel("설비호기:"); lbl_f.setFixedWidth(52)
+        self.edit_filter = QLineEdit()
+        self.edit_filter.setPlaceholderText("설비호기 입력 → 실시간 필터")
+        self.edit_filter.setFixedHeight(24)
+        self.edit_filter.setClearButtonEnabled(True)
+        self.edit_filter.textChanged.connect(self._apply_filter)
+        filter_row.addWidget(lbl_f); filter_row.addWidget(self.edit_filter)
+        v.addLayout(filter_row)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self._open_item)
+        v.addWidget(self.list_widget, 1)
+
+    def _on_refresh(self) -> None:
+        p = self.parent()
+        if p and hasattr(p, '_refresh_quote_list'):
+            p._refresh_quote_list()
+
+    def refresh(self, all_files: list) -> None:
+        self._all_files = all_files
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        keyword = self.edit_filter.text().strip().lower()
+        self.list_widget.clear()
+        for _, full in self._all_files:
+            tool, label = QuoteBuilderPage._parse_quote_label(full)
+            if tool is None:
+                continue
+            if os.path.isfile(full[:-5] + ".pdf"):
+                continue
+            if keyword and keyword not in label.lower():
+                continue
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, full)
+            item.setToolTip(full)
+            if tool == "":
+                item.setBackground(QBrush(QColor(255, 153, 153)))
+            self.list_widget.addItem(item)
+
+    def _open_item(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if path:
+            try: os.startfile(path)
+            except Exception as e: QMessageBox.critical(self, "오류", str(e))
+
+    def show_and_raise(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if self.list_widget.count() > 0:
+            self.list_widget.scrollToTop()
+
+
+# ══════════════════════════════════════════════
 # 견적서 작성 페이지
 # ══════════════════════════════════════════════
 
@@ -632,6 +713,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._gen_qt_thread : Optional[_GenQuoteThread]       = None
         self._gen_cv_thread : Optional[_GenCoverThread]       = None
         self._list_all_files: List[Tuple[float, str]]          = []
+        self._quote_list_window: Optional[_QuoteListWindow]    = None
 
         self._build_ui()
         self._ensure_total()
@@ -647,51 +729,77 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 14, 14, 14)
-        outer.setSpacing(12)
+        outer.setSpacing(8)
 
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
+        # ── 툴바 (STEP1·2 LOAD + 생성버튼 + LIST 버튼) ──────────────
+        outer.addWidget(self._build_toolbar())
 
-        # Row 0: 버튼 4개
-        self.btn_step1 = self._action_btn("STEP 1\n통합양식 LOAD", self._load_template)
-        self.btn_step2 = self._action_btn("STEP 2\n의뢰파일 LOAD", self._load_request)
-        tint_button(self.btn_step1, "#C8E6C9")   # 연초록
-        tint_button(self.btn_step2, "#BBDEFB")   # 연파랑
-        self.btn_step2.setEnabled(False)
+        # ── 메인 콘텐츠 (STEP3+의뢰 | STEP4|STEP5) ──────────────────
+        content = QWidget()
+        ch = QHBoxLayout(content)
+        ch.setContentsMargins(0, 0, 0, 0); ch.setSpacing(12)
+
+        # 왼쪽: STEP3 (위) + 의뢰파일DATA (아래)
+        left = QWidget(); left.setFixedWidth(380)
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(8)
         self._step3_frame = self._build_step3()
         self._step3_frame.setEnabled(False)
-        guide = labeled_frame("견적서작성 사용법", min_h=110)
-        guide.layout().addWidget(QLabel(
-            "① STEP1: 통합양식 LOAD\n② STEP2: 의뢰파일 LOAD\n"
-            "③ 의뢰행 더블클릭 → 조건 자동입력\n"
-            "④ STEP4 더블클릭/드래그 → STEP5\n⑤ 견적서 생성 버튼"))
-        grid.addWidget(self.btn_step1,    0, 0)
-        grid.addWidget(self.btn_step2,    0, 1)
-        grid.addWidget(self._step3_frame, 0, 2)
-        grid.addWidget(guide,             0, 3)
+        lv.addWidget(self._step3_frame)
+        lv.addWidget(self._build_req_panel(), 1)
+        ch.addWidget(left)
 
-        # Row 1: 의뢰 / 우측(STEP4↑+STEP5↓+버튼+LIST)
-        grid.addWidget(self._build_req_panel(),   1, 0)
-        grid.addWidget(self._build_right_panel(), 1, 1, 1, 3)
+        # 오른쪽: STEP4 (왼) | STEP5 (오) 가로 배치
+        ch.addWidget(self._build_right_panel(), 1)
 
-        # Row 2: 로그 / 옵션+견적정보
-        grid.addWidget(self._build_worklog(),            2, 0, 1, 2)
-        grid.addWidget(self._build_bottom_right_panel(), 2, 2, 1, 2)
+        outer.addWidget(content, 1)
 
-        grid.setColumnStretch(0, 3); grid.setColumnStretch(1, 5)
-        grid.setColumnStretch(2, 5); grid.setColumnStretch(3, 2)
-        grid.setRowStretch(1, 10)
-        outer.addLayout(grid, 1)
+        # ── 하단: 로그 + 옵션 ────────────────────────────────────────
+        bottom = QWidget(); bottom.setFixedHeight(140)
+        bh = QHBoxLayout(bottom); bh.setContentsMargins(0, 0, 0, 0); bh.setSpacing(12)
+        bh.addWidget(self._build_worklog(), 1)
+        bh.addWidget(self._build_bottom_right_panel())
+        outer.addWidget(bottom)
 
         QTimer.singleShot(0, self._refresh_quote_list)
 
     @staticmethod
     def _action_btn(label: str, slot) -> QPushButton:
-        btn = QPushButton(label); btn.setMinimumHeight(110)
-        f = btn.font(); f.setPointSize(12); f.setBold(True); btn.setFont(f)
+        btn = QPushButton(label); btn.setFixedHeight(52)
+        f = btn.font(); f.setPointSize(10); f.setBold(True); btn.setFont(f)
         btn.clicked.connect(slot); return btn
+
+    # ── 툴바 ──────────────────────────────────
+    def _build_toolbar(self) -> QWidget:
+        bar = QWidget(); bar.setFixedHeight(58)
+        h = QHBoxLayout(bar); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
+
+        self.btn_step1 = self._action_btn("STEP 1\n통합양식 LOAD", self._load_template)
+        self.btn_step2 = self._action_btn("STEP 2\n의뢰파일 LOAD", self._load_request)
+        tint_button(self.btn_step1, "#C8E6C9")
+        tint_button(self.btn_step2, "#BBDEFB")
+        self.btn_step2.setEnabled(False)
+
+        self.btn_gen_quote = self._action_btn("견적서 생성", self._generate_quote)
+        self.btn_gen_cover = self._action_btn("갑지 생성",   self._generate_cover)
+        tint_button(self.btn_gen_quote, "#B3E5FC")
+        tint_button(self.btn_gen_cover, "#F8BBD0")
+
+        btn_list = QPushButton("견적서 LIST"); btn_list.setFixedHeight(52)
+        f = btn_list.font(); f.setPointSize(10); f.setBold(True); btn_list.setFont(f)
+        tint_button(btn_list, "#E8EAF6")
+        btn_list.clicked.connect(self._open_quote_list_window)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.VLine); sep.setFrameShadow(QFrame.Sunken)
+
+        h.addWidget(self.btn_step1)
+        h.addWidget(self.btn_step2)
+        h.addWidget(sep)
+        h.addWidget(self.btn_gen_quote)
+        h.addWidget(self.btn_gen_cover)
+        h.addWidget(btn_list)
+        h.addStretch(1)
+        return bar
 
     # ── STEP3 ─────────────────────────────────
     def _build_step3(self) -> QFrame:
@@ -718,7 +826,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # ── 의뢰파일 패널 ─────────────────────────
     def _build_req_panel(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2)
-        frame.setMinimumHeight(420); frame.setFixedWidth(400)
+        frame.setMinimumHeight(180)
         v = QVBoxLayout(frame); v.setContentsMargins(12,12,12,12); v.setSpacing(8)
         v.addWidget(bold_label("의뢰파일DATA", size=12))
         top = QHBoxLayout()
@@ -759,16 +867,18 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         v.addWidget(self.ed_filter); v.addWidget(self.items_table, 1)
         return frame
 
-    # ── 우측 패널 (STEP4↑ STEP5↓ | 버튼+LIST) ──
+    # ── 우측 패널 (STEP4 왼 | STEP5 오 가로 배치) ─
     def _build_right_panel(self) -> QWidget:
-        w = QWidget(); g = QGridLayout(w)
-        g.setContentsMargins(0,0,0,0); g.setHorizontalSpacing(12)
-
-        # STEP4(위) + STEP5(아래) — 스플리터로 높이 자유 조절
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Horizontal)
 
         splitter.addWidget(self._build_step4_panel())
+        splitter.addWidget(self._build_step5_panel())
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([400, 600])
+        return splitter
 
+    def _build_step5_panel(self) -> QFrame:
         step5 = labeled_frame("STEP5 견적작성 대상", min_h=150)
         step5.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         sl = step5.layout()
@@ -800,62 +910,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.step5_table.viewport().installEventFilter(self)
         QTimer.singleShot(0, self._step5_fit_col2)
         sl.addWidget(self.step5_table, 1)
-
-        splitter.addWidget(step5)
-        splitter.setStretchFactor(0, 2)   # STEP4: 상대 높이 2
-        splitter.setStretchFactor(1, 3)   # STEP5: 상대 높이 3
-        splitter.setSizes([300, 450])     # 초기 높이 (px)
-
-        side = QWidget(); sv = QVBoxLayout(side); sv.setContentsMargins(0,0,0,0); sv.setSpacing(12)
-        sv.addWidget(self._build_generate_panel()); sv.addWidget(self._build_step7(), 1)
-        g.addWidget(splitter, 0, 0); g.addWidget(side, 0, 1)
-        g.setColumnStretch(0, 4); g.setColumnStretch(1, 2)
-        return w
-
-    def _build_generate_panel(self) -> QFrame:
-        frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(110)
-        h = QHBoxLayout(frame); h.setContentsMargins(6,6,6,6); h.setSpacing(6)
-        self.btn_gen_quote = QPushButton("견적서 생성"); self.btn_gen_quote.setMinimumHeight(90)
-        self.btn_gen_cover = QPushButton("갑지 생성");   self.btn_gen_cover.setMinimumHeight(90)
-        tint_button(self.btn_gen_quote, "#B3E5FC")   # 연하늘
-        tint_button(self.btn_gen_cover, "#F8BBD0")   # 연분홍
-        for btn, slot in [(self.btn_gen_quote, self._generate_quote), (self.btn_gen_cover, self._generate_cover)]:
-            f = btn.font(); f.setPointSize(12); f.setBold(True); btn.setFont(f)
-            btn.clicked.connect(slot); h.addWidget(btn, 1)
-        return frame
-
-    def _build_step7(self) -> QFrame:
-        frame = QFrame()
-        frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(260)
-        v = QVBoxLayout(frame); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(6)
-
-        title_row = QHBoxLayout()
-        lbl = bold_label("견적서LIST", size=12)
-        lbl.setFixedHeight(28)
-        lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        btn_refresh = QPushButton("새로고침")
-        btn_refresh.setFixedHeight(24)
-        btn_refresh.clicked.connect(self._refresh_quote_list)
-        title_row.addWidget(lbl); title_row.addWidget(btn_refresh)
-        v.addLayout(title_row)
-
-        # ── 설비호기 실시간 필터 ──────────────────────────────────────
-        filter_row = QHBoxLayout(); filter_row.setSpacing(6)
-        filter_lbl = QLabel("설비호기:")
-        filter_lbl.setFixedWidth(52)
-        self.edit_list_filter = QLineEdit()
-        self.edit_list_filter.setPlaceholderText("설비호기 입력 → 실시간 필터")
-        self.edit_list_filter.setFixedHeight(24)
-        self.edit_list_filter.setClearButtonEnabled(True)
-        self.edit_list_filter.textChanged.connect(self._apply_list_filter)
-        filter_row.addWidget(filter_lbl)
-        filter_row.addWidget(self.edit_list_filter)
-        v.addLayout(filter_row)
-
-        self.list_done = QListWidget()
-        self.list_done.itemDoubleClicked.connect(self._open_done)
-        v.addWidget(self.list_done, 1)
-        return frame
+        return step5
 
     def _build_worklog(self) -> QFrame:
         frame = labeled_frame("작업로그", min_h=140)
@@ -1490,6 +1545,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         ok = sum(1 for _, p in result if p)
         self._log(f"견적서 생성 완료: {ok}/{len(result)}건")
         QMessageBox.information(self, "완료", f"견적서 {ok}건 생성 완료")
+        self._open_quote_list_window()
 
     def _generate_cover(self) -> None:
         if not self.state.template_path:
@@ -1551,8 +1607,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _add_done_cover(self, path: str) -> None:
         self._refresh_quote_list()
-        if self.list_done.count() > 0:
-            self.list_done.scrollToTop()
+        if self._quote_list_window:
+            w = self._quote_list_window.list_widget
+            if w.count() > 0:
+                w.scrollToTop()
 
     def _refresh_quote_list(self) -> None:
         """견적서 폴더를 스캔하여 파일 목록을 갱신하고 필터를 적용한다.
@@ -1583,7 +1641,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             )
             for d in sorted_folders:
                 self._list_all_files.extend(folder_files[d])
-        self._apply_list_filter()
+        if self._quote_list_window:
+            self._quote_list_window.refresh(self._list_all_files)
 
     @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
@@ -1635,36 +1694,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         return tool, tool
 
-    def _apply_list_filter(self) -> None:
-        """설비호기 필터 텍스트에 맞게 list_done을 실시간 갱신한다.
-
-        - 패턴 불일치 파일(tool=None): 항상 제외
-        - 동일 파일명 PDF 존재 시: 제외
-        - 갑지(tool=''): 붉은색 음영으로 표시, 필터 대상에 포함
-        """
-        keyword = self.edit_list_filter.text().strip().lower()
-        self.list_done.clear()
-        for _, full in self._list_all_files:
-            tool, label = self._parse_quote_label(full)
-            if tool is None:
-                continue
-            # 동일 파일명 PDF가 있으면 제외
-            if os.path.isfile(full[:-5] + ".pdf"):
-                continue
-            if keyword and keyword not in label.lower():
-                continue
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, full)
-            item.setToolTip(full)
-            if tool == "":  # 갑지
-                item.setBackground(QBrush(QColor(255, 153, 153)))  # 붉은색 음영
-            self.list_done.addItem(item)
-
-    def _open_done(self, item: QListWidgetItem) -> None:
-        path = item.data(Qt.UserRole)
-        if path:
-            try: os.startfile(path)
-            except Exception as e: QMessageBox.critical(self, "오류", str(e))
+    def _open_quote_list_window(self) -> None:
+        """견적서 LIST 독립 창을 열거나 앞으로 가져온다."""
+        if self._quote_list_window is None:
+            self._quote_list_window = _QuoteListWindow(self)
+        self._quote_list_window.refresh(self._list_all_files)
+        self._quote_list_window.show_and_raise()
 
     def _log(self, text: str) -> None:
         self.log_view.append(text); logger.debug(text)

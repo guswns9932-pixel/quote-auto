@@ -38,6 +38,67 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _exe_dir() -> str:
+    """실행 파일(또는 스크립트)이 위치한 디렉터리."""
+    import pathlib
+    if getattr(sys, "frozen", False):
+        return str(pathlib.Path(sys.executable).resolve().parent)
+    return str(pathlib.Path(__file__).resolve().parent)
+
+
+def _find_chrome_service():
+    """ChromeDriver Service를 최대한 빠르게 반환한다.
+
+    탐색 순서:
+    1. EXE 옆 chromedriver.exe  → 즉시 반환 (가장 빠름)
+    2. PATH에 chromedriver 존재 → 기본 Service 반환
+    3. webdriver-manager 자동 다운로드 (10초 타임아웃)
+    4. 최후 수단: 기본 Service (없으면 selenium이 별도 오류 발생)
+    """
+    import shutil
+    import queue
+    import threading as _threading
+    from selenium.webdriver.chrome.service import Service
+
+    port    = _find_free_port()
+    drv_exe = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
+
+    # 1. EXE와 같은 디렉터리에 있는 chromedriver
+    local = os.path.join(_exe_dir(), drv_exe)
+    if os.path.isfile(local):
+        logger.info("로컬 chromedriver 사용: %s", local)
+        return Service(executable_path=local, port=port)
+
+    # 2. PATH 탐색
+    if shutil.which(drv_exe) or shutil.which("chromedriver"):
+        logger.info("PATH chromedriver 사용")
+        return Service(port=port)
+
+    # 3. webdriver-manager (10초 타임아웃: 네트워크 불안 환경에서 무한 대기 방지)
+    _q: queue.Queue = queue.Queue()
+
+    def _wdm_install():
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            _q.put(ChromeDriverManager().install())
+        except Exception as e:
+            logger.warning("ChromeDriverManager 실패: %s", e)
+            _q.put(None)
+
+    t = _threading.Thread(target=_wdm_install, daemon=True)
+    t.start()
+    try:
+        path = _q.get(timeout=10)
+        if path:
+            logger.info("webdriver-manager chromedriver 사용: %s", path)
+            return Service(executable_path=path, port=port)
+    except queue.Empty:
+        logger.warning("ChromeDriverManager 10초 타임아웃 — 기본 Service로 대체")
+
+    # 4. 최후 수단
+    return Service(port=port)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 내부 유틸
 # ──────────────────────────────────────────────────────────────────────────────
@@ -301,11 +362,7 @@ def _create_driver(offscreen: bool = False):
             "pip install selenium webdriver-manager"
         )
 
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install(), port=_find_free_port())
-    except Exception:
-        service = Service(port=_find_free_port())
+    service = _find_chrome_service()
 
     chrome_bin = _find_chrome_binary()
     if not chrome_bin:
@@ -635,11 +692,7 @@ def _create_login_driver():
     except ImportError:
         raise RuntimeError("selenium 패키지가 없습니다.\npip install selenium webdriver-manager")
 
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install(), port=_find_free_port())
-    except Exception:
-        service = Service(port=_find_free_port())
+    service = _find_chrome_service()
 
     chrome_bin = _find_chrome_binary()
     if not chrome_bin:

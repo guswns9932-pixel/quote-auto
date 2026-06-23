@@ -179,9 +179,14 @@ def _make_app_spec(app_name: str, icon: str) -> str:
             ],
             hookspath=[],
             runtime_hooks=[],
-            excludes=["tkinter", "matplotlib", "numpy", "scipy", "PIL"],
+            excludes=[
+                "tkinter", "matplotlib", "numpy", "scipy", "PIL",
+                "unittest", "doctest", "pdb", "profile", "cProfile",
+                "difflib", "pickletools", "tarfile", "ftplib",
+                "multiprocessing.pool",
+            ],
             noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
-            optimize=1,
+            optimize=2,       # 2: docstring 제거 → .pyc 크기 추가 감소, 임포트 속도 향상
         )
 
         pyz = PYZ(a.pure)

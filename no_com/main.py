@@ -205,6 +205,7 @@ def main() -> None:
     def _preload() -> None:
         try:
             import excel_io  # noqa: F401 — openpyxl 포함
+            import pages     # noqa: F401 — 페이지 클래스 선로드 (창 생성 시 즉시 사용)
         finally:
             _ready.set()
 

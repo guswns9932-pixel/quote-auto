@@ -1622,15 +1622,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 w.scrollToTop()
 
     def _refresh_quote_list(self) -> None:
-        """견적서 폴더를 스캔하여 파일 목록을 갱신하고 필터를 적용한다.
-
-        정렬 규칙:
-        1. 폴더를 '가장 최근 파일의 mtime' 기준으로 내림차순 (최신 폴더 최상단)
-        2. 같은 폴더 내 파일은 mtime 내림차순으로 묶어서 배치
-        """
+        """견적서 폴더를 백그라운드 스캔 후 목록을 갱신한다 (UI 블로킹 없음)."""
         root = os.path.join(exe_dir(), "견적서")
-        self._list_all_files = []
-        if os.path.isdir(root):
+
+        def _scan():
+            result: List[Tuple[float, str]] = []
+            if not os.path.isdir(root):
+                return result
             folder_files: Dict[str, List[Tuple[float, str]]] = {}
             for dirpath, _, filenames in os.walk(root):
                 for fn in filenames:
@@ -1639,19 +1637,26 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                         folder_files.setdefault(dirpath, []).append(
                             (os.path.getmtime(full), full)
                         )
-            # 폴더 내 파일: mtime 내림차순
             for lst in folder_files.values():
                 lst.sort(reverse=True)
-            # 폴더 순서: 폴더 내 최신 파일의 mtime 내림차순
             sorted_folders = sorted(
                 folder_files,
-                key=lambda d: folder_files[d][0][0],  # 이미 정렬됐으므로 [0]이 최신
+                key=lambda d: folder_files[d][0][0],
                 reverse=True,
             )
             for d in sorted_folders:
-                self._list_all_files.extend(folder_files[d])
-        if self._quote_list_window:
-            self._quote_list_window.refresh(self._list_all_files)
+                result.extend(folder_files[d])
+            return result
+
+        def _on_done(files):
+            self._list_all_files = files
+            if self._quote_list_window:
+                self._quote_list_window.refresh(self._list_all_files)
+
+        worker = _BgWorker(_scan, parent=self)
+        worker.result.connect(_on_done)
+        self._quote_list_worker = worker  # GC 방지
+        worker.start()
 
     @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
@@ -2787,25 +2792,34 @@ class RackPurchaseRequestPage(QWidget):
         """RACK구매요청서 폴더의 xlsx 파일 목록을 우측 패널에 갱신.
         결재상신용 파일(연주황 음영)과 일반 요청서를 구분하여 표시."""
         root = os.path.join(exe_dir(), "RACK구매요청서")
-        self.req_list.clear()
-        if not os.path.isdir(root):
-            return
-        files = []
-        for dirpath, _, filenames in os.walk(root):
-            for fn in filenames:
-                if fn.endswith(".xlsx") and not fn.startswith("~$"):
-                    full = os.path.join(dirpath, fn)
-                    files.append((os.path.getmtime(full), full))
-        files.sort(reverse=True)  # 최신순
-        for _, full in files:
-            rel = os.path.relpath(full, root)
-            item = QListWidgetItem(rel)
-            item.setData(Qt.UserRole, full)
-            item.setToolTip(full)
-            # 결재상신용: _RACK구매요청서.xlsx 로 끝나지 않는 파일 → 연주황 음영
-            if not os.path.basename(full).endswith("_RACK구매요청서.xlsx"):
-                item.setBackground(QBrush(QColor(255, 224, 178)))  # #FFE0B2 연주황
-            self.req_list.addItem(item)
+
+        def _scan():
+            files: List[Tuple[float, str]] = []
+            if not os.path.isdir(root):
+                return files
+            for dirpath, _, filenames in os.walk(root):
+                for fn in filenames:
+                    if fn.endswith(".xlsx") and not fn.startswith("~$"):
+                        full = os.path.join(dirpath, fn)
+                        files.append((os.path.getmtime(full), full))
+            files.sort(reverse=True)
+            return files
+
+        def _on_done(files):
+            self.req_list.clear()
+            for _, full in files:
+                rel = os.path.relpath(full, root)
+                item = QListWidgetItem(rel)
+                item.setData(Qt.UserRole, full)
+                item.setToolTip(full)
+                if not os.path.basename(full).endswith("_RACK구매요청서.xlsx"):
+                    item.setBackground(QBrush(QColor(255, 224, 178)))
+                self.req_list.addItem(item)
+
+        worker = _BgWorker(_scan, parent=self)
+        worker.result.connect(_on_done)
+        self._req_list_worker = worker  # GC 방지
+        worker.start()
 
     def _open_req_file(self, item: QListWidgetItem) -> None:
         """더블클릭한 요청서 파일을 기본 프로그램으로 열기."""

@@ -286,7 +286,7 @@ def main():
     print(f"{'='*54}")
     app_dist = os.path.join(tmp_dir, "app_dist")
     app_work = os.path.join(tmp_dir, "app_work")
-    app_spec = os.path.join(tmp_dir, "_app.spec")
+    app_spec = os.path.join(tmp_dir, f"{app_name}_app.spec")
     with open(app_spec, "w", encoding="utf-8") as f:
         f.write(_make_app_spec(app_name, icon))
     _run(app_spec, app_dist, app_work)
@@ -302,11 +302,11 @@ def main():
     print(f"\n{'='*54}")
     print(f"  [3/3] 런처 스텁 빌드 (onefile) …")
     print(f"{'='*54}")
-    stub_py = os.path.join(tmp_dir, "_stub.py")
+    stub_py = os.path.join(tmp_dir, f"{app_name}_stub.py")
     stub_content = STUB_TEMPLATE.replace("PLACEHOLDER_APP_NAME", app_name)
     with open(stub_py, "w", encoding="utf-8") as f:
         f.write(stub_content)
-    stub_spec = os.path.join(tmp_dir, "_stub.spec")
+    stub_spec = os.path.join(tmp_dir, f"{app_name}.spec")
     with open(stub_spec, "w", encoding="utf-8") as f:
         f.write(_make_stub_spec(app_name, stub_py, bundle_zip, icon))
     dist_dir  = os.path.join(HERE, "dist")

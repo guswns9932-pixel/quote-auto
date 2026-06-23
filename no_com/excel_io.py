@@ -322,27 +322,32 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
+    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
+    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
 
-    # 펌프 구간 클리어 & 기입
+    # 펌프 구간 클리어 & 기입 (Pump Credit 포함)
     for rr in range(CN.PUMP_START, CN.PUMP_END + 1):
         ws[f"{CN.COL_SPEC}{rr}"]  = None
         ws[f"{CN.COL_PRICE}{rr}"] = None
         ws[f"{CN.COL_QTY}{rr}"]   = None
 
-    for i, r in enumerate(pump[:3]):
+    pump_out = list(pump[:3])
+    for cr in pump_credits:
+        pump_out.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
+    for i, r in enumerate(pump_out[:3]):
         rr = CN.PUMP_START + i
         ws[f"{CN.COL_SPEC}{rr}"]  = r["spec"]
         ws[f"{CN.COL_PRICE}{rr}"] = r["price"]
-        ws[f"{CN.COL_QTY}{rr}"]   = r["qty"]
+        ws[f"{CN.COL_QTY}{rr}"]   = None if float(r.get("qty", 0)) == 0 else r["qty"]
 
-    # 랙 구간 클리어 & 기입
+    # 랙 구간 클리어 & 기입 (Rack Credit만 포함)
     for rr in range(CN.RACK_START, CN.RACK_END + 1):
         ws[f"{CN.COL_SPEC}{rr}"]  = None
         ws[f"{CN.COL_PRICE}{rr}"] = None
         ws[f"{CN.COL_QTY}{rr}"]   = None
 
     out_list = others[:20]
-    for cr in credits:
+    for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
     out_list = out_list[:20]
 
@@ -388,8 +393,10 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
+    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
+    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
 
-    # 펌프 단일 행
+    # 펌프 단일 행 (Pump Credit은 RACK 구간 맨 앞 줄로 표기)
     ws[US.PUMP_SPEC]  = None
     ws[US.PUMP_PRICE] = None
     ws[US.PUMP_QTY]   = None
@@ -398,14 +405,17 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         ws[US.PUMP_PRICE] = pump[0]["price"]
         ws[US.PUMP_QTY]   = pump[0]["qty"]
 
-    # 랙 구간 클리어 & 기입
+    # 랙 구간 클리어 & 기입 (Pump Credit → 맨 앞, Rack Credit → 맨 뒤)
     for rr in range(US.RACK_START, US.RACK_END + 1):
         ws[f"{US.COL_SPEC}{rr}"]  = None
         ws[f"{US.COL_PRICE}{rr}"] = None
         ws[f"{US.COL_QTY}{rr}"]   = None
 
-    out_list = others[:20]
-    for cr in credits:
+    out_list = []
+    for cr in pump_credits:
+        out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
+    out_list += others[:20 - len(pump_credits)]
+    for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
     out_list = out_list[:20]
 

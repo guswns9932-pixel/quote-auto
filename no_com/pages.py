@@ -1277,12 +1277,21 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     _S5_COL2_MIN = 60         # 품목 최소 너비(px)
 
     def _step5_fit_col2(self) -> None:
-        """뷰포트 너비에 맞게 품목(col 2) 너비를 채운다."""
-        total  = self.step5_table.viewport().width()
-        others = sum(self.step5_table.columnWidth(c) for c in [0] + self._S5_ADJ)
-        col2   = max(self._S5_COL2_MIN, total - others)
+        """초기화 시 품목(col 2) 너비를 364px로 설정하고 나머지 칼럼들을 비례 배분."""
+        target    = 364
+        total     = self.step5_table.viewport().width()
+        col0_w    = self.step5_table.columnWidth(0)
+        min_adj   = len(self._S5_ADJ) * self._S5_ADJ_MIN
+        col2      = max(self._S5_COL2_MIN, min(target, total - col0_w - min_adj))
+        remaining = total - col0_w - col2
+        old_ws    = [self.step5_table.columnWidth(c) for c in self._S5_ADJ]
+        s         = sum(old_ws) or 1
+        new_ws    = [max(self._S5_ADJ_MIN, round(w / s * remaining)) for w in old_ws]
+        new_ws[-1] = max(self._S5_ADJ_MIN, remaining - sum(new_ws[:-1]))
         h5 = self.step5_table.horizontalHeader()
         h5.blockSignals(True)
+        for c, w in zip(self._S5_ADJ, new_ws):
+            self.step5_table.setColumnWidth(c, w)
         self.step5_table.setColumnWidth(2, col2)
         h5.blockSignals(False)
 

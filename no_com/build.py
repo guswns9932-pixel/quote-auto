@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ── 런처 스텁 코드 템플릿 ──────────────────────────────────────────
 # PLACEHOLDER_APP_NAME 은 빌드 시 실제 앱 이름으로 치환됨
 STUB_TEMPLATE = r'''
-import os, sys, zipfile, hashlib, subprocess
+import os, sys, zipfile, subprocess
 
 APP_NAME   = "PLACEHOLDER_APP_NAME"
 INSTALL_DIR = os.path.join(
@@ -52,18 +52,16 @@ def _bundle_path():
     return os.path.join(base, "bundle.zip")
 
 
-def _file_hash(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()[:20]
+def _bundle_sig(path):
+    """파일 크기 + 수정일시로 번들 고유 서명 생성 (SHA256 대비 즉각적)."""
+    st = os.stat(path)
+    return f"{st.st_size}:{int(st.st_mtime)}"
 
 
 def _already_installed(bundle_path):
     try:
         with open(VER_FILE, encoding="utf-8") as f:
-            return f.read().strip() == _file_hash(bundle_path)
+            return f.read().strip() == _bundle_sig(bundle_path)
     except Exception:
         return False
 
@@ -76,7 +74,7 @@ def _install(bundle_path):
     with zipfile.ZipFile(bundle_path) as zf:
         zf.extractall(INSTALL_DIR)
     with open(VER_FILE, "w", encoding="utf-8") as f:
-        f.write(_file_hash(bundle_path))
+        f.write(_bundle_sig(bundle_path))
 
 
 def _show_msg(title, msg, icon=0x40):

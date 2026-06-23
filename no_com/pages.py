@@ -7,7 +7,6 @@ pages.py
 
 from __future__ import annotations
 
-from copy import copy as _copy_style
 import logging
 import os
 import re
@@ -16,12 +15,12 @@ import traceback
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QEvent, QPointF, QBuffer, QByteArray, QIODevice, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGridLayout, QHBoxLayout,
+    QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
     QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget,
@@ -29,7 +28,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-import excel_io
 from core import (
     QuoteState, SheetName,
     ensure_dir, exe_dir, fmt_krw, fmt_qty,
@@ -96,6 +94,7 @@ class _TemplateLoaderThread(QThread):
         self.path = path
     def run(self) -> None:
         try:
+            import excel_io
             from openpyxl import load_workbook
             wb = load_workbook(self.path, data_only=False)
             rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(wb[SheetName.ITEMS])
@@ -117,6 +116,7 @@ class _GenQuoteThread(QThread):
 
     def run(self) -> None:
         try:
+            import excel_io
             if self.qtype == "국내" and len(self.rds) >= 2:
                 def _cb(done, total, name):
                     self.progress.emit(f"[{done}/{total}] 저장: {name}")
@@ -146,6 +146,7 @@ class _GenCoverThread(QThread):
 
     def run(self) -> None:
         try:
+            import excel_io
             def _cb(done, total, name):
                 self.progress.emit(f"[{done}/{total}] 읽는 중: {name}")
             out = excel_io.generate_cover(
@@ -251,6 +252,7 @@ class _ExcelLoaderThread(QThread):
         self._cancel = True
 
     def run(self) -> None:
+        import excel_io
         total = len(self.paths)
         try:
             com_ctx = excel_io.ExcelCOM()
@@ -1033,6 +1035,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             QMessageBox.warning(self, "순서 오류", "STEP1을 먼저 완료하세요."); return
         path, _ = QFileDialog.getOpenFileName(self, "의뢰파일 선택", "", "Excel Files (*.xlsx)")
         if not path: return
+        import excel_io
         try:
             sheet_name, rows = excel_io.parse_request_xlsx(path)
         except Exception as e:
@@ -2404,6 +2407,7 @@ class RackPurchaseRequestPage(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "견적의뢰DATA 선택", "", "Excel Files (*.xlsx)")
         if not path:
             return
+        import excel_io
 
         def _on_result(res):
             sheet_name, rows = res
@@ -3867,12 +3871,16 @@ class ESignPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        # ESignPage 전용 Qt 클래스: 이 페이지가 최초 생성될 때만 임포트
+        global QGraphicsScene, QGraphicsPixmapItem, QPointF, QBuffer, QByteArray, QIODevice
+        from PySide6.QtCore import QPointF, QBuffer, QByteArray, QIODevice
+        from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem
         self._code        : str  = ""
         self._signs       : List = []
         self._files       : List[str] = []
         self._base_folder : str  = ""
-        self._sheet_pngs  : List[List[str]] = []   # 파일별 시트 PNG 경로 리스트
-        self._cur_pngs    : List[str] = []          # 현재 파일 PNG 경로들
+        self._sheet_pngs  : List[List[str]] = []
+        self._cur_pngs    : List[str] = []
         self._cur_file    : int  = 0
         self._cur_page    : int  = 0
         self._sign_items    : Dict[Tuple[int,int], List[SignatureItem]] = {}
@@ -3940,6 +3948,7 @@ class ESignPage(QWidget):
         QMessageBox.information(self, "완료", "승인코드 LOAD 완료\n전자서명 ON")
 
     def _load_excels(self) -> None:
+        import excel_io
         if not excel_io.COM_AVAILABLE:
             QMessageBox.critical(self, "오류", "Excel COM이 없습니다.")
             return

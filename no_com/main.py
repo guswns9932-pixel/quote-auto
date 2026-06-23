@@ -197,25 +197,19 @@ def main() -> None:
     splash.show()
     app.processEvents()
 
-    # ── 백그라운드에서 무거운 모듈 프리로드 ────────────────────────────
-    # openpyxl 은 excel_io 임포트 시 함께 로드됨 (가장 느린 부분).
-    # 메인 스레드를 블로킹하지 않고 QApplication 이벤트 루프를 유지한다.
-    _ready = threading.Event()
-
+    # ── openpyxl 백그라운드 프리로드 (창 생성과 완전히 병렬) ───────────
+    # pages.py 가 더 이상 excel_io 를 모듈 수준에서 임포트하지 않으므로
+    # 프리로드 완료를 기다리지 않고 즉시 창을 생성할 수 있다.
+    # 사용자가 버튼을 누를 시점(체감 2-3초 이후)에는 로드가 완료되어 있다.
     def _preload() -> None:
         try:
             import excel_io  # noqa: F401 — openpyxl 포함
-            import pages     # noqa: F401 — 페이지 클래스 선로드 (창 생성 시 즉시 사용)
-        finally:
-            _ready.set()
+        except Exception:
+            pass
 
     threading.Thread(target=_preload, daemon=True).start()
 
-    while not _ready.is_set():
-        _ready.wait(0.05)
-        app.processEvents()
-
-    # ── 메인 윈도우 생성 (이 시점엔 무거운 모듈이 이미 캐시됨) ─────────
+    # ── 메인 윈도우 즉시 생성 ──────────────────────────────────────────
     window = MainWindow()
     splash.finish(window)
     window.showMaximized()

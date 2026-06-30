@@ -622,7 +622,7 @@ class _QuoteListWindow(QWidget):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("견적서 LIST")
         self.resize(480, 620)
-        self._all_files: List[Tuple[float, str]] = []
+        self._session_files: List[str] = []
         self._build()
 
     def _build(self) -> None:
@@ -632,9 +632,7 @@ class _QuoteListWindow(QWidget):
         title_row = QHBoxLayout()
         lbl = QLabel("견적서 LIST")
         f = lbl.font(); f.setPointSize(12); f.setBold(True); lbl.setFont(f)
-        btn_refresh = QPushButton("새로고침"); btn_refresh.setFixedHeight(24)
-        btn_refresh.clicked.connect(self._on_refresh)
-        title_row.addWidget(lbl); title_row.addWidget(btn_refresh)
+        title_row.addWidget(lbl)
         v.addLayout(title_row)
 
         filter_row = QHBoxLayout(); filter_row.setSpacing(6)
@@ -651,23 +649,20 @@ class _QuoteListWindow(QWidget):
         self.list_widget.itemDoubleClicked.connect(self._open_item)
         v.addWidget(self.list_widget, 1)
 
-    def _on_refresh(self) -> None:
-        p = self.parent()
-        if p and hasattr(p, '_refresh_quote_list'):
-            p._refresh_quote_list()
+    def add_item(self, path: str) -> None:
+        self._session_files.insert(0, path)
+        self._apply_filter()
 
-    def refresh(self, all_files: list) -> None:
-        self._all_files = all_files
+    def refresh_session(self, files: List[str]) -> None:
+        self._session_files = list(files)
         self._apply_filter()
 
     def _apply_filter(self) -> None:
         keyword = self.edit_filter.text().strip().lower()
         self.list_widget.clear()
-        for _, full in self._all_files:
+        for full in self._session_files:
             tool, label = QuoteBuilderPage._parse_quote_label(full)
             if tool is None:
-                continue
-            if os.path.isfile(full[:-5] + ".pdf"):
                 continue
             if keyword and keyword not in label.lower():
                 continue
@@ -714,7 +709,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._tpl_thread    : Optional[_TemplateLoaderThread] = None
         self._gen_qt_thread : Optional[_GenQuoteThread]       = None
         self._gen_cv_thread : Optional[_GenCoverThread]       = None
-        self._list_all_files: List[Tuple[float, str]]          = []
+        self._list_all_files: List[str]                        = []
         self._quote_list_window: Optional[_QuoteListWindow]    = None
 
         self._build_ui()
@@ -763,7 +758,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         bh.addWidget(self._build_bottom_right_panel())
         outer.addWidget(bottom)
 
-        QTimer.singleShot(0, self._refresh_quote_list)
 
     @staticmethod
     def _action_btn(label: str, slot) -> QPushButton:
@@ -1615,51 +1609,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 it.setBackground(color)
 
     def _add_done(self, path: str) -> None:
-        self._refresh_quote_list()
+        self._list_all_files.insert(0, path)
+        if self._quote_list_window:
+            self._quote_list_window.add_item(path)
 
     def _add_done_cover(self, path: str) -> None:
-        self._refresh_quote_list()
+        self._list_all_files.insert(0, path)
         if self._quote_list_window:
-            w = self._quote_list_window.list_widget
-            if w.count() > 0:
-                w.scrollToTop()
-
-    def _refresh_quote_list(self) -> None:
-        """견적서 폴더를 백그라운드 스캔 후 목록을 갱신한다 (UI 블로킹 없음)."""
-        root = os.path.join(exe_dir(), "견적서")
-
-        def _scan():
-            result: List[Tuple[float, str]] = []
-            if not os.path.isdir(root):
-                return result
-            folder_files: Dict[str, List[Tuple[float, str]]] = {}
-            for dirpath, _, filenames in os.walk(root):
-                for fn in filenames:
-                    if fn.endswith(".xlsx") and not fn.startswith("~$"):
-                        full = os.path.join(dirpath, fn)
-                        folder_files.setdefault(dirpath, []).append(
-                            (os.path.getmtime(full), full)
-                        )
-            for lst in folder_files.values():
-                lst.sort(reverse=True)
-            sorted_folders = sorted(
-                folder_files,
-                key=lambda d: folder_files[d][0][0],
-                reverse=True,
-            )
-            for d in sorted_folders:
-                result.extend(folder_files[d])
-            return result
-
-        def _on_done(files):
-            self._list_all_files = files
-            if self._quote_list_window:
-                self._quote_list_window.refresh(self._list_all_files)
-
-        worker = _BgWorker(_scan, parent=self)
-        worker.result.connect(_on_done)
-        self._quote_list_worker = worker  # GC 방지
-        worker.start()
+            self._quote_list_window.add_item(path)
 
     @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
@@ -1715,7 +1672,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         """견적서 LIST 독립 창을 열거나 앞으로 가져온다."""
         if self._quote_list_window is None:
             self._quote_list_window = _QuoteListWindow(self)
-        self._quote_list_window.refresh(self._list_all_files)
+            self._quote_list_window.refresh_session(self._list_all_files)
         self._quote_list_window.show_and_raise()
 
     def _log(self, text: str) -> None:

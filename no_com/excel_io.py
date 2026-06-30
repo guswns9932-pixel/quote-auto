@@ -516,12 +516,10 @@ def generate_cover(
     ws_data  = wb[SheetName.COVER_DATA]
     ws_cover = wb[SheetName.COVER]
 
-    # 갑지DATA 초기화
-    for r in range(2, 2001):
-        for c in range(1, 28):  # A:AA
-            cell = ws_data.cell(r, c)
-            if cell.value is not None:
-                cell.value = None
+    # 갑지DATA 초기화 — 실제 값이 있는 셀만 순회 (빈 셀 객체 생성 없음)
+    for (row, col), cell in list(ws_data._cells.items()):
+        if 2 <= row <= 2000 and 1 <= col <= 27:
+            cell.value = None
 
     # 각 source 파일의 견적의뢰복사본 2행 읽기
     write_row = 2

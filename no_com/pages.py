@@ -3883,9 +3883,14 @@ class ESignPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "오류", str(e))
             return
-        folder = os.path.dirname(path); exts = (".png",".jpg",".jpeg",".bmp",".webp")
-        imgs = sorted([os.path.join(folder,f) for f in os.listdir(folder) if f.lower().endswith(exts)],
-                       key=lambda p: os.path.basename(p).lower())
+        folder = os.path.dirname(path)
+        import glob as _glob
+        imgs = sorted(
+            [p for ext in ("*.png","*.jpg","*.jpeg","*.bmp","*.webp")
+             for p in _glob.glob(os.path.join(folder, ext))
+             + _glob.glob(os.path.join(folder, ext.upper()))],
+            key=lambda p: os.path.basename(p).lower()
+        )
         def _pick(kws):
             for kw in kws:
                 for p in imgs:

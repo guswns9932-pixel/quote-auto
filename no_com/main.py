@@ -78,8 +78,7 @@ class LeftNav(QWidget):
 
         buttons = [
             ("견적서작성", lambda: _go(0), "#BBDEFB"),
-            ("RACK구매요청서 작성", lambda: _go(1), "#FFF176"),
-            ("전자서명",   lambda: _go(2), "#C8E6C9"),
+            ("전자서명",   lambda: _go(1), "#C8E6C9"),
         ]
         for label, slot, color in buttons:
             btn = self._nav_btn(label, slot)
@@ -112,7 +111,6 @@ class MainWindow(QMainWindow):
     # 인덱스 → (모듈 클래스명, 클래스 참조 캐시)
     _PAGE_DEFS = [
         ("pages", "QuoteBuilderPage"),
-        ("pages", "RackPurchaseRequestPage"),
         ("pages", "ESignPage"),
     ]
 

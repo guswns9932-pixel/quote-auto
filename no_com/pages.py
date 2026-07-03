@@ -134,8 +134,9 @@ class _GenQuoteThread(QThread):
 
 class _GenCoverThread(QThread):
     """갑지 생성을 백그라운드에서 실행."""
-    progress = Signal(str)   # 로그 메시지
-    done     = Signal(object)  # 저장 경로(str) 또는 Exception
+    progress = Signal(str)        # 로그 메시지
+    step     = Signal(int, int)   # (done, total) — 진행률 다이얼로그용
+    done     = Signal(object)     # 저장 경로(str) 또는 Exception
 
     def __init__(self, template_path: str, folder: str, paths: list,
                  investor_name: str, warranty_years: int = 2, parent=None) -> None:
@@ -149,6 +150,7 @@ class _GenCoverThread(QThread):
             import excel_io
             def _cb(done, total, name):
                 self.progress.emit(f"[{done}/{total}] 읽는 중: {name}")
+                self.step.emit(done, total)
             out = excel_io.generate_cover(
                 self.template_path, self.folder, self.paths,
                 investor_name=self.investor_name, progress_cb=_cb,
@@ -706,8 +708,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._filter_timer.timeout.connect(self._do_filter)
         self._tpl_thread    : Optional[_TemplateLoaderThread] = None
         self._gen_qt_thread : Optional[_GenQuoteThread]       = None
-        self._gen_cv_thread : Optional[_GenCoverThread]       = None
-        self._list_all_files: List[str]                        = []
+        self._gen_cv_thread  : Optional[_GenCoverThread]       = None
+        self._cover_progress : Optional[QProgressDialog]      = None
+        self._list_all_files : List[str]                       = []
         self._quote_list_window: Optional[_QuoteListWindow]    = None
 
         self._build_ui()
@@ -1573,9 +1576,22 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self.state.warranty_years, self)
         self._gen_cv_thread.progress.connect(self._log)
         self._gen_cv_thread.done.connect(self._on_gen_cover_done)
+
+        self._cover_progress = QProgressDialog("갑지 생성 중…", None, 0, len(paths), self)
+        self._cover_progress.setWindowTitle("갑지 생성")
+        self._cover_progress.setWindowModality(Qt.WindowModal)
+        self._cover_progress.setMinimumDuration(500)
+        self._cover_progress.setValue(0)
+        self._gen_cv_thread.step.connect(
+            lambda d, t: self._cover_progress.setValue(d) if self._cover_progress else None
+        )
+
         self._gen_cv_thread.start()
 
     def _on_gen_cover_done(self, result) -> None:
+        if self._cover_progress:
+            self._cover_progress.close()
+            self._cover_progress = None
         self._set_gen_buttons(True)
         if isinstance(result, Exception):
             logger.error("갑지 생성 실패", exc_info=result)
@@ -3966,7 +3982,9 @@ class ESignPage(QWidget):
         self._com_init_timer.timeout.connect(self._on_com_init_timeout)
         self._com_init_timer.start(30_000)
 
+        self.btn_code.setEnabled(False)
         self.btn_excel.setEnabled(False)
+        self.btn_save.setEnabled(False)
         self._loader_thread.start()
 
     def _on_load_progress(self, done: int, total: int, fname: str) -> None:
@@ -3994,7 +4012,9 @@ class ESignPage(QWidget):
         if self._load_progress:
             self._load_progress.close()
             self._load_progress = None
+        self.btn_code.setEnabled(True)
         self.btn_excel.setEnabled(True)
+        self.btn_save.setEnabled(True)
         QMessageBox.critical(
             self, "Excel COM 타임아웃",
             "Excel COM 초기화가 30초를 초과했습니다.\n\n"
@@ -4011,6 +4031,9 @@ class ESignPage(QWidget):
         if self._load_progress:
             self._load_progress.close()
             self._load_progress = None
+        self.btn_code.setEnabled(True)
+        self.btn_excel.setEnabled(True)
+        self.btn_save.setEnabled(True)
         self._sheet_pngs = self._loader_thread.sheet_pngs
         while len(self._sheet_pngs) < len(self._files):
             self._sheet_pngs.append([])

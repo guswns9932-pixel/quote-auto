@@ -3848,9 +3848,11 @@ class ESignPage(QWidget):
         self._render_sz     : Dict[Tuple[int,int], Tuple[int,int]]     = {}
         self._bg_item              = None
         self._shown_key     : Optional[Tuple[int,int]] = None
-        self._loader_thread : Optional[_ExcelLoaderThread] = None
-        self._load_progress : Optional[QProgressDialog]   = None
-        self._tmp_dir       : Optional[str]               = None
+        self._loader_thread    : Optional[_ExcelLoaderThread] = None
+        self._load_progress    : Optional[QProgressDialog]   = None
+        self._tmp_dir          : Optional[str]               = None
+        self._com_init_timer   : Optional[QTimer]            = None
+        self._com_init_ok      : bool                        = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -3957,19 +3959,55 @@ class ESignPage(QWidget):
         self._loader_thread.finished.connect(self._on_load_finished)
         self._load_progress.canceled.connect(self._loader_thread.cancel)
 
+        # COM DispatchEx 무한 블로킹 방지: 30초 내 첫 progress 없으면 강제 종료
+        self._com_init_ok = False
+        self._com_init_timer = QTimer(self)
+        self._com_init_timer.setSingleShot(True)
+        self._com_init_timer.timeout.connect(self._on_com_init_timeout)
+        self._com_init_timer.start(30_000)
+
         self.btn_excel.setEnabled(False)
         self._loader_thread.start()
 
     def _on_load_progress(self, done: int, total: int, fname: str) -> None:
         if not self._load_progress:
             return
+        # COM init 성공 확인 → 타임아웃 타이머 해제
+        if not self._com_init_ok:
+            self._com_init_ok = True
+            if self._com_init_timer:
+                self._com_init_timer.stop()
         self._load_progress.setValue(done)
         if done < total:
             self._load_progress.setLabelText(f"변환 중 ({done + 1}/{total}): {fname}")
         else:
             self._load_progress.setLabelText("변환 완료")
 
+    def _on_com_init_timeout(self) -> None:
+        """Excel COM DispatchEx가 30초 내에 응답하지 않으면 스레드를 강제 종료한다."""
+        if self._com_init_ok:
+            return
+        logger.error("Excel COM 초기화 30초 타임아웃 — 스레드 강제 종료")
+        if self._loader_thread and self._loader_thread.isRunning():
+            self._loader_thread.terminate()
+            self._loader_thread.wait(3000)
+        if self._load_progress:
+            self._load_progress.close()
+            self._load_progress = None
+        self.btn_excel.setEnabled(True)
+        QMessageBox.critical(
+            self, "Excel COM 타임아웃",
+            "Excel COM 초기화가 30초를 초과했습니다.\n\n"
+            "가능한 원인:\n"
+            "  • Office 활성화 창이 백그라운드에서 대기 중\n"
+            "  • 이전 Excel 충돌 복구 대화창 열려 있음\n"
+            "  • COM 등록 손상\n\n"
+            "Excel을 직접 열어 완료한 뒤 다시 시도하세요."
+        )
+
     def _on_load_finished(self) -> None:
+        if self._com_init_timer:
+            self._com_init_timer.stop()
         if self._load_progress:
             self._load_progress.close()
             self._load_progress = None

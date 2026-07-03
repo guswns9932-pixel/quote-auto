@@ -139,8 +139,12 @@ def _patch_chrome_shortcut() -> bool:
     except ImportError:
         return False
 
-    shell = win32com.client.Dispatch("WScript.Shell")
-    user_desktop = shell.SpecialFolders("Desktop")  # 사용자 개인 바탕화면만 사용
+    try:
+        shell = win32com.client.Dispatch("WScript.Shell")
+        user_desktop = shell.SpecialFolders("Desktop")  # 사용자 개인 바탕화면만 사용
+    except Exception as e:
+        logger.warning("WScript.Shell 초기화 실패 (그룹 정책 차단 가능성): %s", e)
+        return False
     debug_arg = "--remote-debugging-port=9222"
 
     # ① 사용자 바탕화면의 Chrome 바로가기 수정 시도

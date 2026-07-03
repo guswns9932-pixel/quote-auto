@@ -35,15 +35,30 @@ from core import (
 
 logger = logging.getLogger("QuoteApp")
 
-# ── COM 임포트 (PDF 변환 전용) ──────────────────────────────────
-try:
-    import pythoncom
-    import win32com.client as win32
-    COM_AVAILABLE = True
-except ImportError:
-    pythoncom = None        # type: ignore
-    win32 = None            # type: ignore
-    COM_AVAILABLE = False
+# ── COM 지연 로딩 (PDF 변환 전용) ───────────────────────────────
+# 모듈 임포트 시 DLL LoadLibrary를 호출하지 않도록 지연.
+# GIL 점유로 인한 시작 시 UI 동결 방지 (AV/Defender 환경에서 10~120초 블로킹 가능).
+pythoncom: Any = None
+win32: Any = None
+COM_AVAILABLE: Optional[bool] = None  # None=미확인, True=사용가능, False=불가
+
+
+def _ensure_com() -> bool:
+    """COM DLL을 최초 필요 시점에만 로드한다."""
+    global COM_AVAILABLE, pythoncom, win32
+    if COM_AVAILABLE is not None:
+        return COM_AVAILABLE
+    try:
+        import pythoncom as _pc
+        import win32com.client as _w32
+        pythoncom = _pc
+        win32 = _w32
+        COM_AVAILABLE = True
+    except Exception:
+        pythoncom = None
+        win32 = None
+        COM_AVAILABLE = False
+    return COM_AVAILABLE
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -571,7 +586,7 @@ class ExcelCOM:
         self._excel = None
 
     def __enter__(self) -> "ExcelCOM":
-        if not COM_AVAILABLE:
+        if not _ensure_com():
             raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
         pythoncom.CoInitialize()
         self._excel = win32.DispatchEx("Excel.Application")

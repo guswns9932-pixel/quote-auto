@@ -201,9 +201,12 @@ def main() -> None:
     # 사용자가 버튼을 누를 시점(체감 2-3초 이후)에는 로드가 완료되어 있다.
     def _preload() -> None:
         try:
-            import excel_io  # noqa: F401 — openpyxl 포함
+            import openpyxl  # noqa: F401 — 순수 Python, GIL 점유 없음
         except Exception:
             pass
+        # COM DLL(pythoncom/win32com)은 프리로드하지 않음:
+        # LoadLibrary 중 GIL을 점유해 Qt 메인 스레드를 동결시킴.
+        # AV/Defender 환경에서 최대 120초 블로킹 가능.
 
     threading.Thread(target=_preload, daemon=True).start()
 

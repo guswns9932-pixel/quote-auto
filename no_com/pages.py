@@ -3915,7 +3915,7 @@ class ESignPage(QWidget):
 
     def _load_excels(self) -> None:
         import excel_io
-        if not excel_io.COM_AVAILABLE:
+        if not excel_io._ensure_com():
             QMessageBox.critical(self, "오류", "Excel COM이 없습니다.")
             return
         if self._loader_thread and self._loader_thread.isRunning():

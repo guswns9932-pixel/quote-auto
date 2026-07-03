@@ -254,14 +254,13 @@ class _ExcelLoaderThread(QThread):
     def run(self) -> None:
         import excel_io
         total = len(self.paths)
+        com_ctx = excel_io.ExcelCOM()
+        xl_app = None
         try:
-            com_ctx = excel_io.ExcelCOM()
             com_ctx.__enter__()
             xl_app = com_ctx.app
         except Exception as e:
             logger.error("Excel COM 초기화 실패: %s", e, exc_info=True)
-            com_ctx = None
-            xl_app = None
 
         try:
             for i, xlsx in enumerate(self.paths):
@@ -276,11 +275,10 @@ class _ExcelLoaderThread(QThread):
                     logger.error("시트 캡처 실패 (%s): %s", xlsx, e, exc_info=True)
                     self.sheet_pngs.append([])
         finally:
-            if com_ctx is not None:
-                try:
-                    com_ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
+            try:
+                com_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
 
         self.progress.emit(len(self.sheet_pngs), total, "완료")
 
@@ -1516,8 +1514,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             QMessageBox.warning(self, "진행 중", "이미 생성 작업이 진행 중입니다."); return
         self._refresh_credits(); self._recalc_totals()
         items = self._snapshot_items(); qtype = self.state.quote_type or "국내"
-        if qtype == "중국" and not self.state.cn_info.get("tool"): self._open_options("cn")
-        if qtype == "미국"  and not self.state.us_info.get("tool"): self._open_options("us")
+        if qtype == "중국" and not self.state.cn_info.get("tool"):
+            self._open_options("cn")
+            if not self.state.cn_info.get("tool"): return
+        if qtype == "미국" and not self.state.us_info.get("tool"):
+            self._open_options("us")
+            if not self.state.us_info.get("tool"): return
         checked = self._checked_req_rows()
         if qtype == "국내" and self.state.request_rows and len(checked) >= 2:
             valid = [i for i in checked if i < len(self.state.request_rows)]
@@ -1538,7 +1540,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._set_gen_buttons(True)
         if isinstance(result, Exception):
             logger.error("견적서 생성 실패", exc_info=result)
-            QMessageBox.critical(self, "생성 오류", f"{result}\n\n{traceback.format_exc()}")
+            tb = "".join(traceback.format_exception(type(result), result, result.__traceback__))
+            QMessageBox.critical(self, "생성 오류", f"{result}\n\n{tb}")
             return
         for i, (rd, path) in enumerate(result):
             if path:
@@ -1576,7 +1579,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._set_gen_buttons(True)
         if isinstance(result, Exception):
             logger.error("갑지 생성 실패", exc_info=result)
-            QMessageBox.critical(self, "오류", f"{result}\n\n{traceback.format_exc()}")
+            tb = "".join(traceback.format_exception(type(result), result, result.__traceback__))
+            QMessageBox.critical(self, "오류", f"{result}\n\n{tb}")
             return
         out = result
         self.state.last_output_dir = os.path.dirname(out)

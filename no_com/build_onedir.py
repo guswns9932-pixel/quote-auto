@@ -137,7 +137,7 @@ def _make_spec(app_name: str, icon: str) -> str:
             excludes=[
                 "tkinter", "matplotlib", "numpy", "scipy",
                 "unittest", "doctest", "pdb", "profile", "cProfile",
-                "difflib", "pickletools", "tarfile", "ftplib",
+                "difflib", "pickletools", "ftplib",
                 "multiprocessing.pool",
             ],
             noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화

@@ -113,6 +113,7 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "win32com.server",
                 "win32con",
                 "win32timezone",
+                "tarfile",  # pymupdf 동적 임포트 (정적 분석 불가)
                 # selenium: 함수 내 lazy import라 정적 분석이 놓칠 수 있는 submodule 명시
                 "selenium",
                 "selenium.webdriver",

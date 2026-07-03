@@ -174,6 +174,7 @@ def _make_app_spec(app_name: str, icon: str) -> str:
                 "pythoncom", "pywintypes", "win32api",
                 "win32com", "win32com.client", "win32com.server",
                 "win32con", "win32timezone",
+                "tarfile",  # pymupdf 동적 임포트 (정적 분석 불가)
             ],
             hookspath=[],
             runtime_hooks=[],

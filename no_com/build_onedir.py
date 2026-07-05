@@ -88,6 +88,10 @@ def _make_spec(app_name: str, icon: str) -> str:
             hiddenimports=[
                 # 앱 모듈 (importlib.import_module 동적 로딩 → PyInstaller 자동 감지 불가)
                 "pages",
+                "page_common",
+                "page_quote",
+                "page_esign",
+                "page_rack",
                 "excel_io",
                 "core",
                 "widgets",

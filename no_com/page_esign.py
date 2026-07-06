@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from core import ensure_dir, unique_path
 from widgets import PdfView, SignatureItem, PasswordDialog, tint_button
-from page_common import _natural_key
+from page_common import _friendly_error_msg, _natural_key, _ScrollableErrorDialog
 
 logger = logging.getLogger("QuoteApp")
 
@@ -359,7 +359,9 @@ class ESignPage(QWidget):
             QMessageBox.information(self, "완료", f"저장 완료:\n{out}"); self.lbl_status.setText("PDF 저장 완료")
         except Exception as e:
             logger.error("PDF 저장 실패", exc_info=True)
-            QMessageBox.critical(self, "오류", f"{e}\n\n{traceback.format_exc()}")
+            tb = traceback.format_exc()
+            user_msg, hint = _friendly_error_msg(e)
+            _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
 
     def _build_pdf(self, out: str) -> None:
         import fitz

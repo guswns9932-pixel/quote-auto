@@ -34,7 +34,7 @@ from widgets import (
     bold_label, centered_checkbox,
     get_checkbox_from_cell, info_label, labeled_frame, tint_button,
 )
-from page_common import _make_plain_table, _ScrollableErrorDialog
+from page_common import _friendly_error_msg, _make_plain_table, _ScrollableErrorDialog
 
 logger = logging.getLogger("QuoteApp")
 
@@ -1382,7 +1382,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if isinstance(result, Exception):
             logger.error("견적서 생성 실패", exc_info=result)
             tb = "".join(traceback.format_exception(type(result), result, result.__traceback__))
-            QMessageBox.critical(self, "생성 오류", f"{result}\n\n{tb}")
+            user_msg, hint = _friendly_error_msg(result)
+            _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
         for i, (rd, path) in enumerate(result):
             if path:
@@ -1434,7 +1435,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if isinstance(result, Exception):
             logger.error("갑지 생성 실패", exc_info=result)
             tb = "".join(traceback.format_exception(type(result), result, result.__traceback__))
-            QMessageBox.critical(self, "오류", f"{result}\n\n{tb}")
+            user_msg, hint = _friendly_error_msg(result)
+            _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
         out = result
         self.state.last_output_dir = os.path.dirname(out)

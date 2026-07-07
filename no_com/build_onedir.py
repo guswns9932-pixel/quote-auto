@@ -145,11 +145,10 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "matplotlib", "numpy", "scipy",
                 # 테스트/디버그 도구
                 "unittest", "doctest", "pdb", "profile", "cProfile",
-                # 미사용 stdlib — 번들 크기·AV 스캔 시간 절감
+                # 미사용 stdlib (pkg_resources/win32com 체인에 영향 없는 것만 제외)
                 "difflib", "pickletools",
-                "xmlrpc", "pydoc", "idlelib", "lib2to3",
-                "distutils", "ensurepip", "venv",
-                "sqlite3", "dbm",
+                "xmlrpc", "pydoc", "idlelib",
+                "ensurepip", "venv",
                 "curses",
                 "cgi", "cgitb",
                 "msilib",
@@ -157,6 +156,9 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "ftplib", "imaplib", "smtplib", "poplib", "nntplib", "telnetlib",
                 # 멀티프로세싱 (앱은 QThread 사용)
                 "multiprocessing.pool",
+                # ※ distutils, lib2to3, sqlite3, dbm 은 제외하지 않음:
+                #   win32com → pkg_resources → distutils/lib2to3 의존 체인이 존재해
+                #   제외 시 빌드 또는 런타임 오류 발생 가능
             ],
             noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
             optimize=2,       # 2: docstring 제거 → .pyc 크기 감소, 임포트 속도 향상
@@ -211,6 +213,7 @@ def main():
     with open(spec_path, "w", encoding="utf-8") as f:
         f.write(_make_spec(app_name, icon))
 
+    log_path = os.path.join(HERE, f"_build_{app_name}.log")
     cmd = [
         sys.executable, "-m", "PyInstaller",
         spec_path,
@@ -218,15 +221,27 @@ def main():
         "--workpath", work_dir,
         "--noconfirm",
         "--clean",
+        "--log-level", "WARN",   # INFO 로그 생략 → 경고/오류만 출력
     ]
 
     print(f"\n{'='*54}")
     print(f"  앱 이름 : {app_name}")
     print(f"  아이콘  : {icon or '없음'}")
     print(f"  출력    : {os.path.join(dist_dir, app_name)}/")
+    print(f"  로그    : {log_path}")
     print(f"{'='*54}\n")
 
-    result = subprocess.run(cmd, cwd=HERE)
+    with open(log_path, "w", encoding="utf-8") as log_f:
+        result = subprocess.run(cmd, cwd=HERE, stdout=log_f, stderr=log_f,
+                                text=True, encoding="utf-8", errors="replace")
+
+    # 로그를 콘솔에도 출력 (오류 진단용)
+    try:
+        log_text = open(log_path, encoding="utf-8").read()
+        if log_text.strip():
+            print(log_text)
+    except OSError:
+        pass
 
     try:
         os.remove(spec_path)
@@ -250,6 +265,8 @@ def main():
         print(f"{'='*54}\n")
     else:
         print(f"\n빌드 실패 (exit code={result.returncode})")
+        print(f"  오류 로그: {log_path}")
+        print(f"  로그 파일을 열어 ERROR / CRITICAL 메시지를 확인하세요.")
 
     sys.exit(result.returncode)
 

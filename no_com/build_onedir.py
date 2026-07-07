@@ -106,15 +106,14 @@ def _make_spec(app_name: str, icon: str) -> str:
                 *fitz_h,
                 *pil_h,
                 *wdm_h,
-                "PIL",
+                # PIL.*는 pil_h에 이미 포함되어 있으나 명시적으로 추가 (누락 방지)
                 "PIL.ImageGrab",
-                "PIL.Image",
                 "pythoncom",
                 "pywintypes",
                 "win32api",
                 "win32com",
                 "win32com.client",
-                "win32com.server",
+                # win32com.server: 앱이 COM 서버 기능을 사용하지 않으므로 제외
                 "win32con",
                 "win32timezone",
                 "tarfile",  # pymupdf 동적 임포트 (정적 분석 불가)
@@ -140,9 +139,23 @@ def _make_spec(app_name: str, icon: str) -> str:
             hookspath=[],
             runtime_hooks=[],
             excludes=[
-                "tkinter", "matplotlib", "numpy", "scipy",
+                # UI 툴킷
+                "tkinter",
+                # 과학 계산 (앱 미사용)
+                "matplotlib", "numpy", "scipy",
+                # 테스트/디버그 도구
                 "unittest", "doctest", "pdb", "profile", "cProfile",
-                "difflib", "pickletools", "ftplib",
+                # 미사용 stdlib — 번들 크기·AV 스캔 시간 절감
+                "difflib", "pickletools",
+                "xmlrpc", "pydoc", "idlelib", "lib2to3",
+                "distutils", "ensurepip", "venv",
+                "sqlite3", "dbm",
+                "curses",
+                "cgi", "cgitb",
+                "msilib",
+                # 미사용 네트워크 프로토콜
+                "ftplib", "imaplib", "smtplib", "poplib", "nntplib", "telnetlib",
+                # 멀티프로세싱 (앱은 QThread 사용)
                 "multiprocessing.pool",
             ],
             noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
@@ -170,13 +183,18 @@ def _make_spec(app_name: str, icon: str) -> str:
             a.datas,
             strip=False,
             upx=True,
-            # Qt DLL 및 VC 런타임은 UPX 압축 시 리소스가 손상될 수 있으므로 제외
             upx_exclude=[
+                # Qt DLL: UPX 압축 시 리소스 섹션 손상 위험
                 "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
                 "Qt6Network.dll", "Qt6PrintSupport.dll", "Qt6Svg.dll",
                 "Qt6OpenGL.dll", "Qt6XcbQpa.dll", "Qt6DBus.dll",
+                # MSVC 런타임
                 "vcruntime140.dll", "vcruntime140_1.dll",
                 "MSVCP140.dll", "MSVCP140_1.dll",
+                # pywin32: ordinal-export DLL — UPX가 export table 손상 가능 → COM 오류
+                "pythoncom*.dll", "pywintypes*.dll",
+                # Python C 확장(.pyd): UPX 압축 시 임포트 실패 가능
+                "*.pyd",
             ],
             name="{app_name}",
         )

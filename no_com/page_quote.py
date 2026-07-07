@@ -1499,27 +1499,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self._quote_list_window.add_item(path)
 
     @staticmethod
-    def _read_xlsx_cell(full_path: str, sheet_name: str, cell_addr: str) -> str:
-        """xlsx 파일에서 특정 셀 값을 읽어 문자열로 반환. 실패 시 빈 문자열."""
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(full_path, read_only=True, data_only=True)
-            if sheet_name not in wb.sheetnames:
-                wb.close(); return ""
-            val = wb[sheet_name][cell_addr].value
-            wb.close()
-            return str(val).strip() if val is not None else ""
-        except Exception:
-            return ""
-
-    @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
         """파일 경로에서 (설비호기, 표시레이블) 추출.
 
         반환값:
         - (None, '')    : 패턴 불일치 → 목록에서 제외
         - ('', label)   : 갑지 파일  → label 끝이 '_갑지', 붉은색으로 표시
-        - (tool, label) : 일반 견적서 → 라인_공정_설비호기_사양 형식
+        - (tool, label) : 일반 견적서 → 라인_공정_설비호기 형식
         """
         import re as _re
         fn = os.path.basename(full_path)
@@ -1538,16 +1524,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 return "", f"중국_{m_cn.group(1)}_갑지"
             return "", "갑지"
 
-        _cell = QuoteBuilderPage._read_xlsx_cell
-
         # ── 미국 Quotation: ..._{tool}_Quotation ─────────────────────
         m_us = _re.search(r'_([^_]+)_Quotation$', stem)
         if m_us:
             tool = m_us.group(1)
             mf   = _re.match(r'^\d{6}_미국_(.+)$', folder)
-            base = f"미국_{mf.group(1) if mf else '미국'}_{tool}"
-            extra = _cell(full_path, "견적서_미국", "C17")
-            return tool, f"{base}_{extra}" if extra else base
+            return tool, f"미국_{mf.group(1) if mf else '미국'}_{tool}"
 
         # ── 국내·중국: 마지막 _구분자 이후 = 설비호기 ───────────────
         parts = stem.split('_')
@@ -1559,15 +1541,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if m_dom:
             lp_parts = m_dom.group(1).split('_')
             lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else m_dom.group(1)
-            base = f"{lineproc}_{tool}"
-            extra = _cell(full_path, "사양서", "A15")
-            return tool, f"{base}_{extra}" if extra else base
+            return tool, f"{lineproc}_{tool}"
 
         m_cn = _re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
         if m_cn:
-            base = f"중국_{m_cn.group(1)}_{tool}"
-            extra = _cell(full_path, "견적서_중국", "C17")
-            return tool, f"{base}_{extra}" if extra else base
+            return tool, f"중국_{m_cn.group(1)}_{tool}"
 
         return tool, tool
 

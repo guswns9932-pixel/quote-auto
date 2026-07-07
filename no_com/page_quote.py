@@ -460,7 +460,8 @@ class _QuoteListWindow(QWidget):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("견적서 LIST")
         self.resize(480, 620)
-        self._session_files: List[str] = []
+        # (tool, label, full_path) — 추가 시점에 한 번만 파싱해 캐시
+        self._session_entries: List[Tuple[str, str, str]] = []
         self._build()
 
     def _build(self) -> None:
@@ -488,23 +489,42 @@ class _QuoteListWindow(QWidget):
         v.addWidget(self.list_widget, 1)
 
     def add_item(self, path: str) -> None:
-        self._session_files.insert(0, path)
+        entry = QuoteBuilderPage._parse_quote_entry(path)
+        if entry is not None:
+            self._session_entries.insert(0, entry)
         self._apply_filter()
 
     def refresh_session(self, files: List[str]) -> None:
-        self._session_files = list(files)
+        self._session_entries = [
+            e for e in (QuoteBuilderPage._parse_quote_entry(f) for f in files)
+            if e is not None
+        ]
         self._apply_filter()
 
     def _apply_filter(self) -> None:
         keyword = self.edit_filter.text().strip().lower()
         self.list_widget.clear()
-        for full in self._session_files:
-            tool, label = QuoteBuilderPage._parse_quote_label(full)
-            if tool is None:
-                continue
-            if keyword and keyword not in label.lower():
-                continue
-            item = QListWidgetItem(label)
+
+        filtered = [
+            (tool, label, full)
+            for tool, label, full in self._session_entries
+            if not keyword or keyword in label.lower()
+        ]
+
+        # 중복 레이블 카운트: 두 번째부터 (2), (3) … 표시
+        label_counts: Dict[str, int] = {}
+        for _, label, _ in filtered:
+            label_counts[label] = label_counts.get(label, 0) + 1
+        label_seen: Dict[str, int] = {}
+
+        for tool, label, full in filtered:
+            if label_counts[label] > 1:
+                label_seen[label] = label_seen.get(label, 0) + 1
+                n = label_seen[label]
+                display = label if n == 1 else f"{label} ({n})"
+            else:
+                display = label
+            item = QListWidgetItem(display)
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
             if tool == "":
@@ -1479,13 +1499,27 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             self._quote_list_window.add_item(path)
 
     @staticmethod
+    def _read_xlsx_cell(full_path: str, sheet_name: str, cell_addr: str) -> str:
+        """xlsx 파일에서 특정 셀 값을 읽어 문자열로 반환. 실패 시 빈 문자열."""
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(full_path, read_only=True, data_only=True)
+            if sheet_name not in wb.sheetnames:
+                wb.close(); return ""
+            val = wb[sheet_name][cell_addr].value
+            wb.close()
+            return str(val).strip() if val is not None else ""
+        except Exception:
+            return ""
+
+    @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
         """파일 경로에서 (설비호기, 표시레이블) 추출.
 
         반환값:
         - (None, '')    : 패턴 불일치 → 목록에서 제외
         - ('', label)   : 갑지 파일  → label 끝이 '_갑지', 붉은색으로 표시
-        - (tool, label) : 일반 견적서 → 라인_공정_설비호기 형식
+        - (tool, label) : 일반 견적서 → 라인_공정_설비호기_사양 형식
         """
         import re as _re
         fn = os.path.basename(full_path)
@@ -1498,18 +1532,22 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if _re.search(r'_갑지(?:_\d+)?$', stem):
             m_dom = _re.match(r'^\d{6}_LOT베큠_(.+)$', folder)
             if m_dom:
-                return "", f"{m_dom.group(1)}_갑지"   # 라인_공정_투자자_갑지
+                return "", f"{m_dom.group(1)}_갑지"
             m_cn = _re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
             if m_cn:
                 return "", f"중국_{m_cn.group(1)}_갑지"
             return "", "갑지"
+
+        _cell = QuoteBuilderPage._read_xlsx_cell
 
         # ── 미국 Quotation: ..._{tool}_Quotation ─────────────────────
         m_us = _re.search(r'_([^_]+)_Quotation$', stem)
         if m_us:
             tool = m_us.group(1)
             mf   = _re.match(r'^\d{6}_미국_(.+)$', folder)
-            return tool, f"미국_{mf.group(1) if mf else '미국'}_{tool}"
+            base = f"미국_{mf.group(1) if mf else '미국'}_{tool}"
+            extra = _cell(full_path, "견적서_미국", "C17")
+            return tool, f"{base}_{extra}" if extra else base
 
         # ── 국내·중국: 마지막 _구분자 이후 = 설비호기 ───────────────
         parts = stem.split('_')
@@ -1521,13 +1559,26 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if m_dom:
             lp_parts = m_dom.group(1).split('_')
             lineproc = '_'.join(lp_parts[:-1]) if len(lp_parts) >= 2 else m_dom.group(1)
-            return tool, f"{lineproc}_{tool}"
+            base = f"{lineproc}_{tool}"
+            extra = _cell(full_path, "사양서", "A15")
+            return tool, f"{base}_{extra}" if extra else base
 
         m_cn = _re.match(r'^\d{6}_중국_SCS_(.+)$', folder)
         if m_cn:
-            return tool, f"중국_{m_cn.group(1)}_{tool}"
+            base = f"중국_{m_cn.group(1)}_{tool}"
+            extra = _cell(full_path, "견적서_중국", "C17")
+            return tool, f"{base}_{extra}" if extra else base
 
         return tool, tool
+
+    @staticmethod
+    def _parse_quote_entry(full_path: str) -> Optional[Tuple[str, str, str]]:
+        """_parse_quote_label 을 호출하고 (tool, label, full_path) 튜플로 감싼다.
+        패턴 불일치(tool is None)이면 None 반환."""
+        tool, label = QuoteBuilderPage._parse_quote_label(full_path)
+        if tool is None:
+            return None
+        return tool, label, full_path
 
     def _open_quote_list_window(self) -> None:
         """견적서 LIST 독립 창을 열거나 앞으로 가져온다."""

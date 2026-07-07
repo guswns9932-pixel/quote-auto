@@ -229,7 +229,6 @@ def main():
         "--workpath", work_dir,
         "--noconfirm",
         "--clean",
-        "--log-level", "WARN",   # INFO 로그 생략 → 경고/오류만 출력
     ]
 
     print(f"\n{'='*54}")
@@ -237,26 +236,34 @@ def main():
     print(f"  아이콘  : {icon or '없음'}")
     print(f"  출력    : {os.path.join(dist_dir, app_name)}/")
     print(f"  로그    : {log_path}")
-    print(f"{'='*54}\n")
+    print(f"{'='*54}")
+    print("  빌드 진행 중 (수 분 소요)...\n")
 
-    with open(log_path, "w", encoding="utf-8") as log_f:
-        result = subprocess.run(cmd, cwd=HERE, stdout=log_f, stderr=log_f,
-                                text=True, encoding="utf-8", errors="replace")
-
-    # 로그를 콘솔에도 출력 (오류 진단용)
+    # 콘솔 실시간 출력 + 로그 파일 동시 저장 (tee)
+    returncode = 1
     try:
-        log_text = open(log_path, encoding="utf-8").read()
-        if log_text.strip():
-            print(log_text)
-    except OSError:
-        pass
+        proc = subprocess.Popen(
+            cmd, cwd=HERE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log_f.write(line)
+        proc.wait()
+        returncode = proc.returncode
+    except Exception as e:
+        print(f"\n빌드 실행 오류: {e}")
 
     try:
         os.remove(spec_path)
     except OSError:
         pass
 
-    if result.returncode == 0:
+    if returncode == 0:
         out_dir = os.path.join(dist_dir, app_name)
         exe     = os.path.join(out_dir, f"{app_name}.exe")
         size_mb = sum(
@@ -272,11 +279,11 @@ def main():
         print(f"  인가  : {app_name}.exe 단일 파일 해시 제출")
         print(f"{'='*54}\n")
     else:
-        print(f"\n빌드 실패 (exit code={result.returncode})")
+        print(f"\n빌드 실패 (exit code={returncode})")
         print(f"  오류 로그: {log_path}")
         print(f"  로그 파일을 열어 ERROR / CRITICAL 메시지를 확인하세요.")
 
-    sys.exit(result.returncode)
+    sys.exit(returncode)
 
 
 if __name__ == "__main__":

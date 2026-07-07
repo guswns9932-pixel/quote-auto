@@ -108,6 +108,9 @@ def _make_spec(app_name: str, icon: str) -> str:
                 *wdm_h,
                 # PIL.*는 pil_h에 이미 포함되어 있으나 명시적으로 추가 (누락 방지)
                 "PIL.ImageGrab",
+                # pyautogui: approval_auto.py 에서 Tab/Enter 키 입력에 직접 사용
+                "pyautogui",
+                "pyautogui._pyautogui_win",   # Windows 백엔드만 포함
                 "pythoncom",
                 "pywintypes",
                 "win32api",
@@ -156,6 +159,11 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "ftplib", "imaplib", "smtplib", "poplib", "nntplib", "telnetlib",
                 # 멀티프로세싱 (앱은 QThread 사용)
                 "multiprocessing.pool",
+                # numba: 앱 미사용, tbb12.dll 미존재 시 COLLECT 단계 오류 유발
+                "numba",
+                # pyautogui Linux/Mac 백엔드: Windows 빌드에 불필요, SyntaxWarning 원인
+                "pyautogui._pyautogui_x11",
+                "pyautogui._pyautogui_osx",
                 # ※ distutils, lib2to3, sqlite3, dbm 은 제외하지 않음:
                 #   win32com → pkg_resources → distutils/lib2to3 의존 체인이 존재해
                 #   제외 시 빌드 또는 런타임 오류 발생 가능

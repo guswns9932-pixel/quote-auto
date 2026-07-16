@@ -16,6 +16,7 @@ Python 미설치 환경에서도 동작 (Python 인터프리터 포함).
   수령자는 압축 해제 후 견적자동화.exe 실행
 """
 
+import math
 import os
 import sys
 import textwrap
@@ -211,8 +212,100 @@ def _make_spec(app_name: str, icon: str) -> str:
     """)
 
 
+def _create_icon() -> str:
+    """PIL로 견적·전자서명 앱에 어울리는 아이콘을 코드로 생성해 icon.ico 경로를 반환한다."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("경고: Pillow 미설치 — 아이콘 없이 빌드합니다.")
+        return ""
+
+    out_path = os.path.join(HERE, "icon.ico")
+    sizes = [256, 128, 64, 48, 32, 24, 16]
+    images = []
+
+    for sz in sizes:
+        img = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # ── 배경: 파란 둥근 사각형 ──────────────────────────────
+        BG  = (21, 101, 192, 255)   # #1565C0
+        PAD = max(1, sz // 16)
+        R   = max(2, sz // 8)
+        draw.rounded_rectangle([PAD, PAD, sz - PAD - 1, sz - PAD - 1],
+                               radius=R, fill=BG)
+
+        # ── 문서 몸체 (흰색 사각형, 우상단 모서리 접힘) ──────────
+        DX   = sz * 0.20
+        DY   = sz * 0.14
+        DW   = sz * 0.60
+        DH   = sz * 0.72
+        FOLD = sz * 0.15          # 접힌 삼각형 크기
+        DOC  = (255, 255, 255, 255)
+        # 접힘 다각형: 우상단 모서리 제외 5꼭짓점
+        poly = [
+            (DX,          DY),
+            (DX + DW - FOLD, DY),
+            (DX + DW,    DY + FOLD),
+            (DX + DW,    DY + DH),
+            (DX,          DY + DH),
+        ]
+        draw.polygon(poly, fill=DOC)
+
+        # 접힘 삼각형 음영 (연한 회색)
+        SHADOW = (200, 210, 230, 255)
+        fold_tri = [
+            (DX + DW - FOLD, DY),
+            (DX + DW,        DY + FOLD),
+            (DX + DW - FOLD, DY + FOLD),
+        ]
+        draw.polygon(fold_tri, fill=SHADOW)
+
+        # ── 문서 안 텍스트 줄 (파란 가로선) ─────────────────────
+        LINE_CLR = (21, 101, 192, 200)
+        lx0  = DX + sz * 0.07
+        lx1  = DX + DW - sz * 0.07
+        ly   = DY + FOLD + sz * 0.07
+        step = sz * 0.10
+        lw   = max(1, sz // 48)
+        for i in range(4):
+            y = ly + i * step
+            # 마지막 줄 오른쪽은 짧게 (줄 끝 느낌)
+            rx = lx1 if i < 3 else lx0 + (lx1 - lx0) * 0.55
+            draw.rectangle([lx0, y, rx, y + lw], fill=LINE_CLR)
+
+        # ── 서명 곡선 (사인파 형태) ──────────────────────────────
+        SIG  = (255, 193, 7, 255)   # 노란빛 금색
+        SX   = DX + sz * 0.07
+        SEW  = DX + DW - sz * 0.09
+        SY   = DY + DH - sz * 0.14
+        AMP  = sz * 0.04
+        slw  = max(1, sz // 32)
+        pts  = []
+        steps = max(20, sz // 4)
+        for s in range(steps + 1):
+            t = s / steps
+            x = SX + t * (SEW - SX)
+            y = SY + math.sin(t * math.pi * 3) * AMP
+            pts.append((x, y))
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            draw.line([x0, y0, x1, y1], fill=SIG, width=slw)
+
+        images.append(img)
+
+    images[0].save(out_path, format="ICO", append_images=images[1:],
+                   sizes=[(s, s) for s in sizes])
+    print(f"  아이콘 생성 : {out_path}")
+    return out_path
+
+
 def main():
     app_name, icon = _get_args()
+
+    if not icon:
+        icon = _create_icon()
 
     spec_path = os.path.join(HERE, f"_build_{app_name}.spec")
     dist_dir  = os.path.join(HERE, "dist")

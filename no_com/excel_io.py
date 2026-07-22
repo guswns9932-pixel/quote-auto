@@ -35,6 +35,27 @@ from core import (
 
 logger = logging.getLogger("QuoteApp")
 
+
+def _clear_clipboard() -> None:
+    """
+    Windows 클립보드를 강제로 비운다.
+
+    CopyPicture()/ExportAsFixedFormat() 후 COM 세션이 종료되면
+    클립보드에 죽은 프로세스 소유의 CF_ENHMETAFILE(EMF) 핸들이 남는다.
+    이 stale 핸들이 있는 상태에서 별도 Excel 창이 Ctrl+C를 시도하면
+    Windows가 이전 클립보드를 초기화하다가 액세스 위반 → Excel 전체 종료.
+    COM 세션 종료 전, 또는 CopyPicture 직후에 반드시 호출한다.
+    """
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        if u32.OpenClipboard(0):
+            u32.EmptyClipboard()
+            u32.CloseClipboard()
+    except Exception:
+        pass
+
+
 # ── COM 지연 로딩 (PDF 변환 전용) ───────────────────────────────
 # 모듈 임포트 시 DLL LoadLibrary를 호출하지 않도록 지연.
 # GIL 점유로 인한 시작 시 UI 동결 방지 (AV/Defender 환경에서 10~120초 블로킹 가능).
@@ -190,10 +211,12 @@ def _show_only_sheets(wb, keep: List[str]) -> None:
         wb[name].sheet_state = "visible" if name in keep_set else "veryHidden"
 
 
-def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any]) -> None:
+def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any],
+                             req_ws_cache: Optional[Any] = None) -> None:
     """
     의뢰파일의 특정 행을 견적의뢰복사본 시트 2행에 복사 (openpyxl).
-    COM 버전의 _write_req_row 를 대체한다.
+    req_ws_cache: 외부에서 미리 열어 전달된 Worksheet 객체(멀티 생성 시 재사용).
+                  None이면 여기서 직접 open/close 한다.
     """
     req_path = state.request_path
     if not req_path or not req_path.lower().endswith(".xlsx"):
@@ -205,7 +228,24 @@ def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any]) -> N
     if row_idx <= 0:
         return
 
-    req_wb = load_workbook(req_path, data_only=True)
+    def _copy_row(req_ws) -> None:
+        copy_ws = wb_copy[SheetName.REQ_COPY]
+        for c in range(1, 15):
+            copy_ws.cell(2, c).value = None
+        copy_ws.cell(2, 18).value = None
+        for c in range(23, 28):
+            copy_ws.cell(2, c).value = None
+        for c in range(1, 15):
+            copy_ws.cell(2, c).value = req_ws.cell(row_idx, c).value
+        copy_ws.cell(2, 18).value = req_ws.cell(row_idx, 18).value
+        for c in range(23, 28):
+            copy_ws.cell(2, c).value = req_ws.cell(row_idx, c).value
+
+    if req_ws_cache is not None:
+        _copy_row(req_ws_cache)
+        return
+
+    req_wb = load_workbook(req_path, data_only=True, read_only=True)
     try:
         sheet_name = state.request_sheet_name
         req_ws = (
@@ -213,21 +253,7 @@ def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any]) -> N
             if sheet_name and sheet_name in req_wb.sheetnames
             else req_wb.active
         )
-        copy_ws = wb_copy[SheetName.REQ_COPY]
-
-        # 대상 행 초기화
-        for c in range(1, 15):      # A:N (1~14)
-            copy_ws.cell(2, c).value = None
-        copy_ws.cell(2, 18).value = None           # R
-        for c in range(23, 28):     # W:AA (23~27)
-            copy_ws.cell(2, c).value = None
-
-        # 의뢰파일에서 복사
-        for c in range(1, 15):
-            copy_ws.cell(2, c).value = req_ws.cell(row_idx, c).value
-        copy_ws.cell(2, 18).value = req_ws.cell(row_idx, 18).value
-        for c in range(23, 28):
-            copy_ws.cell(2, c).value = req_ws.cell(row_idx, c).value
+        _copy_row(req_ws)
     finally:
         req_wb.close()
 
@@ -238,7 +264,8 @@ def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any]) -> N
 
 def _fill_domestic(state: QuoteState,
                    rd: Dict[str, Any],
-                   items: List[Dict[str, Any]]) -> str:
+                   items: List[Dict[str, Any]],
+                   req_ws_cache: Optional[Any] = None) -> str:
     """
     국내 견적서: 템플릿을 복사한 뒤 openpyxl 로 데이터 기입.
     반환: 저장된 xlsx 경로.
@@ -264,7 +291,7 @@ def _fill_domestic(state: QuoteState,
     ws_sign = wb[SheetName.SIGN_SPEC]
 
     # ② 의뢰파일 행 → 견적의뢰복사본 시트 복사
-    _write_req_row_openpyxl(wb, state, rd)
+    _write_req_row_openpyxl(wb, state, rd, req_ws_cache)
 
     # ③ 투자자명
     investor = s(state.investor_name) or "채승철"
@@ -309,6 +336,7 @@ def _fill_domestic(state: QuoteState,
     ])
 
     wb.save(path)
+    wb.close()
     logger.info("국내 견적서 생성: %s", path)
     return path
 
@@ -377,6 +405,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _show_only_sheets(wb, [SheetName.QUOTE_CN])
 
     wb.save(path)
+    wb.close()
     logger.info("중국 견적서 생성: %s", path)
     return path
 
@@ -445,6 +474,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _show_only_sheets(wb, [SheetName.QUOTE_US])
 
     wb.save(path)
+    wb.close()
     logger.info("미국 견적서 생성: %s", path)
     return path
 
@@ -480,17 +510,44 @@ def generate_quote_multi(
     """
     results: List[Tuple[Dict[str, Any], str]] = []
     total = len(request_rows)
-    for i, rd in enumerate(request_rows):
+
+    # 의뢰파일을 한 번만 열어 전 행에 재사용 — 반복 open/close 방지
+    req_ws_cache = None
+    req_wb_cache = None
+    req_path = state.request_path
+    if req_path and req_path.lower().endswith(".xlsx"):
         try:
-            path = _fill_domestic(state, rd, items)
-            results.append((rd, path))
-            if progress_cb:
-                progress_cb(i + 1, total, os.path.basename(path))
+            req_wb_cache = load_workbook(req_path, data_only=True, read_only=True)
+            sn = state.request_sheet_name
+            req_ws_cache = (
+                req_wb_cache[sn]
+                if sn and sn in req_wb_cache.sheetnames
+                else req_wb_cache.active
+            )
         except Exception as e:
-            logger.error("멀티 생성 실패: %s", e, exc_info=True)
-            results.append((rd, ""))
-            if progress_cb:
-                progress_cb(i + 1, total, f"[실패] {e}")
+            logger.warning("의뢰파일 사전 로드 실패 (행별 열기로 대체): %s", e)
+            req_wb_cache = None
+            req_ws_cache = None
+
+    try:
+        for i, rd in enumerate(request_rows):
+            try:
+                path = _fill_domestic(state, rd, items, req_ws_cache)
+                results.append((rd, path))
+                if progress_cb:
+                    progress_cb(i + 1, total, os.path.basename(path))
+            except Exception as e:
+                logger.error("멀티 생성 실패: %s", e, exc_info=True)
+                results.append((rd, ""))
+                if progress_cb:
+                    progress_cb(i + 1, total, f"[실패] {e}")
+    finally:
+        if req_wb_cache is not None:
+            try:
+                req_wb_cache.close()
+            except Exception:
+                pass
+
     return results
 
 
@@ -531,10 +588,14 @@ def generate_cover(
     ws_data  = wb[SheetName.COVER_DATA]
     ws_cover = wb[SheetName.COVER]
 
-    # 갑지DATA 초기화 — 실제 값이 있는 셀만 순회 (빈 셀 객체 생성 없음)
-    for (row, col), cell in list(ws_data._cells.items()):
-        if 2 <= row <= 2000 and 1 <= col <= 27:
-            cell.value = None
+    # 갑지DATA 초기화 — iter_rows 공개 API 사용 (내부 _cells 직접 접근 금지)
+    max_data_row = min(ws_data.max_row or 1, 2000)
+    if max_data_row >= 2:
+        for row_cells in ws_data.iter_rows(min_row=2, max_row=max_data_row,
+                                            min_col=1, max_col=27):
+            for cell in row_cells:
+                if cell.value is not None:
+                    cell.value = None
 
     # 각 source 파일의 견적의뢰복사본 2행 읽기
     write_row = 2
@@ -568,6 +629,7 @@ def generate_cover(
     wb.calculation.fullCalcOnLoad = True
     _show_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
     wb.save(out_path)
+    wb.close()
     logger.info("갑지 생성: %s", out_path)
     return out_path
 
@@ -665,6 +727,7 @@ def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
             wb.ExportAsFixedFormat(0, out_pdf)
             return out_pdf if os.path.exists(out_pdf) else ""
         finally:
+            _clear_clipboard()   # ExportAsFixedFormat 이 클립보드를 사용하는 경우 대비
             try:
                 wb.Close(False)   # 디스크 파일 변경 없음
             except Exception:
@@ -756,6 +819,13 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     rng = _print_area_range(ws)
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()
+                    # ── 클립보드 즉시 해제 ──────────────────────────────────────
+                    # CopyPicture 후 Windows 클립보드에 CF_ENHMETAFILE(EMF) 핸들이
+                    # 남아 있는 상태에서 COM 세션(xl.Quit)이 종료되면 stale 핸들이
+                    # 발생한다. 이후 사용자가 별도 Excel에서 Ctrl+C를 시도하면
+                    # Windows가 이 핸들을 해제하려다 액세스 위반 → Excel 전체 종료.
+                    # 이미지를 읽은 직후 클립보드를 비워 이 경로를 차단한다.
+                    _clear_clipboard()
                     if img is not None:
                         img.save(png_path, "PNG")
                         png_paths.append(png_path)
@@ -764,6 +834,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                 except Exception as e:
                     logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
         finally:
+            _clear_clipboard()   # 워크북 닫기 전 최종 클립보드 해제
             try:
                 wb.Close(False)
             except Exception:

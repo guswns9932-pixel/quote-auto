@@ -245,7 +245,7 @@ def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any],
         _copy_row(req_ws_cache)
         return
 
-    req_wb = load_workbook(req_path, data_only=True, read_only=True)
+    req_wb = load_workbook(req_path, data_only=True)
     try:
         sheet_name = state.request_sheet_name
         req_ws = (
@@ -517,7 +517,7 @@ def generate_quote_multi(
     req_path = state.request_path
     if req_path and req_path.lower().endswith(".xlsx"):
         try:
-            req_wb_cache = load_workbook(req_path, data_only=True, read_only=True)
+            req_wb_cache = load_workbook(req_path, data_only=True)
             sn = state.request_sheet_name
             req_ws_cache = (
                 req_wb_cache[sn]

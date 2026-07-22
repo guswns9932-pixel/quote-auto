@@ -219,6 +219,9 @@ def _create_icon() -> str:
     except ImportError:
         print("경고: Pillow 미설치 — 아이콘 없이 빌드합니다.")
         return ""
+    except Exception as e:
+        print(f"경고: Pillow 초기화 오류 ({e}) — 아이콘 없이 빌드합니다.")
+        return ""
 
     out_path = os.path.join(HERE, "icon.ico")
     sizes = [256, 128, 64, 48, 32, 24, 16]
@@ -232,8 +235,12 @@ def _create_icon() -> str:
         BG  = (21, 101, 192, 255)   # #1565C0
         PAD = max(1, sz // 16)
         R   = max(2, sz // 8)
-        draw.rounded_rectangle([PAD, PAD, sz - PAD - 1, sz - PAD - 1],
-                               radius=R, fill=BG)
+        try:
+            # rounded_rectangle: Pillow 8.2.0+
+            draw.rounded_rectangle([PAD, PAD, sz - PAD - 1, sz - PAD - 1],
+                                   radius=R, fill=BG)
+        except AttributeError:
+            draw.rectangle([PAD, PAD, sz - PAD - 1, sz - PAD - 1], fill=BG)
 
         # ── 문서 몸체 (흰색 사각형, 우상단 모서리 접힘) ──────────
         DX   = sz * 0.20

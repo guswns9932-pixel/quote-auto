@@ -40,8 +40,14 @@ def _get_args():
 
     if icon and not os.path.isabs(icon):
         icon = os.path.join(HERE, icon)
-    if icon and not os.path.exists(icon):
+    if icon and os.path.isdir(icon):
+        print(f"경고: 아이콘 경로가 디렉터리입니다 — {icon}")
+        icon = ""
+    if icon and not os.path.isfile(icon):
         print(f"경고: 아이콘 파일 없음 — {icon}")
+        icon = ""
+    if icon and not icon.lower().endswith(".ico"):
+        print(f"경고: .ico 파일이 아닙니다 — {icon}")
         icon = ""
 
     return app_name, icon
@@ -318,8 +324,12 @@ def _create_icon() -> str:
 
         images.append(img)
 
-    images[0].save(out_path, format="ICO", append_images=images[1:],
-                   sizes=[(s, s) for s in sizes])
+    try:
+        images[0].save(out_path, format="ICO", append_images=images[1:],
+                       sizes=[(s, s) for s in sizes])
+    except Exception as e:
+        print(f"경고: 아이콘 저장 실패 ({e}) — 아이콘 없이 빌드합니다.")
+        return ""
     print(f"  아이콘 생성 : {out_path}")
     return out_path
 
@@ -328,7 +338,15 @@ def main():
     app_name, icon = _get_args()
 
     if not icon:
-        icon = _create_icon()
+        try:
+            icon = _create_icon()
+        except Exception as e:
+            print(f"경고: 아이콘 생성 중 오류 ({e}) — 아이콘 없이 빌드합니다.")
+            icon = ""
+    # 최종 안전 검사: 디렉터리나 비.ico 파일이 들어오면 제거
+    if icon and not (os.path.isfile(icon) and icon.lower().endswith(".ico")):
+        print(f"경고: 유효하지 않은 아이콘 경로 제거 — {icon}")
+        icon = ""
 
     spec_path = os.path.join(HERE, f"_build_{app_name}.spec")
     dist_dir  = os.path.join(HERE, "dist")

@@ -4055,7 +4055,7 @@ class ESignPage(QWidget):
         if not any(self._sheet_pngs) or not self._files:
             QMessageBox.information(self, "안내", "먼저 엑셀을 LOAD 하세요."); return
         folder_name = os.path.basename(self._base_folder.rstrip("\\/"))
-        out = unique_path(os.path.join(self._base_folder, f"{folder_name}.pdf"))
+        out = unique_path(os.path.join(self._base_folder, f"대외비_{folder_name}.pdf"))
         try:
             self._build_pdf(out)
             self._cleanup_tmp()

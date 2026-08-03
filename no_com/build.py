@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ── 런처 스텁 코드 템플릿 ──────────────────────────────────────────
 # PLACEHOLDER_APP_NAME 은 빌드 시 실제 앱 이름으로 치환됨
 STUB_TEMPLATE = r'''
-import os, sys, zipfile, hashlib, subprocess
+import os, sys, zipfile, subprocess
 
 APP_NAME   = "PLACEHOLDER_APP_NAME"
 INSTALL_DIR = os.path.join(
@@ -52,18 +52,16 @@ def _bundle_path():
     return os.path.join(base, "bundle.zip")
 
 
-def _file_hash(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()[:20]
+def _bundle_sig(path):
+    """파일 크기 + 수정일시로 번들 고유 서명 생성 (SHA256 대비 즉각적)."""
+    st = os.stat(path)
+    return f"{st.st_size}:{int(st.st_mtime)}"
 
 
 def _already_installed(bundle_path):
     try:
         with open(VER_FILE, encoding="utf-8") as f:
-            return f.read().strip() == _file_hash(bundle_path)
+            return f.read().strip() == _bundle_sig(bundle_path)
     except Exception:
         return False
 
@@ -76,7 +74,7 @@ def _install(bundle_path):
     with zipfile.ZipFile(bundle_path) as zf:
         zf.extractall(INSTALL_DIR)
     with open(VER_FILE, "w", encoding="utf-8") as f:
-        f.write(_file_hash(bundle_path))
+        f.write(_bundle_sig(bundle_path))
 
 
 def _show_msg(title, msg, icon=0x40):
@@ -176,12 +174,18 @@ def _make_app_spec(app_name: str, icon: str) -> str:
                 "pythoncom", "pywintypes", "win32api",
                 "win32com", "win32com.client", "win32com.server",
                 "win32con", "win32timezone",
+                "tarfile",  # pymupdf 동적 임포트 (정적 분석 불가)
             ],
             hookspath=[],
             runtime_hooks=[],
-            excludes=["tkinter", "matplotlib", "numpy", "scipy", "PIL"],
-            noarchive=False,
-            optimize=1,
+            excludes=[
+                "tkinter", "matplotlib", "numpy", "scipy", "PIL",
+                "unittest", "doctest", "pdb", "profile", "cProfile",
+                "difflib", "pickletools", "ftplib",
+                "multiprocessing.pool",
+            ],
+            noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
+            optimize=2,       # 2: docstring 제거 → .pyc 크기 추가 감소, 임포트 속도 향상
         )
 
         pyz = PYZ(a.pure)
@@ -283,7 +287,7 @@ def main():
     print(f"{'='*54}")
     app_dist = os.path.join(tmp_dir, "app_dist")
     app_work = os.path.join(tmp_dir, "app_work")
-    app_spec = os.path.join(tmp_dir, "_app.spec")
+    app_spec = os.path.join(tmp_dir, f"{app_name}_app.spec")
     with open(app_spec, "w", encoding="utf-8") as f:
         f.write(_make_app_spec(app_name, icon))
     _run(app_spec, app_dist, app_work)
@@ -299,11 +303,11 @@ def main():
     print(f"\n{'='*54}")
     print(f"  [3/3] 런처 스텁 빌드 (onefile) …")
     print(f"{'='*54}")
-    stub_py = os.path.join(tmp_dir, "_stub.py")
+    stub_py = os.path.join(tmp_dir, f"{app_name}_stub.py")
     stub_content = STUB_TEMPLATE.replace("PLACEHOLDER_APP_NAME", app_name)
     with open(stub_py, "w", encoding="utf-8") as f:
         f.write(stub_content)
-    stub_spec = os.path.join(tmp_dir, "_stub.spec")
+    stub_spec = os.path.join(tmp_dir, f"{app_name}.spec")
     with open(stub_spec, "w", encoding="utf-8") as f:
         f.write(_make_stub_spec(app_name, stub_py, bundle_zip, icon))
     dist_dir  = os.path.join(HERE, "dist")

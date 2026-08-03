@@ -58,6 +58,8 @@ def _make_spec(app_name: str, icon: str) -> str:
 
         openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
         fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
+        pil_d,      pil_b,      pil_h      = collect_all("PIL")
+        wdm_d,      wdm_b,      wdm_h      = collect_all("webdriver_manager")
 
         # pythoncom / pywintypes DLL 직접 수집 (ordinal 오류 방지)
         _pywin32_dlls = []
@@ -73,13 +75,23 @@ def _make_spec(app_name: str, icon: str) -> str:
             binaries=[
                 *openpyxl_b,
                 *fitz_b,
+                *pil_b,
+                *wdm_b,
                 *_pywin32_dlls,
             ],
             datas=[
                 *openpyxl_d,
                 *fitz_d,
+                *pil_d,
+                *wdm_d,
             ],
             hiddenimports=[
+                # 앱 모듈 (importlib.import_module 동적 로딩 → PyInstaller 자동 감지 불가)
+                "pages",
+                "excel_io",
+                "core",
+                "widgets",
+                "approval_auto",
                 "PySide6.QtCore",
                 "PySide6.QtGui",
                 "PySide6.QtWidgets",
@@ -88,6 +100,11 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "openpyxl.cell._writer",
                 *openpyxl_h,
                 *fitz_h,
+                *pil_h,
+                *wdm_h,
+                "PIL",
+                "PIL.ImageGrab",
+                "PIL.Image",
                 "pythoncom",
                 "pywintypes",
                 "win32api",
@@ -96,12 +113,36 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "win32com.server",
                 "win32con",
                 "win32timezone",
+                "tarfile",  # pymupdf 동적 임포트 (정적 분석 불가)
+                # selenium: 함수 내 lazy import라 정적 분석이 놓칠 수 있는 submodule 명시
+                "selenium",
+                "selenium.webdriver",
+                "selenium.webdriver.chrome",
+                "selenium.webdriver.chrome.webdriver",
+                "selenium.webdriver.chrome.service",
+                "selenium.webdriver.chrome.options",
+                "selenium.webdriver.remote.webdriver",
+                "selenium.webdriver.remote.remote_connection",
+                "selenium.webdriver.remote.errorhandler",
+                "selenium.webdriver.remote.command",
+                "selenium.webdriver.common.by",
+                "selenium.webdriver.common.service",
+                "selenium.webdriver.common.keys",
+                "selenium.webdriver.support.ui",
+                "selenium.webdriver.support.expected_conditions",
+                "webdriver_manager",
+                "webdriver_manager.chrome",
             ],
             hookspath=[],
             runtime_hooks=[],
-            excludes=["tkinter", "matplotlib", "numpy", "scipy", "PIL"],
-            noarchive=False,
-            optimize=1,
+            excludes=[
+                "tkinter", "matplotlib", "numpy", "scipy",
+                "unittest", "doctest", "pdb", "profile", "cProfile",
+                "difflib", "pickletools", "ftplib",
+                "multiprocessing.pool",
+            ],
+            noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
+            optimize=2,       # 2: docstring 제거 → .pyc 크기 감소, 임포트 속도 향상
         )
 
         pyz = PYZ(a.pure)
@@ -125,7 +166,14 @@ def _make_spec(app_name: str, icon: str) -> str:
             a.datas,
             strip=False,
             upx=True,
-            upx_exclude=[],
+            # Qt DLL 및 VC 런타임은 UPX 압축 시 리소스가 손상될 수 있으므로 제외
+            upx_exclude=[
+                "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
+                "Qt6Network.dll", "Qt6PrintSupport.dll", "Qt6Svg.dll",
+                "Qt6OpenGL.dll", "Qt6XcbQpa.dll", "Qt6DBus.dll",
+                "vcruntime140.dll", "vcruntime140_1.dll",
+                "MSVCP140.dll", "MSVCP140_1.dll",
+            ],
             name="{app_name}",
         )
     """)

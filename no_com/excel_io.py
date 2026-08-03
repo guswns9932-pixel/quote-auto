@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -34,15 +35,30 @@ from core import (
 
 logger = logging.getLogger("QuoteApp")
 
-# ── COM 임포트 (PDF 변환 전용) ──────────────────────────────────
-try:
-    import pythoncom
-    import win32com.client as win32
-    COM_AVAILABLE = True
-except ImportError:
-    pythoncom = None        # type: ignore
-    win32 = None            # type: ignore
-    COM_AVAILABLE = False
+# ── COM 지연 로딩 (PDF 변환 전용) ───────────────────────────────
+# 모듈 임포트 시 DLL LoadLibrary를 호출하지 않도록 지연.
+# GIL 점유로 인한 시작 시 UI 동결 방지 (AV/Defender 환경에서 10~120초 블로킹 가능).
+pythoncom: Any = None
+win32: Any = None
+COM_AVAILABLE: Optional[bool] = None  # None=미확인, True=사용가능, False=불가
+
+
+def _ensure_com() -> bool:
+    """COM DLL을 최초 필요 시점에만 로드한다."""
+    global COM_AVAILABLE, pythoncom, win32
+    if COM_AVAILABLE is not None:
+        return COM_AVAILABLE
+    try:
+        import pythoncom as _pc
+        import win32com.client as _w32
+        pythoncom = _pc
+        win32 = _w32
+        COM_AVAILABLE = True
+    except Exception:
+        pythoncom = None
+        win32 = None
+        COM_AVAILABLE = False
+    return COM_AVAILABLE
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -321,27 +337,32 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
+    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
+    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
 
-    # 펌프 구간 클리어 & 기입
+    # 펌프 구간 클리어 & 기입 (Pump Credit 포함)
     for rr in range(CN.PUMP_START, CN.PUMP_END + 1):
         ws[f"{CN.COL_SPEC}{rr}"]  = None
         ws[f"{CN.COL_PRICE}{rr}"] = None
         ws[f"{CN.COL_QTY}{rr}"]   = None
 
-    for i, r in enumerate(pump[:3]):
+    pump_out = list(pump[:3])
+    for cr in pump_credits:
+        pump_out.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
+    for i, r in enumerate(pump_out[:3]):
         rr = CN.PUMP_START + i
         ws[f"{CN.COL_SPEC}{rr}"]  = r["spec"]
         ws[f"{CN.COL_PRICE}{rr}"] = r["price"]
-        ws[f"{CN.COL_QTY}{rr}"]   = r["qty"]
+        ws[f"{CN.COL_QTY}{rr}"]   = None if float(r.get("qty", 0)) == 0 else r["qty"]
 
-    # 랙 구간 클리어 & 기입
+    # 랙 구간 클리어 & 기입 (Rack Credit만 포함)
     for rr in range(CN.RACK_START, CN.RACK_END + 1):
         ws[f"{CN.COL_SPEC}{rr}"]  = None
         ws[f"{CN.COL_PRICE}{rr}"] = None
         ws[f"{CN.COL_QTY}{rr}"]   = None
 
     out_list = others[:20]
-    for cr in credits:
+    for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
     out_list = out_list[:20]
 
@@ -387,8 +408,10 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
+    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
+    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
 
-    # 펌프 단일 행
+    # 펌프 단일 행 (Pump Credit은 RACK 구간 맨 앞 줄로 표기)
     ws[US.PUMP_SPEC]  = None
     ws[US.PUMP_PRICE] = None
     ws[US.PUMP_QTY]   = None
@@ -397,14 +420,17 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         ws[US.PUMP_PRICE] = pump[0]["price"]
         ws[US.PUMP_QTY]   = pump[0]["qty"]
 
-    # 랙 구간 클리어 & 기입
+    # 랙 구간 클리어 & 기입 (Pump Credit → 맨 앞, Rack Credit → 맨 뒤)
     for rr in range(US.RACK_START, US.RACK_END + 1):
         ws[f"{US.COL_SPEC}{rr}"]  = None
         ws[f"{US.COL_PRICE}{rr}"] = None
         ws[f"{US.COL_QTY}{rr}"]   = None
 
-    out_list = others[:20]
-    for cr in credits:
+    out_list = []
+    for cr in pump_credits:
+        out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
+    out_list += others[:20 - len(pump_credits)]
+    for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
     out_list = out_list[:20]
 
@@ -474,6 +500,7 @@ def generate_cover(
     source_files  : List[str],
     investor_name : str = "채승철",
     progress_cb   : Optional[Callable[[int, int, str], None]] = None,
+    warranty_years: int = 2,
 ) -> str:
     """
     갑지 생성.
@@ -487,10 +514,13 @@ def generate_cover(
     while os.path.abspath(out_path).lower() in input_abs:
         out_path = unique_path(out_path)
 
+    def _natural_key(s: str):
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+
     out_base = os.path.basename(out_path).lower()
     clean = sorted(
         [p for p in source_files if os.path.basename(p).lower() != out_base],
-        key=lambda p: os.path.basename(p).lower(),
+        key=lambda p: _natural_key(os.path.basename(p)),
     )
     if not clean:
         raise RuntimeError("처리할 엑셀 파일이 없습니다.")
@@ -501,12 +531,10 @@ def generate_cover(
     ws_data  = wb[SheetName.COVER_DATA]
     ws_cover = wb[SheetName.COVER]
 
-    # 갑지DATA 초기화
-    for r in range(2, 2001):
-        for c in range(1, 28):  # A:AA
-            cell = ws_data.cell(r, c)
-            if cell.value is not None:
-                cell.value = None
+    # 갑지DATA 초기화 — 실제 값이 있는 셀만 순회 (빈 셀 객체 생성 없음)
+    for (row, col), cell in list(ws_data._cells.items()):
+        if 2 <= row <= 2000 and 1 <= col <= 27:
+            cell.value = None
 
     # 각 source 파일의 견적의뢰복사본 2행 읽기
     write_row = 2
@@ -526,6 +554,9 @@ def generate_cover(
 
     # 투자자명
     ws_cover["B7"] = f"삼성전자 ㈜ / {investor_name} 님"
+
+    # 보증기간 (기본값: 2 Year after delivery)
+    ws_cover["I12"] = f"{warranty_years} Year after delivery"
 
     # 갑지DATA A2:A31 을 직접 확인하여 빈 행을 COVER(20~49) + COVER_DATA(2~31) 양쪽에 숨기기
     for i in range(30):
@@ -555,7 +586,7 @@ class ExcelCOM:
         self._excel = None
 
     def __enter__(self) -> "ExcelCOM":
-        if not COM_AVAILABLE:
+        if not _ensure_com():
             raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
         pythoncom.CoInitialize()
         self._excel = win32.DispatchEx("Excel.Application")
@@ -587,47 +618,160 @@ class ExcelCOM:
 # 공개 API: 전자서명용 임시 PDF 생성 (COM 유지)
 # ═══════════════════════════════════════════════════════════════
 
-def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int) -> str:
+def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
+                        xl_app=None) -> str:
     """
-    xlsx 의 Visible 시트를 개별 PDF 로 내보낸 뒤 병합.
-    반환: 병합된 PDF 경로 (시트 없으면 "")
-    전자서명 페이지에서만 호출되며 COM 을 사용하는 유일한 함수.
+    xlsx 의 ESIGN_TARGET 시트(원래 Visible인 것)만 PDF 로 내보낸다.
+    반환: PDF 경로 (대상 시트 없으면 "")
+
+    워크북 단위 ExportAsFixedFormat 1회 호출:
+      - 비대상 시트를 일시적으로 VeryHidden 처리 → workbook 전체 export
+      - Close(False) 로 디스크 파일은 변경하지 않음
+      - RenameFile 발생 횟수: 파일당 1회 (기존 시트 수만큼 → 1회로 감소)
+
+    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
     """
-    import fitz  # PyMuPDF
+    import fitz
 
     out_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}.pdf")
 
-    with ExcelCOM() as xl:
-        wb = xl.open(xlsx_path, read_only=True)
+    def _process(app) -> str:
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=False, UpdateLinks=0, AddToMru=False)
         try:
-            merged = fitz.open()
+            target_set = set(SheetName.ESIGN_TARGET)
+            to_hide = []
+
+            # 원래 Visible 이면서 ESIGN_TARGET에 속하는 시트만 유지
+            has_visible_target = False
+            for ws in wb.Worksheets:
+                is_target  = ws.Name in target_set
+                was_visible = int(ws.Visible) == -1   # xlSheetVisible = -1
+                if is_target and was_visible:
+                    has_visible_target = True
+                else:
+                    to_hide.append(ws)
+
+            if not has_visible_target:
+                return ""
+
+            # 비대상 시트를 VeryHidden (xlVeryHidden = 2)
+            for ws in to_hide:
+                try:
+                    ws.Visible = 2
+                except Exception:
+                    pass
+
+            # 워크북 전체를 PDF 1회 export (ExportAsFixedFormat 1회 = RenameFile 1회)
+            wb.ExportAsFixedFormat(0, out_pdf)
+            return out_pdf if os.path.exists(out_pdf) else ""
+        finally:
+            try:
+                wb.Close(False)   # 디스크 파일 변경 없음
+            except Exception:
+                pass
+
+    if xl_app is not None:
+        return _process(xl_app)
+
+    with ExcelCOM() as xl:
+        return _process(xl.app)
+
+
+def _print_area_range(ws):
+    """PrintArea(R1C1 또는 A1 형식)를 Range 객체로 반환. 없으면 UsedRange."""
+    import re
+    pa = ws.PageSetup.PrintArea
+    if not pa:
+        return ws.UsedRange
+    if "!" in pa:
+        pa = pa.split("!")[-1]
+    # R1C1 형식 감지: "R숫자C숫자:R숫자C숫자" 또는 단일 "R숫자C숫자"
+    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
+    if m:
+        r1, c1 = int(m.group(1)), int(m.group(2))
+        r2 = int(m.group(3)) if m.group(3) else r1
+        c2 = int(m.group(4)) if m.group(4) else c1
+        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
+    # A1 형식
+    try:
+        return ws.Range(pa)
+    except Exception:
+        return ws.UsedRange
+
+
+def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
+                                  xl_app=None) -> List[str]:
+    """
+    xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
+    ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
+
+    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
+    반환: 저장된 PNG 경로 리스트 (순서 = ESIGN_TARGET 순서)
+    """
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        logger.error("Pillow(PIL) 없음 — pip install pillow")
+        return []
+
+    png_paths: List[str] = []
+
+    def _process(app) -> List[str]:
+        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
+        try:
+            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처
+            target_names = []
             for name in SheetName.ESIGN_TARGET:
+                try:
+                    ws = wb.Worksheets(name)
+                    if int(ws.Visible) == -1:
+                        target_names.append(name)
+                except Exception:
+                    continue
+            if not target_names:
+                for ws in wb.Worksheets:
+                    try:
+                        if int(ws.Visible) == -1:
+                            target_names.append(ws.Name)
+                    except Exception:
+                        continue
+
+            for idx, name in enumerate(target_names):
                 try:
                     ws = wb.Worksheets(name)
                 except Exception:
                     continue
-                if int(ws.Visible) != -1:   # -1 = xlSheetVisible
+                if int(ws.Visible) != -1:
                     continue
                 safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
-                sheet_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}_{safe_name}.pdf")
+                png_path = os.path.join(
+                    tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
-                    ws.ExportAsFixedFormat(0, sheet_pdf)
+                    ws.Activate()
+                    # 페이지 나누기 미리보기 → 기본(기본 보기)으로 전환 후 캡처
+                    try:
+                        app.ActiveWindow.View = 1  # xlNormalView
+                    except Exception:
+                        pass
+                    rng = _print_area_range(ws)
+                    rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
+                    img = ImageGrab.grabclipboard()
+                    if img is not None:
+                        img.save(png_path, "PNG")
+                        png_paths.append(png_path)
+                    else:
+                        logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
                 except Exception as e:
-                    logger.warning("PDF Export 실패 (%s): %s", name, e)
-                    continue
-                if os.path.exists(sheet_pdf):
-                    src = fitz.open(sheet_pdf)
-                    merged.insert_pdf(src)
-                    src.close()
-
-            if len(merged) == 0:
-                merged.close()
-                return ""
-            merged.save(out_pdf)
-            merged.close()
-            return out_pdf
+                    logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
         finally:
             try:
                 wb.Close(False)
             except Exception:
                 pass
+        return png_paths
+
+    if xl_app is not None:
+        return _process(xl_app)
+
+    with ExcelCOM() as xl:
+        return _process(xl.app)

@@ -280,7 +280,7 @@ def _fill_domestic(state: QuoteState,
         os.path.join(exe_dir(), "견적서", f"{ymd}_LOT베큠_{lineproc}_{investor_fn}")
     )
     path = unique_path(
-        os.path.join(folder, f"{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor_fn}_{tool}.xlsx")
+        os.path.join(folder, f"대외비_{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor_fn}_{tool}.xlsx")
     )
 
     # ① 템플릿 전체를 복사 — 이미지·서식·수식 구조 모두 보존
@@ -351,7 +351,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         os.path.join(exe_dir(), "견적서", f"{ymd}_중국_SCS_{line}")
     )
     path = unique_path(
-        os.path.join(folder, f"{ymd}_중국_SCS_{line}_{tool}.xlsx")
+        os.path.join(folder, f"대외비_{ymd}_중국_SCS_{line}_{tool}.xlsx")
     )
 
     shutil.copy2(state.template_path, path)
@@ -420,7 +420,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         os.path.join(exe_dir(), "견적서", f"{ymd}_미국_{site}")
     )
     path = unique_path(
-        os.path.join(folder, f"{ymd}_{site}_{tool}_Quotation.xlsx")
+        os.path.join(folder, f"대외비_{ymd}_{site}_{tool}_Quotation.xlsx")
     )
 
     shutil.copy2(state.template_path, path)
@@ -565,7 +565,7 @@ def generate_cover(
     갑지DATA 시트에 쌓은 뒤 저장.
     """
     folder_name = os.path.basename(folder.rstrip("\\/"))
-    out_path = unique_path(os.path.join(folder, f"{folder_name}_갑지.xlsx"))
+    out_path = unique_path(os.path.join(folder, f"대외비_{folder_name}_갑지.xlsx"))
 
     input_abs = {os.path.abspath(p).lower() for p in source_files}
     while os.path.abspath(out_path).lower() in input_abs:

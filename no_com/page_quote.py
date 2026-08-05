@@ -596,7 +596,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         ch.setContentsMargins(0, 0, 0, 0); ch.setSpacing(12)
 
         # 왼쪽: STEP3 (위) + 의뢰파일DATA (아래)
-        left = QWidget(); left.setFixedWidth(380)
+        left = QWidget(); left.setFixedWidth(630)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(8)
         self._step3_frame = self._build_step3()
@@ -687,13 +687,21 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         top = QHBoxLayout()
         self.chk_req_all = QCheckBox("전체선택"); self.chk_req_all.clicked.connect(self._on_req_select_all)
         top.addWidget(self.chk_req_all); top.addStretch(1); v.addLayout(top)
-        self.req_table = _make_plain_table(4, ["선택", "설비호기(Z)", "투자정보", "수량"])
+        self.req_table = _make_plain_table(
+            8, ["선택", "설비호기(Z)", "투자정보", "수량", "Rack", "Maker", "설비", "5D"])
         self.req_table.setColumnWidth(0, 42)
+        self.req_table.setColumnWidth(1, 110)
+        self.req_table.setColumnWidth(2, 150)
+        self.req_table.setColumnWidth(3, 55)
+        self.req_table.setColumnWidth(4, 90)
+        self.req_table.setColumnWidth(5, 80)
+        self.req_table.setColumnWidth(6, 80)
+        self.req_table.setColumnWidth(7, 80)
         _rh = self.req_table.horizontalHeader()
         _rh.setSectionResizeMode(0, QHeaderView.Fixed)
-        _rh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        _rh.setSectionResizeMode(2, QHeaderView.Stretch)
-        _rh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        for _ci in range(1, 8):
+            _rh.setSectionResizeMode(_ci, QHeaderView.Interactive)
+        self.req_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
         self._style_req_table()
         v.addWidget(self.req_table, 1)
@@ -913,12 +921,18 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             invest_info = parse_invest_info(rd.get("G"))
             h_val = rd.get("H")
             qty_str = fmt_qty(to_float(h_val)) if h_val is not None else ""
-            for col, val in [(1, s(rd.get("Z"))), (2, invest_info), (3, qty_str)]:
+            for col, val in [
+                (1, s(rd.get("Z"))),
+                (2, invest_info),
+                (3, qty_str),
+                (4, s(rd.get("R"))),   # Rack (R열=col18)
+                (5, s(rd.get("X"))),   # Maker (X열=col24)
+                (6, s(rd.get("Y"))),   # 설비 (Y열=col25)
+                (7, s(rd.get("V"))),   # 5D (V열=col22)
+            ]:
                 it = QTableWidgetItem(val); it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.req_table.setItem(i, col, it)
         self.req_table.setColumnWidth(0, 42)
-        self.req_table.resizeColumnToContents(1)
-        self.req_table.resizeColumnToContents(3)
         self._style_req_table(); self._update_quote_info()
 
     def _is_req_checked(self, row: int) -> bool:

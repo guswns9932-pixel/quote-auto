@@ -186,6 +186,7 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
             "J": ws.cell(r, 10).value,
             "K": ws.cell(r, 11).value,
             "N": ws.cell(r, 14).value,
+            "R": ws.cell(r, 18).value,
             "V": ws.cell(r, 22).value,
             "X": ws.cell(r, 24).value,
             "Y": ws.cell(r, 25).value,

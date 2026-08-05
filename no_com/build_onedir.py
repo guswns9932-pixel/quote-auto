@@ -109,6 +109,13 @@ def _make_spec(app_name: str, icon: str) -> str:
                 *wdm_d,
             ],
             hiddenimports=[
+                # Python 인터프리터 초기화 필수 모듈 (optimize!=0 환경에서 누락 방지)
+                "encodings",
+                "encodings.utf_8",
+                "encodings.ascii",
+                "encodings.latin_1",
+                "encodings.mbcs",       # Windows 기본 인코딩
+                "encodings.cp949",      # 한국어 코드페이지
                 # 앱 모듈 (importlib.import_module 동적 로딩 → PyInstaller 자동 감지 불가)
                 "pages",
                 "page_common",
@@ -192,7 +199,8 @@ def _make_spec(app_name: str, icon: str) -> str:
                 #   제외 시 빌드 또는 런타임 오류 발생 가능
             ],
             noarchive=False,  # .pyc를 PYZ 아카이브로 압축 → 첫 실행 시 Defender 스캔 파일 수 최소화
-            optimize=2,       # 2: docstring 제거 → .pyc 크기 감소, 임포트 속도 향상
+            optimize=0,       # 0: 최적화 끔 — optimize=2 시 .opt-2.pyc가 생성되어 일부 PyInstaller
+                              #    버전에서 encodings 등 코어 stdlib 수집 누락 → 부트로더 초기화 실패
         )
 
         pyz = PYZ(a.pure)

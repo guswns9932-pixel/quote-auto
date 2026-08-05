@@ -690,13 +690,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.req_table = _make_plain_table(
             8, ["선택", "설비호기(Z)", "투자정보", "수량", "Rack", "Maker", "설비", "5D"])
         self.req_table.setColumnWidth(0, 42)
-        self.req_table.setColumnWidth(1, 110)
-        self.req_table.setColumnWidth(2, 150)
-        self.req_table.setColumnWidth(3, 55)
-        self.req_table.setColumnWidth(4, 90)
-        self.req_table.setColumnWidth(5, 80)
-        self.req_table.setColumnWidth(6, 80)
-        self.req_table.setColumnWidth(7, 80)
         _rh = self.req_table.horizontalHeader()
         _rh.setSectionResizeMode(0, QHeaderView.Fixed)
         for _ci in range(1, 8):
@@ -930,8 +923,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 (6, s(rd.get("Y"))),   # 설비 (Y열=col25)
                 (7, s(rd.get("V"))),   # 5D (V열=col22)
             ]:
-                it = QTableWidgetItem(val); it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                it.setToolTip(val)   # 잘린 텍스트 전체를 마우스오버 시 표시
                 self.req_table.setItem(i, col, it)
+        # 데이터 기준 컬럼 폭 자동 조정 후 체크박스 열만 고정
+        self.req_table.resizeColumnsToContents()
         self.req_table.setColumnWidth(0, 42)
         self._style_req_table(); self._update_quote_info()
 

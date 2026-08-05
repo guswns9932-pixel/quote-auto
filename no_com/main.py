@@ -79,10 +79,20 @@ class _PageWindow(QMainWindow):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
-        reset_btn = QPushButton("초기화")
-        reset_btn.setFixedHeight(28)
-        f = reset_btn.font(); f.setPointSize(10); f.setBold(True); reset_btn.setFont(f)
-        tint_button(reset_btn, "#FFCCBC")
+        reset_btn = QPushButton("↺  초기화")
+        reset_btn.setFixedHeight(34)
+        reset_btn.setFixedWidth(110)
+        f = reset_btn.font(); f.setPointSize(11); f.setBold(True); reset_btn.setFont(f)
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E53935;
+                color: white;
+                border-radius: 5px;
+                border: none;
+            }
+            QPushButton:hover  { background-color: #C62828; }
+            QPushButton:pressed{ background-color: #B71C1C; }
+        """)
         reset_btn.clicked.connect(self._reset)
         tb.addWidget(reset_btn)
 

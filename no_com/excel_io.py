@@ -628,6 +628,57 @@ def generate_cover(
     if not clean:
         raise RuntimeError("처리할 엑셀 파일이 없습니다.")
 
+    # ── COM 으로 수식 계산값 미리 수집 ────────────────────────────────────
+    # openpyxl 저장 시 수식 캐시(cached value)가 소멸된다.
+    # data_only=True 로 열면 O/P/Q/S/T/U 열(15,16,17,19,20,21)이 None 반환.
+    # COM 세션을 열어 Excel 이 fullCalcOnLoad 재계산한 값을 직접 읽는다.
+    # {abs_path.lower(): {col: value}}
+    _FORMULA_COLS = (15, 16, 17, 19, 20, 21)
+    _com_vals: Dict[str, Dict[int, Any]] = {}
+
+    if _ensure_com():
+        _xl = None
+        try:
+            pythoncom.CoInitialize()
+            _xl = win32.DispatchEx("Excel.Application")
+            _xl.Visible = False
+            _xl.DisplayAlerts = False
+            for _p in clean:
+                _pkey = os.path.abspath(_p).lower()
+                _row: Dict[int, Any] = {}
+                try:
+                    _wb_c = _xl.Workbooks.Open(
+                        os.path.abspath(_p), ReadOnly=True, UpdateLinks=0, AddToMru=False
+                    )
+                    try:
+                        _ws_c = _wb_c.Worksheets(SheetName.REQ_COPY)
+                        for _c in _FORMULA_COLS:
+                            try:
+                                _row[_c] = _ws_c.Cells(2, _c).Value
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            _wb_c.Close(False)
+                        except Exception:
+                            pass
+                except Exception as _e:
+                    logger.warning("COM 수식값 읽기 실패 (%s): %s", _p, _e)
+                _com_vals[_pkey] = _row
+        except Exception as _e:
+            logger.warning("COM 초기화 실패 — 수식 셀은 openpyxl 폴백: %s", _e)
+        finally:
+            _clear_clipboard()
+            if _xl is not None:
+                try:
+                    _xl.Quit()
+                except Exception:
+                    pass
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
     # 템플릿 복사 후 openpyxl 로 편집
     shutil.copy2(template_path, out_path)
     wb       = load_workbook(out_path)
@@ -655,6 +706,10 @@ def generate_cover(
             for c in range(1, 28):  # A:AA
                 ws_data.cell(write_row, c).value = src_ws.cell(2, c).value
             src_wb.close()
+            # COM 계산값으로 수식 셀(O/P/Q/S/T/U) 덮어쓰기
+            for _c, _v in _com_vals.get(os.path.abspath(path).lower(), {}).items():
+                if _v is not None:
+                    ws_data.cell(write_row, _c).value = _v
             write_row += 1
         except Exception as e:
             logger.warning("갑지 원본 읽기 실패 (%s): %s", path, e)

@@ -344,13 +344,21 @@ def _fill_domestic(state: QuoteState,
     if h_qty <= 0:
         h_qty = 1.0
 
-    # S = 사양서!F43 → net 총액 / 수량 (견적단가)
-    s_val = net_amt / h_qty
-    # T = S * H2 → 견적금액
-    t_val = net_amt  # = s_val * h_qty
-    # U = ROUNDUP((P2*H2 + Q2)/H2, -3) → 1000원 올림 (gross 단가 검증용)
+    # 사양서 구조:
+    #   G15 = PUMP 총금액 (template 수식: =견적의뢰복사본!P2 × H2)
+    #   G16 = SUM(G17:G41) = rack_items + credits (코드가 직접 기입하는 행 범위)
+    #   F43 = ROUNDDOWN(((G16+G15)/견적의뢰복사본!H2),-3)
+    g15 = pump_price * h_qty          # PUMP 총금액
+    g16 = rack_amt + credit_amt       # rack net (credit 차감 포함)
+
+    # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
+    s_raw = (g15 + g16) / h_qty
+    s_val = math.floor(s_raw / 1000) * 1000   # ROUNDDOWN(..., -3)
+    # T = S2 * H2
+    t_val = s_val * h_qty
+    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — credit 미포함 gross 단가 검증용
     u_raw = (pump_price * h_qty + rack_amt) / h_qty
-    u_val = math.ceil(u_raw / 1000) * 1000  # ROUNDUP(..., -3)
+    u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
 
     copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈
     copy_ws.cell(2, 16).value = pump_price   # P: PUMP 단가

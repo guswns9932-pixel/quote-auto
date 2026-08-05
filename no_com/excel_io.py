@@ -18,6 +18,7 @@ Excel 입출력 전담 모듈.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -325,21 +326,38 @@ def _fill_domestic(state: QuoteState,
     # openpyxl 저장 시 수식 캐시(cached value)가 소멸된다.
     # generate_cover 에서 data_only=True 로 읽으면 수식 셀(O/P/Q/S/T/U)이 None 반환 →
     # 갑지DATA 해당 열 공백. 계산값을 값(value)으로 직접 써서 이 경로를 막는다.
+    #
+    # 재현 수식:
+    #   S2 = 사양서!F43        → net 합계(credit 포함) / 수량
+    #   T2 = S2 * H2           → 견적단가 × 수량 = net 총 견적금액
+    #   U2 = ROUNDUP((P2*H2+Q2)/H2, -3)  → (PUMP단가×수량 + Rack합계) / 수량, 1000원 올림
     copy_ws    = wb[SheetName.REQ_COPY]
     pump_items = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
     pump_spec  = pump_items[0]["spec"]  if pump_items else None
     pump_price = pump_items[0]["price"] if pump_items else 0.0
     pump_amt   = sum(r["amt"] for r in pump_items)
     rack_amt   = sum(r["amt"] for r in rack_items)
-    credit_amt = sum(c["amt"] for c in credits)          # 통상 음수 (신용 차감)
-    net_amt    = pump_amt + rack_amt + credit_amt         # 견적금액 (차감 후 합계)
+    credit_amt = sum(c["amt"] for c in credits)   # 통상 음수 (신용 차감)
+    net_amt    = pump_amt + rack_amt + credit_amt  # credits 반영된 총 견적금액
+
+    h_qty = to_float(rd.get("H"))
+    if h_qty <= 0:
+        h_qty = 1.0
+
+    # S = 사양서!F43 → net 총액 / 수량 (견적단가)
+    s_val = net_amt / h_qty
+    # T = S * H2 → 견적금액
+    t_val = net_amt  # = s_val * h_qty
+    # U = ROUNDUP((P2*H2 + Q2)/H2, -3) → 1000원 올림 (gross 단가 검증용)
+    u_raw = (pump_price * h_qty + rack_amt) / h_qty
+    u_val = math.ceil(u_raw / 1000) * 1000  # ROUNDUP(..., -3)
 
     copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈
     copy_ws.cell(2, 16).value = pump_price   # P: PUMP 단가
     copy_ws.cell(2, 17).value = rack_amt     # Q: Rack + 액세서리 합계
-    copy_ws.cell(2, 19).value = net_amt      # S: 견적단가
-    copy_ws.cell(2, 20).value = net_amt      # T: 견적금액
-    copy_ws.cell(2, 21).value = net_amt      # U: 견적단가(Check)
+    copy_ws.cell(2, 19).value = s_val        # S: 견적단가 (=사양서!F43)
+    copy_ws.cell(2, 20).value = t_val        # T: 견적금액 (=S2*H2)
+    copy_ws.cell(2, 21).value = u_val        # U: 견적단가(Check) (=ROUNDUP(...))
 
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True

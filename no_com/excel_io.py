@@ -729,6 +729,13 @@ def generate_cover(
 
     wb.calculation.fullCalcOnLoad = True
     _show_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
+
+    # 열릴 때 COVER 시트만 활성 탭으로 — 여러 시트가 tabSelected=True 상태로
+    # 저장되면 Excel이 '그룹' 모드로 파일을 열어버린다.
+    for _sn in wb.sheetnames:
+        wb[_sn].sheet_view.tabSelected = (_sn == SheetName.COVER)
+    wb.active = wb[SheetName.COVER]
+
     wb.save(out_path)
     wb.close()
     logger.info("갑지 생성: %s", out_path)

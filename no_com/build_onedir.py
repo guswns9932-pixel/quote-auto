@@ -174,8 +174,15 @@ def _make_spec(app_name: str, icon: str) -> str:
             excludes=[
                 # UI 툴킷
                 "tkinter",
-                # 과학 계산 (앱 미사용)
+                # 과학 계산 / 데이터 분석 (앱 미사용)
                 "matplotlib", "numpy", "scipy",
+                # pandas: 앱 미사용. collect_all("openpyxl")이 openpyxl.utils.dataframe을
+                #   수집하면서 pandas를 간접 의존으로 끌어들임. 명시 제외로 차단.
+                "pandas",
+                # lxml: 앱 미사용 (openpyxl은 내장 xml.etree 로 동작 가능).
+                #   pandas → lxml → lxml.isoschematron XSL 리소스 파일을 COLLECT 단계에서
+                #   복사하려다 경로 길이 초과 또는 디렉터리 미생성으로 FileNotFoundError 발생.
+                "lxml", "lxml.isoschematron",
                 # 테스트/디버그 도구
                 "unittest", "doctest", "pdb", "profile", "cProfile",
                 # 미사용 stdlib (pkg_resources/win32com 체인에 영향 없는 것만 제외)

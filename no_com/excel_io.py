@@ -321,6 +321,26 @@ def _fill_domestic(state: QuoteState,
             ws_spec[f"{DOM.COL_PRICE}{rr}"]  = r["price"]
             ws_spec[f"{DOM.COL_AMT}{rr}"]    = r["amt"]
 
+    # ⑤-a 견적의뢰복사본 수식 셀 → 계산값 직접 기입 ─────────────────────────
+    # openpyxl 저장 시 수식 캐시(cached value)가 소멸된다.
+    # generate_cover 에서 data_only=True 로 읽으면 수식 셀(O/P/Q/S/T/U)이 None 반환 →
+    # 갑지DATA 해당 열 공백. 계산값을 값(value)으로 직접 써서 이 경로를 막는다.
+    copy_ws    = wb[SheetName.REQ_COPY]
+    pump_items = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
+    pump_spec  = pump_items[0]["spec"]  if pump_items else None
+    pump_price = pump_items[0]["price"] if pump_items else 0.0
+    pump_amt   = sum(r["amt"] for r in pump_items)
+    rack_amt   = sum(r["amt"] for r in rack_items)
+    credit_amt = sum(c["amt"] for c in credits)          # 통상 음수 (신용 차감)
+    net_amt    = pump_amt + rack_amt + credit_amt         # 견적금액 (차감 후 합계)
+
+    copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈
+    copy_ws.cell(2, 16).value = pump_price   # P: PUMP 단가
+    copy_ws.cell(2, 17).value = rack_amt     # Q: Rack + 액세서리 합계
+    copy_ws.cell(2, 19).value = net_amt      # S: 견적단가
+    copy_ws.cell(2, 20).value = net_amt      # T: 견적금액
+    copy_ws.cell(2, 21).value = net_amt      # U: 견적단가(Check)
+
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True
 

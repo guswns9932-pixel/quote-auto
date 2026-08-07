@@ -1,20 +1,23 @@
 """
 main.py
 =======
-앱 진입점 + MainWindow + LeftNav
+앱 진입점 + 런처(MainWindow) + 페이지 창(_PageWindow)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
+import traceback
+from typing import Optional
 
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QMainWindow, QMessageBox,
-    QPushButton, QSizePolicy, QSplashScreen, QStackedWidget, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSplashScreen, QVBoxLayout, QWidget,
 )
 
 from widgets import tint_button
@@ -30,6 +33,41 @@ def _setup_logging() -> None:
         h = logging.StreamHandler(sys.stdout)
         h.setFormatter(logging.Formatter("[%(levelname)s][%(name)s] %(message)s"))
         root.addHandler(h)
+
+        # 파일 로그 — console=False 빌드에서도 충돌 원인 추적 가능
+        try:
+            _exe_dir = (
+                os.path.dirname(os.path.abspath(sys.executable))
+                if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.abspath(__file__))
+            )
+            fh = logging.FileHandler(
+                os.path.join(_exe_dir, "quote_app.log"),
+                encoding="utf-8", mode="a",
+            )
+            fh.setFormatter(logging.Formatter(
+                "[%(levelname)s][%(asctime)s][%(name)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            root.addHandler(fh)
+        except Exception:
+            pass
+
+
+def _setup_exception_hook() -> None:
+    """메인 스레드 uncaught exception → 로그 + 대화상자 (silent crash 방지)."""
+    def _hook(exc_type, exc_value, exc_tb):
+        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logging.getLogger("QuoteApp").critical("치명적 오류:\n%s", msg)
+        try:
+            QMessageBox.critical(
+                None, "치명적 오류",
+                f"예상치 못한 오류가 발생했습니다:\n\n{exc_value}\n\n"
+                "프로그램 폴더의 quote_app.log 에서 자세한 내용을 확인하세요.",
+            )
+        except Exception:
+            pass
+    sys.excepthook = _hook
 
 
 logger = logging.getLogger("QuoteApp")
@@ -59,120 +97,108 @@ def _make_splash_pix() -> QPixmap:
 
 
 # ──────────────────────────────────────────────
-# 왼쪽 내비게이션
+# 페이지 창 (견적서작성 / 전자서명 각각 독립 창)
 # ──────────────────────────────────────────────
-class LeftNav(QWidget):
-    def __init__(self, stack: QStackedWidget, on_reset, on_navigate=None) -> None:
-        super().__init__()
-        self.setFixedWidth(220)
+class _PageWindow(QMainWindow):
+    """기능 페이지를 독립 창으로 표시. 초기화 버튼은 우측 상단 툴바."""
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(12)
+    def __init__(self, title: str, mod_name: str, cls_name: str,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle(f"견적/전자서명 통합 시스템 — {title}")
+        self._mod_name = mod_name
+        self._cls_name = cls_name
 
-        def _go(idx):
-            if on_navigate:
-                on_navigate(idx)
+        # ── 초기화 버튼 — 툴바 우측 ──────────────────
+        tb = self.addToolBar("controls")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        reset_btn = QPushButton("↺  초기화")
+        reset_btn.setFixedHeight(34)
+        reset_btn.setFixedWidth(110)
+        f = reset_btn.font(); f.setPointSize(11); f.setBold(True); reset_btn.setFont(f)
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E53935;
+                color: white;
+                border-radius: 5px;
+                border: none;
+            }
+            QPushButton:hover  { background-color: #C62828; }
+            QPushButton:pressed{ background-color: #B71C1C; }
+        """)
+        reset_btn.clicked.connect(self._reset)
+        tb.addWidget(reset_btn)
+
+        # ── 페이지 위젯 ───────────────────────────────
+        import importlib
+        mod = importlib.import_module(mod_name)
+        cls = getattr(mod, cls_name)
+        self._page = cls()
+        self.setCentralWidget(self._page)
+
+    def _reset(self) -> None:
+        try:
+            if hasattr(self._page, "reset_page"):
+                self._page.reset_page()
             else:
-                stack.setCurrentIndex(idx)
-
-        buttons = [
-            ("견적서작성", lambda: _go(0), "#BBDEFB"),
-            ("전자서명",   lambda: _go(1), "#C8E6C9"),
-        ]
-        for label, slot, color in buttons:
-            btn = self._nav_btn(label, slot)
-            tint_button(btn, color)
-            v.addWidget(btn)
-
-        v.addStretch(1)
-
-        reset_btn = self._nav_btn("초기화", on_reset)
-        tint_button(reset_btn, "#FFCCBC")   # 연주황(리셋 강조)
-        v.addWidget(reset_btn)
-
-    @staticmethod
-    def _nav_btn(label: str, slot) -> QPushButton:
-        btn = QPushButton(label)
-        btn.setMinimumHeight(70)
-        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        f = btn.font()
-        f.setPointSize(12)
-        f.setBold(True)
-        btn.setFont(f)
-        btn.clicked.connect(slot)
-        return btn
+                import importlib
+                mod = importlib.import_module(self._mod_name)
+                cls = getattr(mod, self._cls_name)
+                new_page = cls()
+                self.setCentralWidget(new_page)
+                self._page.deleteLater()
+                self._page = new_page
+        except Exception as e:
+            QMessageBox.critical(self, "초기화 오류", str(e))
 
 
 # ──────────────────────────────────────────────
-# 메인 윈도우
+# 런처 윈도우 (메인)
 # ──────────────────────────────────────────────
 class MainWindow(QMainWindow):
-    # 인덱스 → (모듈 클래스명, 클래스 참조 캐시)
-    _PAGE_DEFS = [
-        ("pages", "QuoteBuilderPage"),
-        ("pages", "ESignPage"),
-    ]
+    """두 버튼으로 각 기능 창을 여는 런처."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("견적/전자서명 통합 시스템")
+        self.setFixedSize(340, 210)
+
+        self._quote_win: Optional[_PageWindow] = None
+        self._esign_win: Optional[_PageWindow] = None
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(12)
+        v = QVBoxLayout(central)
+        v.setContentsMargins(30, 30, 30, 30)
+        v.setSpacing(18)
 
-        self.stack = QStackedWidget()
-        self._page_cache: dict = {}   # index → QWidget (생성된 페이지)
+        btn_quote = QPushButton("견적서작성")
+        btn_esign = QPushButton("전자서명")
 
-        # 스택에 빈 플레이스홀더를 먼저 채워 인덱스 유지 (pages 1,2는 첫 탐색 시 지연 생성)
-        for _ in self._PAGE_DEFS:
-            self.stack.addWidget(QWidget())
+        for btn, color in [(btn_quote, "#BBDEFB"), (btn_esign, "#C8E6C9")]:
+            btn.setMinimumHeight(60)
+            f = btn.font(); f.setPointSize(14); f.setBold(True); btn.setFont(f)
+            tint_button(btn, color)
+            v.addWidget(btn)
 
-        self.nav = LeftNav(self.stack, self.reset, self._ensure_page)
-        layout.addWidget(self.nav)
-        layout.addWidget(self.stack, 1)
+        btn_quote.clicked.connect(
+            lambda: self._open_page("견적서작성", "pages", "QuoteBuilderPage", "_quote_win"))
+        btn_esign.clicked.connect(
+            lambda: self._open_page("전자서명", "pages", "ESignPage", "_esign_win"))
 
-        # 첫 페이지(index 0)는 동기 생성 — 창이 최대화될 때 레이아웃이 올바르게 채워지도록
-        self._ensure_page(0)
-
-    def _ensure_page(self, index: int) -> None:
-        """index 페이지가 아직 생성되지 않았으면 지금 생성해 스택에 교체."""
-        if index in self._page_cache:
-            self.stack.setCurrentIndex(index)
-            return
-        mod_name, cls_name = self._PAGE_DEFS[index]
-        import importlib
-        mod = importlib.import_module(mod_name)
-        cls = getattr(mod, cls_name)
-        page = cls()
-        self._page_cache[index] = page
-        # 플레이스홀더와 교체
-        old = self.stack.widget(index)
-        self.stack.insertWidget(index, page)
-        self.stack.removeWidget(old)
-        old.deleteLater()
-        self.stack.setCurrentIndex(index)
-
-    # ── 초기화 ───────────────────────────────────
-    def reset(self) -> None:
-        try:
-            cur = self.stack.currentWidget()
-            if cur is not None and hasattr(cur, "reset_page"):
-                cur.reset_page()
-                return
-            idx = self.stack.currentIndex()
-            # 현재 페이지만 재생성
-            if idx in self._page_cache:
-                old = self._page_cache.pop(idx)
-                self.stack.insertWidget(idx, QWidget())
-                self.stack.removeWidget(old)
-                old.deleteLater()
-            self._ensure_page(idx)
-        except Exception as e:
-            QMessageBox.critical(self, "초기화 오류", str(e))
+    def _open_page(self, title: str, mod: str, cls: str, attr: str) -> None:
+        win: Optional[_PageWindow] = getattr(self, attr)
+        if win is None or not win.isVisible():
+            win = _PageWindow(title, mod, cls, parent=self)
+            setattr(self, attr, win)
+            win.showMaximized()
+        else:
+            win.raise_()
+            win.activateWindow()
 
 
 # ──────────────────────────────────────────────
@@ -180,6 +206,8 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────
 def main() -> None:
     _setup_logging()
+    _setup_exception_hook()
+    logger.info("앱 시작")
 
     # 런처에서 in-process로 호출되면 QApplication이 이미 존재한다.
     # 그 경우 새로 생성하지 않고 기존 인스턴스를 재사용한다.
@@ -210,10 +238,10 @@ def main() -> None:
 
     threading.Thread(target=_preload, daemon=True).start()
 
-    # ── 메인 윈도우 즉시 생성 ──────────────────────────────────────────
+    # ── 런처 윈도우 생성 (고정 크기이므로 show) ─────────────────────────
     window = MainWindow()
     splash.finish(window)
-    window.showMaximized()
+    window.show()
 
     if _standalone:
         sys.exit(app.exec())

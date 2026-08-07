@@ -7,8 +7,10 @@ main.py
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
+import traceback
 from typing import Optional
 
 from PySide6.QtCore import Qt, QRect
@@ -31,6 +33,41 @@ def _setup_logging() -> None:
         h = logging.StreamHandler(sys.stdout)
         h.setFormatter(logging.Formatter("[%(levelname)s][%(name)s] %(message)s"))
         root.addHandler(h)
+
+        # 파일 로그 — console=False 빌드에서도 충돌 원인 추적 가능
+        try:
+            _exe_dir = (
+                os.path.dirname(os.path.abspath(sys.executable))
+                if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.abspath(__file__))
+            )
+            fh = logging.FileHandler(
+                os.path.join(_exe_dir, "quote_app.log"),
+                encoding="utf-8", mode="a",
+            )
+            fh.setFormatter(logging.Formatter(
+                "[%(levelname)s][%(asctime)s][%(name)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            root.addHandler(fh)
+        except Exception:
+            pass
+
+
+def _setup_exception_hook() -> None:
+    """메인 스레드 uncaught exception → 로그 + 대화상자 (silent crash 방지)."""
+    def _hook(exc_type, exc_value, exc_tb):
+        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logging.getLogger("QuoteApp").critical("치명적 오류:\n%s", msg)
+        try:
+            QMessageBox.critical(
+                None, "치명적 오류",
+                f"예상치 못한 오류가 발생했습니다:\n\n{exc_value}\n\n"
+                "프로그램 폴더의 quote_app.log 에서 자세한 내용을 확인하세요.",
+            )
+        except Exception:
+            pass
+    sys.excepthook = _hook
 
 
 logger = logging.getLogger("QuoteApp")
@@ -169,6 +206,8 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────
 def main() -> None:
     _setup_logging()
+    _setup_exception_hook()
+    logger.info("앱 시작")
 
     # 런처에서 in-process로 호출되면 QApplication이 이미 존재한다.
     # 그 경우 새로 생성하지 않고 기존 인스턴스를 재사용한다.

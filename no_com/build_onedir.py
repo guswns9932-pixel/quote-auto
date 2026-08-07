@@ -230,20 +230,7 @@ def _make_spec(app_name: str, icon: str) -> str:
             a.binaries,
             a.datas,
             strip=False,
-            upx=True,
-            upx_exclude=[
-                # Qt DLL: UPX 압축 시 리소스 섹션 손상 위험
-                "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
-                "Qt6Network.dll", "Qt6PrintSupport.dll", "Qt6Svg.dll",
-                "Qt6OpenGL.dll", "Qt6XcbQpa.dll", "Qt6DBus.dll",
-                # MSVC 런타임
-                "vcruntime140.dll", "vcruntime140_1.dll",
-                "MSVCP140.dll", "MSVCP140_1.dll",
-                # pywin32: ordinal-export DLL — UPX가 export table 손상 가능 → COM 오류
-                "pythoncom*.dll", "pywintypes*.dll",
-                # Python C 확장(.pyd): UPX 압축 시 임포트 실패 가능
-                "*.pyd",
-            ],
+            upx=False,   # UPX 압축 비활성화: AV 오탐·시스템 동결 방지
             name="{app_name}",
         )
     """)

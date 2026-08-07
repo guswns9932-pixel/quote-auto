@@ -67,6 +67,21 @@ class _TemplateLoaderThread(QThread):
             self.done.emit(e)
 
 
+class _RequestLoaderThread(QThread):
+    """STEP2용: 의뢰파일 Excel을 백그라운드에서 파싱 (메인 스레드 동결 방지)."""
+    done = Signal(object)  # (sheet_name, rows) tuple 또는 Exception
+    def __init__(self, path: str, parent=None) -> None:
+        super().__init__(parent)
+        self.path = path
+    def run(self) -> None:
+        try:
+            import excel_io
+            sheet_name, rows = excel_io.parse_request_xlsx(self.path)
+            self.done.emit((sheet_name, rows))
+        except Exception as e:
+            self.done.emit(e)
+
+
 class _GenQuoteThread(QThread):
     """견적서 생성을 백그라운드에서 실행."""
     progress = Signal(str)          # 로그 메시지
@@ -564,9 +579,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._filter_timer  : QTimer                          = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.timeout.connect(self._do_filter)
-        self._tpl_thread    : Optional[_TemplateLoaderThread] = None
-        self._gen_qt_thread : Optional[_GenQuoteThread]       = None
-        self._gen_cv_thread  : Optional[_GenCoverThread]       = None
+        self._tpl_thread    : Optional[_TemplateLoaderThread]  = None
+        self._req_thread    : Optional[_RequestLoaderThread]   = None
+        self._gen_qt_thread : Optional[_GenQuoteThread]        = None
+        self._gen_cv_thread  : Optional[_GenCoverThread]        = None
         self._cover_progress : Optional[QProgressDialog]      = None
         self._list_all_files : List[str]                       = []
         self._quote_list_window: Optional[_QuoteListWindow]    = None
@@ -887,14 +903,19 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _load_request(self) -> None:
         if not self.state.template_path:
             QMessageBox.warning(self, "순서 오류", "STEP1을 먼저 완료하세요."); return
+        if self._req_thread and self._req_thread.isRunning():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "의뢰파일 선택", "", "Excel Files (*.xlsx)")
         if not path: return
-        import excel_io
-        try:
-            sheet_name, rows = excel_io.parse_request_xlsx(path)
-        except Exception as e:
+        self._req_thread = _RequestLoaderThread(path, self)
+        self._req_thread.done.connect(lambda result: self._on_request_loaded(path, result))
+        self._req_thread.start()
+
+    def _on_request_loaded(self, path: str, result) -> None:
+        if isinstance(result, Exception):
             logger.error("의뢰파일 파싱 오류", exc_info=True)
-            QMessageBox.critical(self, "오류", f"파일을 읽을 수 없습니다.\n{e}"); return
+            QMessageBox.critical(self, "오류", f"파일을 읽을 수 없습니다.\n{result}"); return
+        sheet_name, rows = result
         if not rows:
             QMessageBox.warning(self, "의뢰파일", "읽을 데이터가 없습니다."); return
         self.state.request_path = path; self.state.request_sheet_name = sheet_name

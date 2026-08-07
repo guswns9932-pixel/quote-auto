@@ -213,6 +213,34 @@ def _show_only_sheets(wb, keep: List[str]) -> None:
         wb[name].sheet_state = "visible" if name in keep_set else "veryHidden"
 
 
+def _reset_sheet_selections(wb) -> None:
+    """
+    모든 시트의 SheetView selection을 A1 단일 셀로 초기화한다.
+
+    [문제]
+    openpyxl은 템플릿에 저장된 selection.sqref 값을 그대로 보존한다.
+    템플릿이 다중 비연속 범위가 선택된 채로 저장되어 있으면(예: "A1 C3:D5"),
+    생성된 xlsx도 동일한 상태를 갖게 된다.
+    Excel이 이 파일을 열면 다중 선택 상태가 복원되어:
+      - 복사·붙여넣기: "이 작업은 다중선택 범위에서 작동하지 않습니다"
+      - 시트 삽입·삭제: 차단
+      - 시트 이동/복사: Excel 비정상 종료 (PrintArea 정의명과 충돌)
+
+    [수정]
+    저장 직전에 모든 시트의 selection 을 단일 A1 으로 강제 초기화한다.
+    """
+    from openpyxl.worksheet.views import Selection
+    for ws in wb.worksheets:
+        sv = ws.sheet_view
+        if not sv.selection:
+            sv.selection.append(Selection(activeCell="A1", sqref="A1"))
+        else:
+            first = sv.selection[0]
+            first.activeCell = "A1"
+            first.sqref = "A1"
+            sv.selection[:] = [first]
+
+
 def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any],
                              req_ws_cache: Optional[Any] = None) -> None:
     """
@@ -382,6 +410,7 @@ def _fill_domestic(state: QuoteState,
         SheetName.INCOMING, SheetName.REQ_COPY,
     ])
 
+    _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
     logger.info("국내 견적서 생성: %s", path)
@@ -450,7 +479,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     wb.calculation.fullCalcOnLoad = True
     _hide_rows(ws, CN.RACK_START, CN.RACK_END, len(out_list))
     _show_only_sheets(wb, [SheetName.QUOTE_CN])
-
+    _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
     logger.info("중국 견적서 생성: %s", path)
@@ -519,7 +548,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     wb.calculation.fullCalcOnLoad = True
     _hide_rows(ws, US.RACK_START, US.RACK_END, len(out_list))
     _show_only_sheets(wb, [SheetName.QUOTE_US])
-
+    _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
     logger.info("미국 견적서 생성: %s", path)
@@ -737,6 +766,7 @@ def generate_cover(
         wb[_sn].sheet_view.tabSelected = (_sn == SheetName.COVER)
     wb.active = wb[SheetName.COVER]
 
+    _reset_sheet_selections(wb)
     wb.save(out_path)
     wb.close()
     logger.info("갑지 생성: %s", out_path)

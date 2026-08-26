@@ -790,9 +790,9 @@ def export_cover_data_sheet(src_path: str) -> str:
     import re
 
     stem, ext = os.path.splitext(os.path.basename(src_path))
-    new_stem = re.sub(r"_갑지$", "", stem)
+    new_stem = re.sub(r"_갑지(?:_\d+)?$", "", stem)
     if new_stem == stem:
-        new_stem = stem + "_제출용"
+        raise ValueError(f"갑지 파일이 아닙니다: '{os.path.basename(src_path)}'")
     out_path = unique_path(os.path.join(os.path.dirname(src_path), new_stem + ext))
 
     # 원본을 통째로 복사 → 서식·스타일 완전 보존

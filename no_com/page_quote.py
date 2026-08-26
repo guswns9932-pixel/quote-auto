@@ -509,11 +509,25 @@ class _QuoteListWindow(QWidget):
             self._session_entries.insert(0, entry)
         self._apply_filter()
 
-    def refresh_session(self, files: List[str]) -> None:
-        self._session_entries = [
-            e for e in (QuoteBuilderPage._parse_quote_entry(f) for f in files)
-            if e is not None
-        ]
+    def add_submit_item(self, path: str) -> None:
+        """제출용 엑셀 항목을 '(제출용) 레이블' 형식으로 추가."""
+        _, label = QuoteBuilderPage._parse_quote_label(path)
+        display_label = f"(제출용) {label}" if label else f"(제출용) {os.path.basename(path)}"
+        self._session_entries.insert(0, ("__submit__", display_label, path))
+        self._apply_filter()
+
+    def refresh_session(self, files: List[str],
+                        submit_paths: frozenset = frozenset()) -> None:
+        self._session_entries = []
+        for f in files:
+            if f in submit_paths:
+                _, label = QuoteBuilderPage._parse_quote_label(f)
+                display_label = f"(제출용) {label}" if label else f"(제출용) {os.path.basename(f)}"
+                self._session_entries.append(("__submit__", display_label, f))
+            else:
+                e = QuoteBuilderPage._parse_quote_entry(f)
+                if e is not None:
+                    self._session_entries.append(e)
         self._apply_filter()
 
     def _apply_filter(self) -> None:
@@ -543,7 +557,9 @@ class _QuoteListWindow(QWidget):
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
             if tool == "":
-                item.setBackground(QBrush(QColor(255, 153, 153)))
+                item.setBackground(QBrush(QColor(255, 153, 153)))   # 갑지: 연빨강
+            elif tool == "__submit__":
+                item.setBackground(QBrush(QColor(255, 243, 160)))   # 제출용: 연노랑
             self.list_widget.addItem(item)
 
     def _open_item(self, item: QListWidgetItem) -> None:
@@ -585,6 +601,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._gen_cv_thread  : Optional[_GenCoverThread]        = None
         self._cover_progress : Optional[QProgressDialog]      = None
         self._list_all_files : List[str]                       = []
+        self._submit_paths   : set                             = set()
         self._quote_list_window: Optional[_QuoteListWindow]    = None
 
         self._build_ui()
@@ -1502,10 +1519,16 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _export_submit_excel(self) -> None:
         """갑지DATA 시트만 추출해 제출용 엑셀 파일로 저장."""
+        import re as _re
         path, _ = QFileDialog.getOpenFileName(
             self, "갑지를 선택하세요", self.state.last_output_dir or exe_dir(),
             "Excel Files (*.xlsx)")
         if not path:
+            return
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if not _re.search(r"_갑지(?:_\d+)?$", stem):
+            QMessageBox.warning(self, "갑지가 아닙니다",
+                                "선택한 파일의 이름에 '_갑지'가 없습니다.\n갑지 파일을 선택해 주세요.")
             return
         try:
             import excel_io
@@ -1514,6 +1537,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             logger.error("제출용 엑셀 생성 실패", exc_info=True)
             QMessageBox.critical(self, "오류", f"제출용 엑셀 생성 실패:\n{e}")
             return
+        self._add_done_submit(out)
         self._log(f"제출용 엑셀 생성 완료: {out}")
         QMessageBox.information(self, "완료", f"제출용 엑셀 생성 완료\n{os.path.basename(out)}")
 
@@ -1550,6 +1574,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._list_all_files.insert(0, path)
         if self._quote_list_window:
             self._quote_list_window.add_item(path)
+
+    def _add_done_submit(self, path: str) -> None:
+        self._submit_paths.add(path)
+        self._list_all_files.insert(0, path)
+        if self._quote_list_window:
+            self._quote_list_window.add_submit_item(path)
 
     @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
@@ -1615,7 +1645,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         """견적서 LIST 독립 창을 열거나 앞으로 가져온다."""
         if self._quote_list_window is None:
             self._quote_list_window = _QuoteListWindow(self)
-            self._quote_list_window.refresh_session(self._list_all_files)
+            self._quote_list_window.refresh_session(
+                self._list_all_files, frozenset(self._submit_paths))
         self._quote_list_window.show_and_raise()
 
     def _log(self, text: str) -> None:

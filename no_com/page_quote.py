@@ -651,10 +651,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         tint_button(self.btn_step2, "#BBDEFB")
         self.btn_step2.setEnabled(False)
 
-        self.btn_gen_quote = self._action_btn("견적서 생성", self._generate_quote)
-        self.btn_gen_cover = self._action_btn("갑지 생성",   self._generate_cover)
-        tint_button(self.btn_gen_quote, "#B3E5FC")
-        tint_button(self.btn_gen_cover, "#F8BBD0")
+        self.btn_gen_quote  = self._action_btn("견적서 생성",    self._generate_quote)
+        self.btn_gen_cover  = self._action_btn("갑지 생성",      self._generate_cover)
+        self.btn_submit_xls = self._action_btn("제출용 엑셀 생성", self._export_submit_excel)
+        tint_button(self.btn_gen_quote,  "#B3E5FC")
+        tint_button(self.btn_gen_cover,  "#F8BBD0")
+        tint_button(self.btn_submit_xls, "#FFF9C4")
 
         btn_list = QPushButton("견적서 LIST"); btn_list.setFixedHeight(52)
         f = btn_list.font(); f.setPointSize(10); f.setBold(True); btn_list.setFont(f)
@@ -668,6 +670,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         h.addWidget(sep)
         h.addWidget(self.btn_gen_quote)
         h.addWidget(self.btn_gen_cover)
+        h.addWidget(self.btn_submit_xls)
         h.addWidget(btn_list)
         h.addStretch(1)
         return bar
@@ -1399,6 +1402,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _set_gen_buttons(self, enabled: bool) -> None:
         self.btn_gen_quote.setEnabled(enabled)
         self.btn_gen_cover.setEnabled(enabled)
+        self.btn_submit_xls.setEnabled(enabled)
 
     def _generate_quote(self) -> None:
         if not self.state.template_path:
@@ -1495,6 +1499,23 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._add_done_cover(out)
         self._log(f"갑지 생성 완료: {out}")
         QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
+
+    def _export_submit_excel(self) -> None:
+        """갑지DATA 시트만 추출해 제출용 엑셀 파일로 저장."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "갑지를 선택하세요", self.state.last_output_dir or exe_dir(),
+            "Excel Files (*.xlsx)")
+        if not path:
+            return
+        try:
+            import excel_io
+            out = excel_io.export_cover_data_sheet(path)
+        except Exception as e:
+            logger.error("제출용 엑셀 생성 실패", exc_info=True)
+            QMessageBox.critical(self, "오류", f"제출용 엑셀 생성 실패:\n{e}")
+            return
+        self._log(f"제출용 엑셀 생성 완료: {out}")
+        QMessageBox.information(self, "완료", f"제출용 엑셀 생성 완료\n{os.path.basename(out)}")
 
     def _pick_rd_index(self) -> int:
         """클릭(선택)된 행 → 체크된 첫 번째 행 → 0 순으로 의뢰행 인덱스 반환."""

@@ -773,6 +773,52 @@ def generate_cover(
     return out_path
 
 
+def export_cover_data_sheet(src_path: str) -> str:
+    """
+    갑지 파일에서 갑지DATA(SheetName.COVER_DATA) 시트만 추출하여 새 xlsx 로 저장.
+
+    파일명 규칙:
+      원본 파일명 끝의 '_갑지' 를 제거한다.
+      예) 대외비_260512_LOT베큠_P3_CVD_권혁성_갑지.xlsx
+        → 대외비_260512_LOT베큠_P3_CVD_권혁성.xlsx
+
+    '_갑지' 가 없는 파일명이면 '_제출용' 을 접미사로 붙여 구분한다.
+    동일 경로에 같은 이름이 이미 있으면 unique_path() 로 번호를 붙인다.
+
+    반환: 저장된 파일 경로
+    """
+    import re
+
+    stem, ext = os.path.splitext(os.path.basename(src_path))
+    new_stem = re.sub(r"_갑지$", "", stem)
+    if new_stem == stem:
+        new_stem = stem + "_제출용"
+    out_path = unique_path(os.path.join(os.path.dirname(src_path), new_stem + ext))
+
+    # 원본을 통째로 복사 → 서식·스타일 완전 보존
+    shutil.copy2(src_path, out_path)
+
+    wb = load_workbook(out_path)
+    keep = SheetName.COVER_DATA
+    if keep not in wb.sheetnames:
+        wb.close()
+        os.remove(out_path)
+        raise ValueError(f"'{keep}' 시트를 찾을 수 없습니다: {os.path.basename(src_path)}")
+
+    for name in list(wb.sheetnames):
+        if name != keep:
+            del wb[name]
+
+    ws = wb[keep]
+    ws.sheet_state = "visible"
+    wb.active = ws
+    _reset_sheet_selections(wb)
+    wb.save(out_path)
+    wb.close()
+    logger.info("제출용 엑셀 생성: %s", out_path)
+    return out_path
+
+
 # ═══════════════════════════════════════════════════════════════
 # COM 헬퍼 — PDF 변환 전용 (변경 없음)
 # ═══════════════════════════════════════════════════════════════

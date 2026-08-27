@@ -224,7 +224,7 @@ class ESignPage(QWidget):
         self._loader_thread.start()
 
     def _on_load_progress(self, done: int, total: int, fname: str) -> None:
-        if not self._load_progress:
+        if self._load_progress is None:
             return
         # COM init 성공 확인 → 타임아웃 타이머 해제
         if not self._com_init_ok:
@@ -232,6 +232,11 @@ class ESignPage(QWidget):
             if self._com_init_timer:
                 self._com_init_timer.stop()
         self._load_progress.setValue(done)
+        # setValue(max) 가 QProgressDialog 자동 닫기(hide)를 트리거하고,
+        # hide() 중 Qt 이벤트가 재진입해 _on_load_finished 가 동기 실행될 수 있다.
+        # 그 경우 _load_progress 가 None 으로 바뀌므로 재확인 후 접근한다.
+        if self._load_progress is None:
+            return
         if done < total:
             self._load_progress.setLabelText(f"변환 중 ({done + 1}/{total}): {fname}")
         else:

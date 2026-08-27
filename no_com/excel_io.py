@@ -1012,8 +1012,15 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     # 이미지를 읽은 직후 클립보드를 비워 이 경로를 차단한다.
                     _clear_clipboard()
                     if img is not None:
-                        img.save(png_path, "PNG")
-                        png_paths.append(png_path)
+                        # 이전 세션 잠금 파일이 남아 있으면 삭제 시도 후 저장
+                        _dst = png_path
+                        if os.path.exists(_dst):
+                            try:
+                                os.remove(_dst)
+                            except OSError:
+                                _dst = unique_path(_dst)
+                        img.save(_dst, "PNG")
+                        png_paths.append(_dst)
                     else:
                         logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
                 except Exception as e:

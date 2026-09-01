@@ -86,9 +86,13 @@ def inspect_template_losses(path: str) -> List[str]:
     그림·머리글 로고·인쇄 설정이 사라져도 아무 오류가 나지 않으므로,
     통합양식을 읽는 시점에 미리 알려준다.
 
-      - EMF/WMF 벡터 이미지      → 도형이 통째로 사라짐
-      - VML(legacyDrawingHF)     → 머리글/바닥글 이미지가 사라짐
-      - printerSettings          → 용지·여백·방향 설정이 초기화됨
+      - EMF/WMF 벡터 이미지 → 도형이 통째로 사라진다. 복원 불가.
+                              엑셀에서 PNG 그림으로 교체해야 한다.
+
+    ※ 머리글/바닥글 이미지(VML)도 openpyxl 이 버리지만
+      restore_header_footer_images() 로 저장 후 되살리므로 경고하지 않는다.
+    ※ 인쇄 설정은 용지·배율·방향·여백·printOptions 가 모두 보존된다.
+      printerSettings*.bin(프린터 드라이버 고유값)만 빠지며 실사용에 영향 없다.
 
     반환: 경고 문구 리스트 (비어 있으면 소실 없음)
     """
@@ -131,21 +135,7 @@ def inspect_template_losses(path: str) -> List[str]:
                     where = ", ".join(users.get(base, [])) or "(사용 시트 불명)"
                     out.append(f"벡터 이미지 {base} → {where} 에서 사라집니다")
 
-            # ② 머리글/바닥글 이미지(VML)
-            if any(n.startswith("xl/drawings/vmlDrawing") for n in names):
-                hf = []
-                for n in names:
-                    if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n):
-                        continue
-                    if b"legacyDrawingHF" in z.read(n):
-                        hf.append(n.split("/")[-1])
-                if hf:
-                    out.append(f"머리글/바닥글 이미지 → {len(hf)}개 시트에서 사라집니다")
 
-            # ③ 인쇄 설정
-            ps = [n for n in names if n.startswith("xl/printerSettings/")]
-            if ps:
-                out.append(f"인쇄 설정(용지·여백·방향) {len(ps)}건이 초기화됩니다")
     except Exception as e:
         logger.warning("템플릿 소실 검사 실패 (%s): %s", path, e)
     return out
@@ -406,6 +396,126 @@ def _hide_rows(ws: Worksheet, start: int, end: int, filled_count: int) -> None:
 # ※ 'Pump 단가표' / '악세서리 단가표' 는 사양서·입고검수확인서 수식이 VLOOKUP 으로
 #    참조하므로 절대 삭제하면 안 된다(삭제 시 #REF!).
 _DROP_SHEETS = ("품목", "코드매핑", "용량 및 등급")
+
+
+_VML_RELTYPE = ("http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships/vmlDrawing")
+
+
+def restore_header_footer_images(src_template: str, out_path: str) -> int:
+    """
+    openpyxl 이 버린 머리글/바닥글 이미지(VML)를 원본 템플릿에서 되살린다.
+
+    openpyxl 은 legacyDrawingHF(머리글/바닥글 그림)를 읽지도 쓰지도 못한다.
+    머리글 텍스트의 '&G'(그림 삽입) 지시자는 남는데 그림 파트가 사라져
+    인쇄물에서 로고가 빠진다. 저장이 끝난 파일에 원본의 VML 파트와
+    참조만 되살린다(셀 내용은 건드리지 않는다).
+
+    반환: 복원한 시트 수
+    """
+    import zipfile
+    from xml.etree import ElementTree as ET
+    _RELNS = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+
+    def _rels(z, p):
+        try:
+            return [(r.get("Id"), r.get("Type"), r.get("Target"))
+                    for r in ET.fromstring(z.read(p)).iter(_RELNS)]
+        except Exception:
+            return []
+
+    def _sheetfiles(z):
+        wbrel = {i: t for i, _t, t in _rels(z, "xl/_rels/workbook.xml.rels")}
+        return {n: (wbrel.get(r) or "").split("/")[-1] for n, r in
+                re.findall(r'<sheet name="([^"]+)"[^>]*r:id="(rId\d+)"',
+                           z.read("xl/workbook.xml").decode("utf8", "replace"))}
+
+    try:
+        with zipfile.ZipFile(src_template) as zs:
+            src_names = set(zs.namelist())
+            want = {}
+            for name, fn in _sheetfiles(zs).items():
+                for _id, ty, tgt in _rels(zs, f"xl/worksheets/_rels/{fn}.rels"):
+                    if ty != _VML_RELTYPE:
+                        continue
+                    vml = tgt.split("/")[-1]
+                    parts = {f"xl/drawings/{vml}": zs.read(f"xl/drawings/{vml}")}
+                    rp = f"xl/drawings/_rels/{vml}.rels"
+                    if rp in src_names:
+                        parts[rp] = zs.read(rp)
+                        for _i, _t, mt in _rels(zs, rp):
+                            m = "xl/" + mt.replace("../", "")
+                            if m in src_names:
+                                parts[m] = zs.read(m)
+                    want[name] = (vml, parts)
+        if not want:
+            return 0
+
+        with zipfile.ZipFile(out_path) as zo:
+            omap = _sheetfiles(zo)
+            data = {n: zo.read(n) for n in zo.namelist()}
+
+        added = 0
+        for name, (vml, parts) in want.items():
+            fn = omap.get(name)
+            sheet = f"xl/worksheets/{fn}" if fn else None
+            if not sheet or sheet not in data:
+                continue           # 삭제된 시트는 건너뛴다
+            data.update(parts)
+
+            rp = f"xl/worksheets/_rels/{fn}.rels"
+            cur = data.get(
+                rp,
+                b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                b'<Relationships xmlns="http://schemas.openxmlformats.org/'
+                b'package/2006/relationships"></Relationships>').decode("utf8")
+            used = set(re.findall(r'Id="(rId\d+)"', cur))
+            rid = next(f"rId{i}" for i in range(1, 10000) if f"rId{i}" not in used)
+            data[rp] = cur.replace(
+                "</Relationships>",
+                f'<Relationship Id="{rid}" Type="{_VML_RELTYPE}" '
+                f'Target="../drawings/{vml}"/></Relationships>').encode("utf8")
+
+            x = data[sheet].decode("utf8")
+            if "<legacyDrawingHF" not in x:
+                # openpyxl 은 r: 네임스페이스를 선언하지 않는 시트가 있어
+                # 그냥 r:id 를 쓰면 'unbound prefix' 로 파일이 깨진다 → 인라인 선언.
+                tag = (f'<legacyDrawingHF xmlns:r="http://schemas.openxmlformats.org'
+                       f'/officeDocument/2006/relationships" r:id="{rid}"/>')
+                # 스키마 순서: drawing → legacyDrawing → legacyDrawingHF
+                m = re.search(r'<legacyDrawing\b[^>]*/>|<drawing\b[^>]*/>', x)
+                x = (x[:m.end()] + tag + x[m.end():]) if m else \
+                    x.replace("</worksheet>", tag + "</worksheet>")
+                data[sheet] = x.encode("utf8")
+            added += 1
+
+        ct = data["[Content_Types].xml"].decode("utf8")
+        for ext, mime in (
+            ("vml", "application/vnd.openxmlformats-officedocument.vmlDrawing"),
+            ("jpeg", "image/jpeg"), ("jpg", "image/jpeg"), ("png", "image/png"),
+            ("gif", "image/gif"), ("emf", "image/x-emf"),
+        ):
+            if f'Extension="{ext}"' not in ct:
+                ct = ct.replace(
+                    "</Types>",
+                    f'<Default Extension="{ext}" ContentType="{mime}"/></Types>')
+        data["[Content_Types].xml"] = ct.encode("utf8")
+
+        tmp = out_path + ".tmp"
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zw:
+            for n, d in data.items():
+                zw.writestr(n, d)
+        os.replace(tmp, out_path)
+        return added
+    except Exception as e:
+        # 복원은 부가 기능이다. 실패해도 생성물 자체는 유효하므로 로그만 남긴다.
+        logger.warning("머리글/바닥글 이미지 복원 실패 (%s): %s", out_path, e)
+        try:
+            if os.path.exists(out_path + ".tmp"):
+                os.remove(out_path + ".tmp")
+        except OSError:
+            pass
+        return 0
 
 
 def _drop_internal_sheets(wb) -> None:
@@ -692,6 +802,7 @@ def _fill_domestic(state: QuoteState,
     wb.save(path)
     if wb_cache is None:
         wb.close()          # 재사용 워크북은 호출자가 닫는다
+    restore_header_footer_images(state.template_path, path)
     logger.info("국내 견적서 생성: %s", path)
     return path
 
@@ -762,6 +873,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
+    restore_header_footer_images(state.template_path, path)
     logger.info("중국 견적서 생성: %s", path)
     return path
 
@@ -832,6 +944,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
+    restore_header_footer_images(state.template_path, path)
     logger.info("미국 견적서 생성: %s", path)
     return path
 
@@ -1117,6 +1230,7 @@ def _generate_cover_impl(
     _reset_sheet_selections(wb)
     wb.save(out_path)
     wb.close()
+    restore_header_footer_images(template_path, out_path)
     logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
                 out_path, write_row - 2, len(failed))
     return out_path, failed

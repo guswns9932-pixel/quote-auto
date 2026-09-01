@@ -337,9 +337,15 @@ def _fill_domestic(state: QuoteState,
         for col in (DOM.COL_SPEC, DOM.COL_QTY, DOM.COL_PRICE, DOM.COL_AMT):
             ws_spec[f"{col}{rr}"] = None
 
-    # ⑤ 품목 기입 — Pump Credit은 P2(단가)에 반영되므로 G17:G41에서 제외
-    #   Rack Credit만 라인 아이템으로 기입 (G16 이중 차감 방지)
+    # ⑤ 품목 기입
+    #   Pump Credit: G열=0(G16 이중 차감 방지), B열에 금액 레이블만 표시
+    #   Rack Credit: 기존대로 라인 아이템(G열에 실제 금액) 기입
     out_list = rack_items[:25]
+    for cr in pump_credits:
+        pump_credit_label = (
+            f"Pump Credit : -₩ {abs(cr['amt']):,.0f}"
+        )
+        out_list.append({"spec": pump_credit_label, "qty": 0.0, "price": 0.0, "amt": 0})
     for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": 0.0, "amt": cr["amt"]})
     out_list = out_list[:25]

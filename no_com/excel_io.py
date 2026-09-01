@@ -327,17 +327,20 @@ def _fill_domestic(state: QuoteState,
     investor = s(state.investor_name) or "채승철"
     ws_spec["B4"] = f"{investor} 님 / 설비구매그룹"
 
-    rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
-    credits    = [r for r in items if r["role"] == "CREDIT"]
+    rack_items    = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
+    credits       = [r for r in items if r["role"] == "CREDIT"]
+    pump_credits  = [r for r in credits if "Pump" in r.get("spec", "")]
+    rack_credits  = [r for r in credits if "Pump" not in r.get("spec", "")]
 
     # ④ 기존 데이터 클리어
     for rr in range(DOM.SPEC_START, DOM.SPEC_END + 1):
         for col in (DOM.COL_SPEC, DOM.COL_QTY, DOM.COL_PRICE, DOM.COL_AMT):
             ws_spec[f"{col}{rr}"] = None
 
-    # ⑤ 품목 기입
+    # ⑤ 품목 기입 — Pump Credit은 P2(단가)에 반영되므로 G17:G41에서 제외
+    #   Rack Credit만 라인 아이템으로 기입 (G16 이중 차감 방지)
     out_list = rack_items[:25]
-    for cr in credits:
+    for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": 0.0, "amt": cr["amt"]})
     out_list = out_list[:25]
 
@@ -360,14 +363,14 @@ def _fill_domestic(state: QuoteState,
     #   S2 = 사양서!F43        → net 합계(credit 포함) / 수량
     #   T2 = S2 * H2           → 견적단가 × 수량 = net 총 견적금액
     #   U2 = ROUNDUP((P2*H2+Q2)/H2, -3)  → (PUMP단가×수량 + Rack합계) / 수량, 1000원 올림
-    copy_ws    = wb[SheetName.REQ_COPY]
-    pump_items = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
-    pump_spec  = pump_items[0]["spec"]  if pump_items else None
-    pump_price = pump_items[0]["price"] if pump_items else 0.0
-    pump_amt   = sum(r["amt"] for r in pump_items)
-    rack_amt   = sum(r["amt"] for r in rack_items)
-    credit_amt = sum(c["amt"] for c in credits)   # 통상 음수 (신용 차감)
-    net_amt    = pump_amt + rack_amt + credit_amt  # credits 반영된 총 견적금액
+    copy_ws         = wb[SheetName.REQ_COPY]
+    pump_items      = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
+    pump_spec       = pump_items[0]["spec"]  if pump_items else None
+    pump_price      = pump_items[0]["price"] if pump_items else 0.0
+    pump_amt        = sum(r["amt"] for r in pump_items)
+    rack_amt        = sum(r["amt"] for r in rack_items)
+    pump_credit_amt = sum(c["amt"] for c in pump_credits)  # 음수
+    rack_credit_amt = sum(c["amt"] for c in rack_credits)  # 음수
 
     h_qty = to_float(rd.get("H"))
     if h_qty <= 0:
@@ -375,23 +378,26 @@ def _fill_domestic(state: QuoteState,
 
     # 사양서 구조:
     #   G15 = PUMP 총금액 (template 수식: =견적의뢰복사본!P2 × H2)
-    #   G16 = SUM(G17:G41) = rack_items + credits (코드가 직접 기입하는 행 범위)
-    #   F43 = ROUNDDOWN(((G16+G15)/견적의뢰복사본!H2),-3)
-    g15 = pump_price * h_qty          # PUMP 총금액
-    g16 = rack_amt + credit_amt       # rack net (credit 차감 포함)
+    #          → P2가 net 단가이므로 G15도 pump_credit 반영
+    #   G16 = SUM(G17:G41) = rack_items + rack_credits (pump_credit 제외)
+    #   F43 = ROUNDDOWN(((G15+G16)/H2),-3)
+    p_net = (pump_amt + pump_credit_amt) / h_qty   # net PUMP 단가 (credit 반영)
+    q_net = rack_amt + rack_credit_amt              # net Rack 합계 (credit 반영)
+    g15   = p_net * h_qty                           # = pump_amt + pump_credit_amt
+    g16   = q_net                                   # rack net
 
     # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
     s_raw = (g15 + g16) / h_qty
     s_val = math.floor(s_raw / 1000) * 1000   # ROUNDDOWN(..., -3)
     # T = S2 * H2
     t_val = s_val * h_qty
-    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — credit 미포함 gross 단가 검증용
-    u_raw = (pump_price * h_qty + rack_amt) / h_qty
+    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — net 기준 단가 검증
+    u_raw = (p_net * h_qty + q_net) / h_qty
     u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
 
     copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈
-    copy_ws.cell(2, 16).value = pump_price   # P: PUMP 단가
-    copy_ws.cell(2, 17).value = rack_amt     # Q: Rack + 액세서리 합계
+    copy_ws.cell(2, 16).value = p_net        # P: PUMP 단가 (net, credit 반영)
+    copy_ws.cell(2, 17).value = q_net        # Q: Rack 합계 (net, credit 반영)
     copy_ws.cell(2, 19).value = s_val        # S: 견적단가 (=사양서!F43)
     copy_ws.cell(2, 20).value = t_val        # T: 견적금액 (=S2*H2)
     copy_ws.cell(2, 21).value = u_val        # U: 견적단가(Check) (=ROUNDUP(...))

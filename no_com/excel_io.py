@@ -22,6 +22,8 @@ import math
 import os
 import re
 import shutil
+import stat
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -35,6 +37,45 @@ from core import (
 )
 
 logger = logging.getLogger("QuoteApp")
+
+
+# ──────────────────────────────────────────────
+# 생성 중 출력 파일 추적 — 실패 시 미완성 파일 정리
+# ──────────────────────────────────────────────
+# 템플릿을 출력 경로로 복사한 뒤 편집 도중 예외가 나면, 가공되지 않은
+# 템플릿 사본이 '대외비_….xlsx' 이름으로 출력 폴더에 남는다.
+# 사용자가 그걸 갑지 원본으로 다시 선택하면 문제가 연쇄된다.
+_inflight = threading.local()
+
+
+def _copy_template(src: str, dst: str) -> str:
+    """템플릿을 출력 경로로 복사하고 실패 시 정리 대상으로 등록한다."""
+    shutil.copy2(src, dst)
+    # copy2 는 읽기전용 속성까지 복사한다. 공유 드라이브의 마스터 템플릿이
+    # 읽기전용이면 사본도 읽기전용이 되어 wb.save() 가 PermissionError 로 죽는다.
+    try:
+        os.chmod(dst, os.stat(dst).st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+    _inflight.path = dst
+    return dst
+
+
+def _discard_inflight() -> None:
+    """생성에 실패한 미완성 출력 파일을 삭제한다."""
+    p = getattr(_inflight, "path", None)
+    _inflight.path = None
+    if p and os.path.exists(p):
+        try:
+            os.remove(p)
+            logger.warning("생성 실패 — 미완성 파일 삭제: %s", p)
+        except OSError as e:
+            logger.warning("미완성 파일 삭제 실패 (%s): %s", p, e)
+
+
+def _clear_inflight() -> None:
+    """생성 성공 — 추적 해제."""
+    _inflight.path = None
 
 
 def _clear_clipboard() -> None:
@@ -314,7 +355,7 @@ def _fill_domestic(state: QuoteState,
     )
 
     # ① 템플릿 전체를 복사 — 이미지·서식·수식 구조 모두 보존
-    shutil.copy2(state.template_path, path)
+    _copy_template(state.template_path, path)
 
     wb      = load_workbook(path)
     ws_spec = wb[SheetName.SPEC]
@@ -387,10 +428,13 @@ def _fill_domestic(state: QuoteState,
     #          → P2가 net 단가이므로 G15도 pump_credit 반영
     #   G16 = SUM(G17:G41) = rack_items + rack_credits (pump_credit 제외)
     #   F43 = ROUNDDOWN(((G15+G16)/H2),-3)
-    p_net = (pump_amt + pump_credit_amt) / h_qty   # net PUMP 단가 (credit 반영)
-    q_net = rack_amt + rack_credit_amt              # net Rack 합계 (credit 반영)
-    g15   = p_net * h_qty                           # = pump_amt + pump_credit_amt
-    g16   = q_net                                   # rack net
+    # g15 는 나눗셈/곱셈 왕복 없이 직접 계산한다.
+    #   (A/h)*h 는 부동소수점에서 A 와 1 ulp 어긋날 수 있고,
+    #   단가가 1,000원 배수에 정확히 걸리면 floor 가 1,000원 낮게 떨어진다.
+    g15   = pump_amt + pump_credit_amt              # net PUMP 총금액 (credit 반영)
+    g16   = rack_amt + rack_credit_amt              # net Rack 합계 (credit 반영)
+    p_net = g15 / h_qty                             # net PUMP 단가 (표시용)
+    q_net = g16                                     # rack net
 
     # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
     s_raw = (g15 + g16) / h_qty
@@ -398,7 +442,8 @@ def _fill_domestic(state: QuoteState,
     # T = S2 * H2
     t_val = s_val * h_qty
     # U = ROUNDUP((P2*H2+Q2)/H2, -3) — net 기준 단가 검증
-    u_raw = (p_net * h_qty + q_net) / h_qty
+    #   s_raw 와 동일한 식이므로 g15/g16 을 그대로 쓴다 (왕복 계산 금지)
+    u_raw = s_raw
     u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
 
     copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈
@@ -442,7 +487,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         os.path.join(folder, f"대외비_{ymd}_중국_SCS_{line}_{tool}.xlsx")
     )
 
-    shutil.copy2(state.template_path, path)
+    _copy_template(state.template_path, path)
     wb = load_workbook(path)
     ws = wb[SheetName.QUOTE_CN]
 
@@ -511,7 +556,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         os.path.join(folder, f"대외비_{ymd}_{site}_{tool}_Quotation.xlsx")
     )
 
-    shutil.copy2(state.template_path, path)
+    _copy_template(state.template_path, path)
     wb = load_workbook(path)
     ws = wb[SheetName.QUOTE_US]
 
@@ -578,11 +623,18 @@ def generate_quote(
     rd      : Dict[str, Any],
 ) -> str:
     """견적서 1건 생성 → 저장 → 경로 반환."""
-    if qtype == "중국":
-        return _fill_china(state, items)
-    if qtype == "미국":
-        return _fill_us(state, items)
-    return _fill_domestic(state, rd, items)
+    try:
+        if qtype == "중국":
+            out = _fill_china(state, items)
+        elif qtype == "미국":
+            out = _fill_us(state, items)
+        else:
+            out = _fill_domestic(state, rd, items)
+    except BaseException:
+        _discard_inflight()   # 미완성 템플릿 사본 제거
+        raise
+    _clear_inflight()
+    return out
 
 
 def generate_quote_multi(
@@ -590,13 +642,14 @@ def generate_quote_multi(
     items        : List[Dict[str, Any]],
     request_rows : List[Dict[str, Any]],
     progress_cb  : Optional[Callable[[int, int, str], None]] = None,
-) -> List[Tuple[Dict[str, Any], str]]:
+) -> List[Tuple[Dict[str, Any], str, str]]:
     """
     국내 견적서 여러 건을 순서대로 생성.
     Excel 을 전혀 실행하지 않으므로 COM 버전 대비 크게 빠르다.
-    반환: [(rd, saved_path), ...]  실패 시 path=""
+    반환: [(rd, saved_path, error), ...]
+      성공: error="" / 실패: saved_path="" 이고 error 에 사유
     """
-    results: List[Tuple[Dict[str, Any], str]] = []
+    results: List[Tuple[Dict[str, Any], str, str]] = []
     total = len(request_rows)
 
     # 의뢰파일을 한 번만 열어 전 행에 재사용 — 반복 open/close 방지
@@ -621,12 +674,14 @@ def generate_quote_multi(
         for i, rd in enumerate(request_rows):
             try:
                 path = _fill_domestic(state, rd, items, req_ws_cache)
-                results.append((rd, path))
+                _clear_inflight()
+                results.append((rd, path, ""))
                 if progress_cb:
                     progress_cb(i + 1, total, os.path.basename(path))
             except Exception as e:
+                _discard_inflight()   # 미완성 템플릿 사본 제거
                 logger.error("멀티 생성 실패: %s", e, exc_info=True)
-                results.append((rd, ""))
+                results.append((rd, "", str(e)))
                 if progress_cb:
                     progress_cb(i + 1, total, f"[실패] {e}")
     finally:
@@ -639,18 +694,22 @@ def generate_quote_multi(
     return results
 
 
-def generate_cover(
+def _generate_cover_impl(
     template_path : str,
     folder        : str,
     source_files  : List[str],
     investor_name : str = "채승철",
     progress_cb   : Optional[Callable[[int, int, str], None]] = None,
     warranty_years: int = 2,
-) -> str:
+) -> Tuple[str, List[Tuple[str, str]]]:
     """
     갑지 생성.
     source_files 각각의 견적의뢰복사본 2행 데이터를 openpyxl 로 읽어
     갑지DATA 시트에 쌓은 뒤 저장.
+
+    반환: (저장 경로, 읽기 실패 목록[(파일명, 사유)])
+      실패 목록이 비어 있지 않으면 그만큼 갑지에서 누락된 것이므로
+      호출자가 반드시 사용자에게 알려야 한다.
     """
     folder_name = os.path.basename(folder.rstrip("\\/"))
     out_path = unique_path(os.path.join(folder, f"대외비_{folder_name}_갑지.xlsx"))
@@ -680,6 +739,7 @@ def generate_cover(
 
     if _ensure_com():
         _xl = None
+        _wb_c = _ws_c = None
         try:
             pythoncom.CoInitialize()
             _xl = win32.DispatchEx("Excel.Application")
@@ -700,29 +760,42 @@ def generate_cover(
                             except Exception:
                                 pass
                     finally:
+                        _ws_c = None          # 시트 프록시 먼저 해제
                         try:
                             _wb_c.Close(False)
                         except Exception:
                             pass
+                        _wb_c = None
                 except Exception as _e:
                     logger.warning("COM 수식값 읽기 실패 (%s): %s", _p, _e)
                 _com_vals[_pkey] = _row
         except Exception as _e:
             logger.warning("COM 초기화 실패 — 수식 셀은 openpyxl 폴백: %s", _e)
         finally:
+            # 해제 순서가 중요하다.
+            # 살아있는 COM 프록시가 남은 채 Quit() 하면 EXCEL.EXE 가 죽지 않고,
+            # CoUninitialize() 를 프록시 해제보다 먼저 부르면 그 뒤의 해제가
+            # 이미 정리된 아파트먼트에서 일어나 보이지 않는 좀비 프로세스가 남는다.
+            #   프록시 해제 → gc → Quit() → 참조 제거 → gc → CoUninitialize()
             _clear_clipboard()
+            _ws_c = None
+            _wb_c = None
+            import gc
+            gc.collect()
             if _xl is not None:
                 try:
                     _xl.Quit()
                 except Exception:
                     pass
+                _xl = None
+                gc.collect()
             try:
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
 
     # 템플릿 복사 후 openpyxl 로 편집
-    shutil.copy2(template_path, out_path)
+    _copy_template(template_path, out_path)
     wb       = load_workbook(out_path)
     ws_data  = wb[SheetName.COVER_DATA]
     ws_cover = wb[SheetName.COVER]
@@ -739,22 +812,37 @@ def generate_cover(
     # 각 source 파일의 견적의뢰복사본 2행 읽기
     write_row = 2
     total_src = len(clean)
+    failed: List[Tuple[str, str]] = []   # (파일명, 사유)
     for idx, path in enumerate(clean):
         if progress_cb:
             progress_cb(idx + 1, total_src, os.path.basename(path))
+        src_wb = None
         try:
             src_wb = load_workbook(path, data_only=True)
+            if SheetName.REQ_COPY not in src_wb.sheetnames:
+                raise KeyError(f"'{SheetName.REQ_COPY}' 시트 없음")
             src_ws = src_wb[SheetName.REQ_COPY]
             for c in range(1, 28):  # A:AA
                 ws_data.cell(write_row, c).value = src_ws.cell(2, c).value
-            src_wb.close()
             # COM 계산값으로 수식 셀(O/P/Q/S/T/U) 덮어쓰기
             for _c, _v in _com_vals.get(os.path.abspath(path).lower(), {}).items():
                 if _v is not None:
                     ws_data.cell(write_row, _c).value = _v
             write_row += 1
         except Exception as e:
+            # 읽기에 실패한 원본은 갑지에서 누락된다. 조용히 넘기면
+            # 갑지가 한 건 모자란 채 정상으로 보이므로 호출자에게 돌려준다.
             logger.warning("갑지 원본 읽기 실패 (%s): %s", path, e)
+            failed.append((os.path.basename(path), str(e)))
+        finally:
+            if src_wb is not None:
+                try:
+                    src_wb.close()
+                except Exception:
+                    pass
+
+    if not failed and write_row == 2:
+        raise ValueError("갑지에 기록할 원본이 없습니다.")
 
     # 투자자명
     ws_cover["B7"] = f"삼성전자 ㈜ / {investor_name} 님"
@@ -781,11 +869,12 @@ def generate_cover(
     _reset_sheet_selections(wb)
     wb.save(out_path)
     wb.close()
-    logger.info("갑지 생성: %s", out_path)
-    return out_path
+    logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
+                out_path, write_row - 2, len(failed))
+    return out_path, failed
 
 
-def export_cover_data_sheet(src_path: str) -> str:
+def _export_cover_data_sheet_impl(src_path: str) -> str:
     """
     갑지 파일에서 갑지DATA(SheetName.COVER_DATA) 시트만 추출하여 새 xlsx 로 저장.
 
@@ -808,7 +897,7 @@ def export_cover_data_sheet(src_path: str) -> str:
     out_path = unique_path(os.path.join(os.path.dirname(src_path), new_stem + ext))
 
     # 원본을 통째로 복사 → 서식·스타일 완전 보존
-    shutil.copy2(src_path, out_path)
+    _copy_template(src_path, out_path)
 
     wb = load_workbook(out_path)
     keep = SheetName.COVER_DATA
@@ -835,6 +924,28 @@ def export_cover_data_sheet(src_path: str) -> str:
 # COM 헬퍼 — PDF 변환 전용 (변경 없음)
 # ═══════════════════════════════════════════════════════════════
 
+def generate_cover(*args, **kwargs) -> Tuple[str, List[Tuple[str, str]]]:
+    """generate_cover 래퍼 — 실패 시 미완성 갑지 파일을 지운다."""
+    try:
+        out = _generate_cover_impl(*args, **kwargs)
+    except BaseException:
+        _discard_inflight()
+        raise
+    _clear_inflight()
+    return out
+
+
+def export_cover_data_sheet(*args, **kwargs) -> str:
+    """export_cover_data_sheet 래퍼 — 실패 시 미완성 파일을 지운다."""
+    try:
+        out = _export_cover_data_sheet_impl(*args, **kwargs)
+    except BaseException:
+        _discard_inflight()
+        raise
+    _clear_inflight()
+    return out
+
+
 class ExcelCOM:
     """
     Excel COM 세션 컨텍스트 매니저.
@@ -848,16 +959,33 @@ class ExcelCOM:
         if not _ensure_com():
             raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
         pythoncom.CoInitialize()
-        self._excel = win32.DispatchEx("Excel.Application")
-        self._excel.Visible = False
-        self._excel.DisplayAlerts = False
+        try:
+            self._excel = win32.DispatchEx("Excel.Application")
+            self._excel.Visible = False
+            self._excel.DisplayAlerts = False
+        except BaseException:
+            # DispatchEx 실패(Excel 미설치·손상) 시 __exit__ 가 호출되지 않으므로
+            # 여기서 아파트먼트를 되돌리지 않으면 호출할 때마다 하나씩 누수된다.
+            self._excel = None
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+            raise
         return self
 
     def __exit__(self, *_) -> None:
-        try:
-            self._excel.Quit()
-        except Exception:
-            pass
+        # 순서 중요: 프록시 해제 → Quit() → 참조 제거 → CoUninitialize()
+        # 반대로 하면 보이지 않는 EXCEL.EXE 가 파일 잠금을 쥔 채 남는다.
+        import gc
+        gc.collect()
+        if self._excel is not None:
+            try:
+                self._excel.Quit()
+            except Exception:
+                pass
+            self._excel = None
+            gc.collect()
         try:
             pythoncom.CoUninitialize()
         except Exception:

@@ -121,7 +121,7 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "page_common",
                 "page_quote",
                 "page_esign",
-                "page_rack",
+                "app_settings",
                 "excel_io",
                 "core",
                 "widgets",

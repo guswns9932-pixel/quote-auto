@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QSplitter, QVBoxLayout, QWidget,
 )
 
+import app_settings
 from core import ensure_dir, unique_path
 from widgets import PdfView, SignatureItem, PasswordDialog, tint_button
 from page_common import _friendly_error_msg, _natural_key, _ScrollableErrorDialog
@@ -175,7 +176,9 @@ class ESignPage(QWidget):
         if self._loader_thread and self._loader_thread.isRunning():
             QMessageBox.information(self, "안내", "이미 로딩 중입니다.")
             return
-        paths, _ = QFileDialog.getOpenFileNames(self, "엑셀 선택(다중)", "", "Excel Files (*.xlsx)")
+        start = app_settings.get_dir(app_settings.Key.ESIGN_DIR)
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "엑셀 선택(다중)", start, "Excel Files (*.xlsx)")
         if not paths:
             return
         paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, _natural_key(os.path.basename(p))))
@@ -183,6 +186,7 @@ class ESignPage(QWidget):
         if os.path.isfile(base):
             base = os.path.dirname(base)
         self._base_folder = base
+        app_settings.set_str(app_settings.Key.ESIGN_DIR, base)
         self._files = paths
         self._sheet_pngs = []
         self._cur_pngs   = []
@@ -338,11 +342,27 @@ class ESignPage(QWidget):
         dlg = PasswordDialog(self, self._code)
         if dlg.exec() != QDialog.Accepted or not dlg.verified: return
         idx = min(1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs)-1)
-        item = SignatureItem(self._signs[idx], self._cur_page); item.setZValue(10)
+        key = (self._cur_file, self._cur_page)
+        item = SignatureItem(self._signs[idx], self._cur_page,
+                             on_delete=self._remove_sign)
+        item.setZValue(10)
         item.setPos(QPointF(scene_pos.x()-self.SIGN_W/2, scene_pos.y()-self.SIGN_H/2))
         self.scene.addItem(item)
-        self._sign_items.setdefault((self._cur_file, self._cur_page), []).append(item)
+        self._sign_items.setdefault(key, []).append(item)
         self.scene.update()
+
+    def _remove_sign(self, item) -> None:
+        """SignatureItem 우클릭 삭제 콜백 — _sign_items 에서도 제거한다.
+
+        여기서 빼주지 않으면 씬에서만 사라지고 목록에는 남아
+        페이지를 다시 그릴 때 되살아나며, _build_pdf 가 그대로 PDF 에 찍는다.
+        """
+        for key, lst in list(self._sign_items.items()):
+            if item in lst:
+                lst.remove(item)
+                if not lst:
+                    self._sign_items.pop(key, None)
+                break
 
     def _cleanup_tmp(self) -> None:
         self._cur_pngs = []

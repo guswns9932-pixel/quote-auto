@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QSplashScreen, QVBoxLayout, QWidget,
 )
 
+import app_settings
 from widgets import tint_button
 
 
@@ -140,6 +141,13 @@ class _PageWindow(QMainWindow):
         self._page = cls()
         self.setCentralWidget(self._page)
 
+        self._geo_key = cls_name
+        self._geo_restored = app_settings.restore_geometry(self._geo_key, self)
+
+    def closeEvent(self, event) -> None:
+        app_settings.save_geometry(self._geo_key, self)
+        super().closeEvent(event)
+
     def _reset(self) -> None:
         try:
             if hasattr(self._page, "reset_page"):
@@ -166,6 +174,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("견적/전자서명 통합 시스템")
         self.setFixedSize(340, 210)
+        app_settings.restore_geometry("MainWindow", self)
 
         self._quote_win: Optional[_PageWindow] = None
         self._esign_win: Optional[_PageWindow] = None
@@ -195,10 +204,17 @@ class MainWindow(QMainWindow):
         if win is None or not win.isVisible():
             win = _PageWindow(title, mod, cls, parent=self)
             setattr(self, attr, win)
-            win.showMaximized()
+            if win._geo_restored:
+                win.show()
+            else:
+                win.showMaximized()
         else:
             win.raise_()
             win.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        app_settings.save_geometry("MainWindow", self)
+        super().closeEvent(event)
 
 
 # ──────────────────────────────────────────────

@@ -60,9 +60,13 @@ class _TemplateLoaderThread(QThread):
         try:
             import excel_io
             from openpyxl import load_workbook
-            wb = load_workbook(self.path, data_only=False)
+            # read_only=True: parse_items_sheet/parse_code_map_sheet 는
+            # iter_rows() 로만 순회한다 — cell(r,c) 임의 접근을 read_only 모드에
+            # 섞으면 O(n²) 로 저하되므로 절대 함께 쓰지 않는다.
+            wb = load_workbook(self.path, read_only=True, data_only=False)
             rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(wb[SheetName.ITEMS])
             cmap = excel_io.parse_code_map_sheet(wb[SheetName.CODE_MAP])
+            wb.close()
             self.done.emit((rows, by_class, price_by_spec, order, cmap))
         except Exception as e:
             self.done.emit(e)

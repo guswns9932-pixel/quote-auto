@@ -135,13 +135,21 @@ def parse_items_sheet(ws: Worksheet) -> Tuple[
     Dict[str, int],
 ]:
     """품목 시트 파싱. 반환: (rows, by_class, price_by_spec, spec_order_index)"""
+    # iter_rows(values_only=True) 사용: ws.cell(r,c) 임의 접근은 read_only
+    # 워크시트에서 매 호출마다 스트림을 처음부터 다시 훑어 O(n²)이 된다
+    # (3천 행 기준 100배+ 저하 실측). read_only=True 로 여는 호출부와 짝을 이룬다.
     def _is_header(a: str, b: str, c: str) -> bool:
         h = (a + b + c).replace(" ", "").lower()
         return "분류" in h and ("단가" in h or "가격" in h)
 
-    start = 2 if _is_header(
-        s(ws.cell(1, 1).value), s(ws.cell(1, 2).value), s(ws.cell(1, 3).value)
-    ) else 1
+    row_iter = ws.iter_rows(max_col=3, values_only=True)
+    try:
+        r1a, r1b, r1c = next(row_iter)
+    except StopIteration:
+        return [], {}, {}, {}
+    header = _is_header(s(r1a), s(r1b), s(r1c))
+    if not header:
+        row_iter = ws.iter_rows(max_col=3, values_only=True)   # 1행부터 다시
 
     rows: List[Dict[str, Any]] = []
     by_class: Dict[str, List[Dict[str, Any]]] = {}
@@ -149,10 +157,9 @@ def parse_items_sheet(ws: Worksheet) -> Tuple[
     order_index: Dict[str, int] = {}
     order = 0
 
-    for r in range(start, ws.max_row + 1):
-        a = s(ws.cell(r, 1).value)
-        b = s(ws.cell(r, 2).value)
-        c = ws.cell(r, 3).value
+    for a_raw, b_raw, c in row_iter:
+        a = s(a_raw)
+        b = s(b_raw)
         if not (a or b or c):
             continue
         price = to_float(c)
@@ -175,18 +182,21 @@ def parse_code_map_sheet(ws: Worksheet) -> Dict[Tuple[str, str, str], List[Tuple
         h = (a + b + c + d + e).replace(" ", "").lower()
         return "공정" in h and "설비" in h and ("acc" in h or "수량" in h or "5d" in h)
 
-    start = 2 if _is_header(
-        s(ws.cell(1, 1).value), s(ws.cell(1, 2).value), s(ws.cell(1, 3).value),
-        s(ws.cell(1, 4).value), s(ws.cell(1, 5).value),
-    ) else 1
+    row_iter = ws.iter_rows(max_col=5, values_only=True)
+    try:
+        r1 = next(row_iter)
+    except StopIteration:
+        return {}
+    if not _is_header(*(s(v) for v in r1)):
+        row_iter = ws.iter_rows(max_col=5, values_only=True)   # 1행부터 다시
 
     cmap: Dict[Tuple[str, str, str], List[Tuple[str, float]]] = {}
-    for r in range(start, ws.max_row + 1):
-        proc   = s(ws.cell(r, 1).value)
-        vendor = s(ws.cell(r, 2).value)
-        code5d = s(ws.cell(r, 3).value)
-        acc    = s(ws.cell(r, 4).value)
-        qty    = to_float(ws.cell(r, 5).value)
+    for proc_raw, vendor_raw, code5d_raw, acc_raw, qty_raw in row_iter:
+        proc   = s(proc_raw)
+        vendor = s(vendor_raw)
+        code5d = s(code5d_raw)
+        acc    = s(acc_raw)
+        qty    = to_float(qty_raw)
         if proc and vendor and code5d and acc:
             cmap.setdefault((proc, vendor, code5d), []).append((acc, qty))
     return cmap
@@ -198,42 +208,47 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
     반환: (active_sheet_name, row_dicts)
     row_dict keys: row_idx, D, E, F, G, H, J, K, N, V, X, Y, Z, AA
     """
-    wb = load_workbook(path, data_only=True)
+    # read_only=True + iter_rows(): ws.cell(r,c) 임의 접근을 read_only 모드에서
+    # 쓰면 매 호출이 스트림을 처음부터 다시 훑어 O(n²)이 된다(실측: 3천 행에서
+    # 100배+ 저하). 의뢰파일은 수백~수천 행이 흔하므로 반드시 iter_rows.
+    wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
     sheet_name = ws.title
+    NCOL = 27  # AA
 
-    def _is_header() -> bool:
+    def _is_header(r1: tuple) -> bool:
         checks = [
-            s(ws.cell(1, 26).value).replace(" ", "").lower(),
-            s(ws.cell(1, 11).value).replace(" ", "").lower(),
-            s(ws.cell(1, 24).value).replace(" ", "").lower(),
-            s(ws.cell(1, 22).value).replace(" ", "").lower(),
+            s(r1[25]).replace(" ", "").lower(),   # Z (26)
+            s(r1[10]).replace(" ", "").lower(),   # K (11)
+            s(r1[23]).replace(" ", "").lower(),   # X (24)
+            s(r1[21]).replace(" ", "").lower(),   # V (22)
         ]
         return any("설비" in c or "공정" in c or "5d" in c or "코드" in c for c in checks)
 
-    start = 2 if _is_header() else 1
+    row_iter = ws.iter_rows(max_col=NCOL, values_only=True)
+    try:
+        first = next(row_iter)
+    except StopIteration:
+        wb.close()
+        return sheet_name, []
+    start = 2 if _is_header(first) else 1
+    if start == 1:
+        row_iter = ws.iter_rows(max_col=NCOL, values_only=True)   # 1행부터 다시
+
     rows: List[Dict[str, Any]] = []
-    for r in range(start, ws.max_row + 1):
-        z = ws.cell(r, 26).value
+    for idx, vals in enumerate(row_iter, start=start):
+        z = vals[25]  # Z (26)
         if s(z) == "":
             continue
         rows.append({
-            "row_idx": r,
-            "D": ws.cell(r,  4).value,
-            "E": ws.cell(r,  5).value,
-            "F": ws.cell(r,  6).value,
-            "G": ws.cell(r,  7).value,
-            "H": ws.cell(r,  8).value,
-            "J": ws.cell(r, 10).value,
-            "K": ws.cell(r, 11).value,
-            "N": ws.cell(r, 14).value,
-            "R": ws.cell(r, 18).value,
-            "V": ws.cell(r, 22).value,
-            "X": ws.cell(r, 24).value,
-            "Y": ws.cell(r, 25).value,
-            "Z": z,
-            "AA": ws.cell(r, 27).value,
+            "row_idx": idx,
+            "D": vals[3],   "E": vals[4],   "F": vals[5],
+            "G": vals[6],   "H": vals[7],   "J": vals[9],
+            "K": vals[10],  "N": vals[13],  "R": vals[17],
+            "V": vals[21],  "X": vals[23],  "Y": vals[24],
+            "Z": z,         "AA": vals[26],
         })
+    wb.close()
     return sheet_name, rows
 
 

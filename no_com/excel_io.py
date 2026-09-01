@@ -78,6 +78,139 @@ def _clear_inflight() -> None:
     _inflight.path = None
 
 
+def inspect_template_losses(path: str) -> List[str]:
+    """
+    openpyxl 왕복(load→save) 시 소실되는 파트를 미리 찾아 사람이 읽을 목록으로 반환.
+
+    openpyxl 은 아래를 보존하지 못하고 조용히 버린다. 생성된 견적서에서
+    그림·머리글 로고·인쇄 설정이 사라져도 아무 오류가 나지 않으므로,
+    통합양식을 읽는 시점에 미리 알려준다.
+
+      - EMF/WMF 벡터 이미지      → 도형이 통째로 사라짐
+      - VML(legacyDrawingHF)     → 머리글/바닥글 이미지가 사라짐
+      - printerSettings          → 용지·여백·방향 설정이 초기화됨
+
+    반환: 경고 문구 리스트 (비어 있으면 소실 없음)
+    """
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    _RELNS = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+    out: List[str] = []
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+
+            # ① EMF/WMF 이미지 — 어느 시트에서 쓰이는지까지 찾아 알려준다
+            vec = [n for n in names
+                   if n.startswith("xl/media/") and n.lower().endswith((".emf", ".wmf"))]
+            if vec:
+                def _rels(p):
+                    try:
+                        return {r.get("Id"): (r.get("Target") or "")
+                                for r in ET.fromstring(z.read(p)).iter(_RELNS)}
+                    except Exception:
+                        return {}
+                wbrel = _rels("xl/_rels/workbook.xml.rels")
+                sheets = re.findall(
+                    r'<sheet name="([^"]+)"[^>]*r:id="(rId\d+)"',
+                    z.read("xl/workbook.xml").decode("utf8", "replace"))
+                users = {}
+                for sname, rid in sheets:
+                    fn = (wbrel.get(rid) or "").split("/")[-1]
+                    for tgt in _rels(f"xl/worksheets/_rels/{fn}.rels").values():
+                        if "drawings/" not in tgt or not tgt.endswith(".xml"):
+                            continue
+                        dn = tgt.split("/")[-1]
+                        for v in _rels(f"xl/drawings/_rels/{dn}.rels").values():
+                            base = v.split("/")[-1]
+                            if any(base == m.split("/")[-1] for m in vec):
+                                users.setdefault(base, []).append(sname)
+                for m in vec:
+                    base = m.split("/")[-1]
+                    where = ", ".join(users.get(base, [])) or "(사용 시트 불명)"
+                    out.append(f"벡터 이미지 {base} → {where} 에서 사라집니다")
+
+            # ② 머리글/바닥글 이미지(VML)
+            if any(n.startswith("xl/drawings/vmlDrawing") for n in names):
+                hf = []
+                for n in names:
+                    if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n):
+                        continue
+                    if b"legacyDrawingHF" in z.read(n):
+                        hf.append(n.split("/")[-1])
+                if hf:
+                    out.append(f"머리글/바닥글 이미지 → {len(hf)}개 시트에서 사라집니다")
+
+            # ③ 인쇄 설정
+            ps = [n for n in names if n.startswith("xl/printerSettings/")]
+            if ps:
+                out.append(f"인쇄 설정(용지·여백·방향) {len(ps)}건이 초기화됩니다")
+    except Exception as e:
+        logger.warning("템플릿 소실 검사 실패 (%s): %s", path, e)
+    return out
+
+
+def check_pump_price_consistency(path: str) -> List[str]:
+    """
+    앱이 쓰는 '품목' 단가와 템플릿 '사양서'가 VLOOKUP 하는 'Pump 단가표' 단가를 대조.
+
+    [왜 필요한가]
+    PUMP 단가가 두 경로로 갈라져 있다.
+      · 앱   : 품목 시트의 분류(A열)=Q-Code 로 찾은 행들을 STEP5 에 PUMP 로 추가
+      · 템플릿: 사양서!F15 = VLOOKUP(A15,'Pump 단가표'!F:M,6,0)
+    둘이 어긋나면 인쇄되는 사양서 금액과 갑지 금액이 조용히 달라진다.
+    (ver.1.8 실측: 102개 중 3개 불일치, 최대 2,840만원/CH 차이)
+
+    반환: 불일치 설명 리스트 (비어 있으면 정상)
+    """
+    out: List[str] = []
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            if "품목" not in wb.sheetnames or "Pump 단가표" not in wb.sheetnames:
+                return out
+
+            by_class: Dict[str, List[float]] = {}
+            for a, _b, c in wb["품목"].iter_rows(max_col=3, values_only=True):
+                key = s(a)
+                if key:
+                    by_class.setdefault(key, []).append(to_float(c))
+
+            # Pump 단가표: C열=자재코드, F열=모델명, K열=단가
+            # 템플릿 수식 체인을 그대로 흉내낸다:
+            #   A15 = VLOOKUP(Q-Code, C:F, 4, 0)   → 모델명 (첫 일치 행)
+            #   F15 = VLOOKUP(A15,    F:M, 6, 0)   → 단가   (첫 일치 행)
+            # VLOOKUP 은 첫 일치만 쓰므로 중복 행이 있어도 첫 행 기준으로 본다.
+            code_to_model: Dict[str, str] = {}
+            model_to_price: Dict[str, float] = {}
+            for row in wb["Pump 단가표"].iter_rows(max_col=11, values_only=True):
+                code, model = s(row[2]), s(row[5])
+                if code and code.upper().startswith("Q") and code not in code_to_model:
+                    code_to_model[code] = model
+                if model and model not in model_to_price:
+                    model_to_price[model] = to_float(row[10])
+
+            for code, model in code_to_model.items():
+                if code not in by_class:
+                    continue
+                tbl = model_to_price.get(model, 0.0)
+                app = sum(by_class[code])
+                if abs(app - tbl) < 1:
+                    continue
+                why = (f"품목 시트에 {len(by_class[code])}행이 있어 합산됨"
+                       if len(by_class[code]) > 1 else "단가가 서로 다름")
+                out.append(
+                    f"{code}({model}): 사양서 {tbl:,.0f} vs 앱 {app:,.0f} "
+                    f"(차이 {app - tbl:+,.0f}) — {why}"
+                )
+        finally:
+            wb.close()
+    except Exception as e:
+        logger.warning("PUMP 단가 대조 실패 (%s): %s", path, e)
+    return out
+
+
 def _clear_clipboard() -> None:
     """
     Windows 클립보드를 강제로 비운다.
@@ -262,6 +395,29 @@ def _hide_rows(ws: Worksheet, start: int, end: int, filled_count: int) -> None:
         ws.row_dimensions[start + i].hidden = (i >= filled_count)
 
 
+# 생성물에서 삭제하는 내부 참조 시트.
+#
+# veryHidden 은 '숨김'일 뿐 파일에는 그대로 남는다. 엑셀에서 숨기기 해제하거나
+# 압축을 풀면 그대로 읽히므로, 대외비로 나가는 견적서에 전사 단가표가 실려 나간다.
+# 아래 세 시트는 앱이 STEP1 에서 읽어 쓰는 입력 자료일 뿐 생성물에는 불필요하고,
+# 통합양식 ver.1.8 기준으로 어떤 수식·정의된이름·데이터유효성·조건부서식도
+# 이들을 참조하지 않는 것을 확인했다.
+#
+# ※ 'Pump 단가표' / '악세서리 단가표' 는 사양서·입고검수확인서 수식이 VLOOKUP 으로
+#    참조하므로 절대 삭제하면 안 된다(삭제 시 #REF!).
+_DROP_SHEETS = ("품목", "코드매핑", "용량 및 등급")
+
+
+def _drop_internal_sheets(wb) -> None:
+    """대외비 유출·용량 축소를 위해 내부 참조 시트를 삭제한다."""
+    for name in _DROP_SHEETS:
+        if name in wb.sheetnames:
+            try:
+                del wb[name]
+            except Exception as e:
+                logger.warning("시트 삭제 실패 (%s): %s", name, e)
+
+
 def _show_only_sheets(wb, keep: List[str]) -> None:
     """keep 목록에 없는 시트를 veryHidden으로 설정."""
     keep_set = set(keep)
@@ -348,13 +504,45 @@ def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any],
 # 견적서 생성 (openpyxl 기반, COM 없음)
 # ═══════════════════════════════════════════════════════════════
 
+def _pin_images(wb) -> None:
+    """
+    이미지 바이트를 메모리에 고정해 같은 워크북을 여러 번 저장할 수 있게 한다.
+
+    openpyxl 은 첫 save 때 이미지 원본 파일 핸들을 닫아버리므로, 두 번째
+    save 에서 'ValueError: I/O operation on closed file' 로 죽는다.
+    일괄 생성에서 워크북을 재사용하려면 반드시 선행해야 한다.
+    """
+    import io
+    for ws in wb.worksheets:
+        for img in getattr(ws, "_images", []):
+            try:
+                data = img._data()
+            except Exception:
+                continue
+            img.ref = io.BytesIO(data)
+            img._data = lambda _d=data: _d
+
+
+def open_template_for_reuse(template_path: str):
+    """일괄 생성용 — 템플릿을 1회만 읽어 재사용 가능한 워크북으로 돌려준다."""
+    wb = load_workbook(template_path)
+    _pin_images(wb)
+    return wb
+
+
 def _fill_domestic(state: QuoteState,
                    rd: Dict[str, Any],
                    items: List[Dict[str, Any]],
-                   req_ws_cache: Optional[Any] = None) -> str:
+                   req_ws_cache: Optional[Any] = None,
+                   wb_cache: Optional[Any] = None) -> str:
     """
     국내 견적서: 템플릿을 복사한 뒤 openpyxl 로 데이터 기입.
     반환: 저장된 xlsx 경로.
+
+    wb_cache: open_template_for_reuse() 로 만든 워크북. 주면 건마다 템플릿을
+              다시 읽지 않고 재사용한다(일괄 생성에서 60% 이상 단축).
+              건별 상태는 아래 ②③④⑤ 에서 전부 덮어쓰므로 누수되지 않지만,
+              도중에 예외가 나면 워크북이 더러워지므로 호출자가 다시 열어야 한다.
     """
     ymd        = datetime.now().strftime("%y%m%d")
     pr         = safe_filename(s(rd.get("D")))
@@ -369,10 +557,15 @@ def _fill_domestic(state: QuoteState,
         os.path.join(folder, f"대외비_{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor_fn}_{tool}.xlsx")
     )
 
-    # ① 템플릿 전체를 복사 — 이미지·서식·수식 구조 모두 보존
-    _copy_template(state.template_path, path)
+    # ① 템플릿 준비 — 재사용 워크북이 있으면 복사·로드를 건너뛴다
+    if wb_cache is not None:
+        wb = wb_cache
+        _inflight.path = path      # 저장 중 실패 시 정리 대상으로 등록
+    else:
+        # 템플릿 전체를 복사 — 이미지·서식·수식 구조 모두 보존
+        _copy_template(state.template_path, path)
+        wb = load_workbook(path)
 
-    wb      = load_workbook(path)
     ws_spec = wb[SheetName.SPEC]
     ws_sign = wb[SheetName.SIGN_SPEC]
 
@@ -383,28 +576,39 @@ def _fill_domestic(state: QuoteState,
     investor = s(state.investor_name) or "채승철"
     ws_spec["B4"] = f"{investor} 님 / 설비구매그룹"
 
-    rack_items    = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
-    credits       = [r for r in items if r["role"] == "CREDIT"]
-    pump_credits  = [r for r in credits if "Pump" in r.get("spec", "")]
-    rack_credits  = [r for r in credits if "Pump" not in r.get("spec", "")]
+    rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
+    credits    = [r for r in items if r["role"] == "CREDIT"]
 
     # ④ 기존 데이터 클리어
     for rr in range(DOM.SPEC_START, DOM.SPEC_END + 1):
         for col in (DOM.COL_SPEC, DOM.COL_QTY, DOM.COL_PRICE, DOM.COL_AMT):
             ws_spec[f"{col}{rr}"] = None
 
-    # ⑤ 품목 기입
-    #   Pump Credit: G열=0(G16 이중 차감 방지), B열에 금액 레이블만 표시
-    #   Rack Credit: 기존대로 라인 아이템(G열에 실제 금액) 기입
+    # ⑤ 품목 기입 — Credit 은 Pump/Rack 구분 없이 실제 금액으로 기입한다.
+    #
+    # [주의] 템플릿(ver.1.8) 실제 수식 구조:
+    #     사양서!E15 = 견적의뢰복사본!H2                     (수량)
+    #     사양서!F15 = VLOOKUP(A15,'Pump 단가표'!F:M,6,0)    (단가)
+    #     사양서!G15 = E15*F15                              ← P2 를 참조하지 않는다
+    #     사양서!G16 = SUM(G17:G41)                         ← 이 구간이 코드가 쓰는 곳
+    #     사양서!F43 = ROUNDDOWN((G16+G15)/견적의뢰복사본!H2,-3)
+    #     견적의뢰복사본!P2 = 사양서!F15                      ← 사양서를 '읽는' 방향
+    #
+    # 즉 P2 에 Pump Credit 을 써도 사양서!G15/F43 에는 반영되지 않는다.
+    # Pump Credit 을 G열에서 빼면 인쇄되는 사양서 금액에서 완전히 사라지고
+    # 갑지(S2/T2)와 금액이 어긋난다. 반드시 G17:G41 에 실금액으로 남긴다.
     out_list = rack_items[:25]
-    for cr in pump_credits:
-        pump_credit_label = (
-            f"Pump Credit : -₩ {abs(cr['amt']):,.0f}"
-        )
-        out_list.append({"spec": pump_credit_label, "qty": 0.0, "price": 0.0, "amt": 0})
-    for cr in rack_credits:
+    for cr in credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": 0.0, "amt": cr["amt"]})
     out_list = out_list[:25]
+
+    # 템플릿 용량 초과 시 조용히 잘리면 사양서 합계와 갑지 금액이 어긋난다.
+    if len(rack_items) + len(credits) > 25:
+        raise ValueError(
+            f"사양서 품목 칸(25행)을 초과했습니다: "
+            f"품목 {len(rack_items)}건 + Credit {len(credits)}건. "
+            f"품목을 줄이거나 템플릿 행을 늘려주세요."
+        )
 
     for i, r in enumerate(out_list):
         rr = DOM.SPEC_START + i
@@ -422,51 +626,52 @@ def _fill_domestic(state: QuoteState,
     # 갑지DATA 해당 열 공백. 계산값을 값(value)으로 직접 써서 이 경로를 막는다.
     #
     # 재현 수식:
-    #   S2 = 사양서!F43        → net 합계(credit 포함) / 수량
-    #   T2 = S2 * H2           → 견적단가 × 수량 = net 총 견적금액
-    #   U2 = ROUNDUP((P2*H2+Q2)/H2, -3)  → (PUMP단가×수량 + Rack합계) / 수량, 1000원 올림
-    copy_ws         = wb[SheetName.REQ_COPY]
-    pump_items      = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
-    pump_spec       = pump_items[0]["spec"]  if pump_items else None
-    pump_price      = pump_items[0]["price"] if pump_items else 0.0
-    pump_amt        = sum(r["amt"] for r in pump_items)
-    rack_amt        = sum(r["amt"] for r in rack_items)
-    pump_credit_amt = sum(c["amt"] for c in pump_credits)  # 음수
-    rack_credit_amt = sum(c["amt"] for c in rack_credits)  # 음수
+    #   S2 = 사양서!F43,  T2 = S2*H2,  U2 = ROUNDUP((P2*H2+Q2)/H2,-3)
+    #
+    # 아래 값들은 Excel 이 재계산할 값과 반드시 일치해야 한다.
+    # 어긋나면 인쇄되는 사양서와 갑지 금액이 서로 다른 견적서가 나간다.
+    copy_ws    = wb[SheetName.REQ_COPY]
+    pump_items = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
+    pump_spec  = pump_items[0]["spec"] if pump_items else None
+    pump_amt   = sum(r["amt"] for r in pump_items)
+    rack_amt   = sum(r["amt"] for r in rack_items)
+    credit_amt = sum(c["amt"] for c in credits)      # 통상 음수
 
     h_qty = to_float(rd.get("H"))
     if h_qty <= 0:
         h_qty = 1.0
 
-    # 사양서 구조:
-    #   G15 = PUMP 총금액 (template 수식: =견적의뢰복사본!P2 × H2)
-    #          → P2가 net 단가이므로 G15도 pump_credit 반영
-    #   G16 = SUM(G17:G41) = rack_items + rack_credits (pump_credit 제외)
-    #   F43 = ROUNDDOWN(((G15+G16)/H2),-3)
-    # g15 는 나눗셈/곱셈 왕복 없이 직접 계산한다.
-    #   (A/h)*h 는 부동소수점에서 A 와 1 ulp 어긋날 수 있고,
-    #   단가가 1,000원 배수에 정확히 걸리면 floor 가 1,000원 낮게 떨어진다.
-    g15   = pump_amt + pump_credit_amt              # net PUMP 총금액 (credit 반영)
-    g16   = rack_amt + rack_credit_amt              # net Rack 합계 (credit 반영)
-    p_net = g15 / h_qty                             # net PUMP 단가 (표시용)
-    q_net = g16                                     # rack net
+    # 템플릿 수식 그대로 재현:
+    #   G15 = E15*F15 = H2 × (Pump 단가표 VLOOKUP 단가)  → credit 미반영
+    #   G16 = SUM(G17:G41) = rack_items + 모든 credit    → credit 반영
+    #   F43 = ROUNDDOWN((G16+G15)/H2, -3)
+    #
+    # g15 는 나눗셈/곱셈 왕복 없이 직접 계산한다. (A/h)*h 는 부동소수점에서
+    # A 와 1 ulp 어긋날 수 있고, 단가가 1,000원 배수에 정확히 걸리면
+    # floor 가 1,000원 낮게 떨어진다.
+    g15 = pump_amt                    # PUMP 총금액 (gross — 템플릿 G15 와 동일)
+    g16 = rack_amt + credit_amt       # Rack 합계 + 전체 credit (템플릿 G16 과 동일)
+
+    # P2 = 사양서!F15 = PUMP '단가'. 템플릿 정의상 gross 이며,
+    # 여기에 credit 을 섞으면 사양서와 어긋난다.
+    p_unit = pump_amt / h_qty if h_qty else 0.0
+    q_val  = g16                      # Q2 = 사양서!G16 (credit 반영됨)
 
     # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
     s_raw = (g15 + g16) / h_qty
     s_val = math.floor(s_raw / 1000) * 1000   # ROUNDDOWN(..., -3)
     # T = S2 * H2
     t_val = s_val * h_qty
-    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — net 기준 단가 검증
-    #   s_raw 와 동일한 식이므로 g15/g16 을 그대로 쓴다 (왕복 계산 금지)
-    u_raw = s_raw
+    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — 템플릿 수식 그대로 (Q2 경유로 credit 반영)
+    u_raw = (p_unit * h_qty + q_val) / h_qty
     u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
 
-    copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈
-    copy_ws.cell(2, 16).value = p_net        # P: PUMP 단가 (net, credit 반영)
-    copy_ws.cell(2, 17).value = q_net        # Q: Rack 합계 (net, credit 반영)
+    copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈 (=사양서!A15)
+    copy_ws.cell(2, 16).value = p_unit       # P: PUMP 단가 (=사양서!F15, gross)
+    copy_ws.cell(2, 17).value = q_val        # Q: Rack 합계 (=사양서!G16, credit 반영)
     copy_ws.cell(2, 19).value = s_val        # S: 견적단가 (=사양서!F43)
     copy_ws.cell(2, 20).value = t_val        # T: 견적금액 (=S2*H2)
-    copy_ws.cell(2, 21).value = u_val        # U: 견적단가(Check) (=ROUNDUP(...))
+    copy_ws.cell(2, 21).value = u_val        # U: 견적단가(Check)
 
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True
@@ -477,6 +682,7 @@ def _fill_domestic(state: QuoteState,
     _hide_rows(ws_sign, DOM.SIGN_START, DOM.SIGN_END, filled)
 
     # ⑧ 불필요한 시트 숨기기
+    _drop_internal_sheets(wb)
     _show_only_sheets(wb, [
         SheetName.SPEC, SheetName.SIGN_SPEC,
         SheetName.INCOMING, SheetName.REQ_COPY,
@@ -484,7 +690,8 @@ def _fill_domestic(state: QuoteState,
 
     _reset_sheet_selections(wb)
     wb.save(path)
-    wb.close()
+    if wb_cache is None:
+        wb.close()          # 재사용 워크북은 호출자가 닫는다
     logger.info("국내 견적서 생성: %s", path)
     return path
 
@@ -550,6 +757,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
 
     wb.calculation.fullCalcOnLoad = True
     _hide_rows(ws, CN.RACK_START, CN.RACK_END, len(out_list))
+    _drop_internal_sheets(wb)
     _show_only_sheets(wb, [SheetName.QUOTE_CN])
     _reset_sheet_selections(wb)
     wb.save(path)
@@ -619,6 +827,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
 
     wb.calculation.fullCalcOnLoad = True
     _hide_rows(ws, US.RACK_START, US.RACK_END, len(out_list))
+    _drop_internal_sheets(wb)
     _show_only_sheets(wb, [SheetName.QUOTE_US])
     _reset_sheet_selections(wb)
     wb.save(path)
@@ -685,26 +894,49 @@ def generate_quote_multi(
             req_wb_cache = None
             req_ws_cache = None
 
+    # 템플릿도 한 번만 열어 재사용 — 건마다 전체 파싱/직렬화를 반복하던 것이
+    # 일괄 생성 시간의 대부분이었다(실측 1.40초/건 → 0.47초/건).
+    wb_cache = None
+    if state.template_path:
+        try:
+            wb_cache = open_template_for_reuse(state.template_path)
+        except Exception as e:
+            logger.warning("템플릿 사전 로드 실패 (건별 로드로 대체): %s", e)
+            wb_cache = None
+
     try:
         for i, rd in enumerate(request_rows):
             try:
-                path = _fill_domestic(state, rd, items, req_ws_cache)
+                path = _fill_domestic(state, rd, items, req_ws_cache, wb_cache)
                 _clear_inflight()
                 results.append((rd, path, ""))
                 if progress_cb:
                     progress_cb(i + 1, total, os.path.basename(path))
             except Exception as e:
-                _discard_inflight()   # 미완성 템플릿 사본 제거
+                _discard_inflight()   # 미완성 출력 파일 제거
                 logger.error("멀티 생성 실패: %s", e, exc_info=True)
                 results.append((rd, "", str(e)))
                 if progress_cb:
                     progress_cb(i + 1, total, f"[실패] {e}")
+                # 실패 지점에 따라 워크북이 중간 상태로 남을 수 있다.
+                # 다음 건이 그 상태를 물려받지 않도록 새로 연다.
+                if wb_cache is not None:
+                    try:
+                        wb_cache.close()
+                    except Exception:
+                        pass
+                    try:
+                        wb_cache = open_template_for_reuse(state.template_path)
+                    except Exception as e2:
+                        logger.warning("템플릿 재로드 실패 (건별 로드로 대체): %s", e2)
+                        wb_cache = None
     finally:
-        if req_wb_cache is not None:
-            try:
-                req_wb_cache.close()
-            except Exception:
-                pass
+        for _wb in (req_wb_cache, wb_cache):
+            if _wb is not None:
+                try:
+                    _wb.close()
+                except Exception:
+                    pass
 
     return results
 
@@ -873,6 +1105,7 @@ def _generate_cover_impl(
         ws_data.row_dimensions[2 + i].hidden   = blank
 
     wb.calculation.fullCalcOnLoad = True
+    _drop_internal_sheets(wb)
     _show_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
 
     # 열릴 때 COVER 시트만 활성 탭으로 — 여러 시트가 tabSelected=True 상태로

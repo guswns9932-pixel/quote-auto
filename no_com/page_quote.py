@@ -933,6 +933,37 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 self._log("통합양식 자동 로드 실패: 필수 시트 없음")
             return
 
+        # 통합양식 사전 점검 — 생성물에서 조용히 어긋나는 것을 미리 알린다
+        try:
+            import excel_io
+            losses = excel_io.inspect_template_losses(path)
+            price_gaps = excel_io.check_pump_price_consistency(path)
+        except Exception:
+            losses, price_gaps = [], []
+
+        for w in losses:
+            self._log(f"[통합양식 경고] {w}")
+        for w in price_gaps:
+            self._log(f"[단가 불일치] {w}")
+
+        if (losses or price_gaps) and not silent:
+            msg = ""
+            if losses:
+                msg += ("생성된 견적서에서 사라지는 요소:\n"
+                        + "\n".join(f"  • {w}" for w in losses)
+                        + "\n\n엑셀 라이브러리(openpyxl)가 보존하지 못하는 형식입니다.\n"
+                          "벡터 이미지는 엑셀에서 PNG 그림으로 교체하면 해결됩니다.\n")
+            if price_gaps:
+                if msg:
+                    msg += "\n" + "─" * 40 + "\n\n"
+                msg += ("PUMP 단가가 사양서와 앱에서 다릅니다:\n"
+                        + "\n".join(f"  • {w}" for w in price_gaps)
+                        + "\n\n해당 Q-Code 로 견적을 만들면 인쇄되는 사양서 금액과\n"
+                          "갑지 금액이 서로 달라집니다. 통합양식의 품목/Pump 단가표를\n"
+                          "확인해 주세요.\n")
+            msg += "\n생성은 그대로 진행됩니다."
+            QMessageBox.warning(self, "통합양식 주의", msg)
+
         self.btn_step1.setEnabled(False)
         self.btn_step1.setText("STEP 1\n로딩 중…")
         self._tpl_thread = _TemplateLoaderThread(path, self)

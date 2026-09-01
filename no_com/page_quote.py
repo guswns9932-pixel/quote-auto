@@ -90,7 +90,10 @@ class _RequestLoaderThread(QThread):
 class _GenQuoteThread(QThread):
     """견적서 생성을 백그라운드에서 실행."""
     progress = Signal(str)          # 로그 메시지
-    done     = Signal(object)       # List[(rd, path)] 또는 Exception
+    # List[(rd, path, error)] 또는 Exception
+    #   성공: error="" / 실패: path="" 이고 error 에 사유
+    #   ※ 단건 경로와 멀티 경로가 반드시 같은 모양을 내보내야 한다.
+    done     = Signal(object)
 
     def __init__(self, state, qtype: str, items, rds: list, parent=None) -> None:
         super().__init__(parent)
@@ -109,7 +112,7 @@ class _GenQuoteThread(QThread):
                 rd   = self.rds[0] if self.rds else {}
                 path = excel_io.generate_quote(self.state, self.qtype, self.items, rd)
                 self.progress.emit(f"저장: {os.path.basename(path)}")
-                results = [(rd, path)]
+                results = [(rd, path, "")]
             self.done.emit(results)
         except Exception as e:
             self.done.emit(e)
@@ -638,6 +641,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if tpl:
             self._log(f"이전 통합양식 자동 로드: {os.path.basename(tpl)}")
             QTimer.singleShot(0, lambda: self._start_template_load(tpl, silent=True))
+        else:
+            # 파일이 옮겨졌거나(버전 업) 네트워크 드라이브가 아직 안 붙은 경우.
+            # 설정은 지우지 않는다 — 다음 실행에 드라이브가 붙으면 다시 쓴다.
+            prev = app_settings.get_str(app_settings.Key.TEMPLATE_PATH)
+            if prev:
+                self._log(f"이전 통합양식을 찾을 수 없어 자동 로드 건너뜀: {prev}")
 
     # ══════════════════════════════════════════
     # UI 구성

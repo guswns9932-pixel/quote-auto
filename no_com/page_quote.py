@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+import app_settings
 from core import (
     QuoteState, SheetName,
     exe_dir, fmt_krw, fmt_qty,
@@ -114,7 +115,7 @@ class _GenCoverThread(QThread):
     """갑지 생성을 백그라운드에서 실행."""
     progress = Signal(str)        # 로그 메시지
     step     = Signal(int, int)   # (done, total) — 진행률 다이얼로그용
-    done     = Signal(object)     # 저장 경로(str) 또는 Exception
+    done     = Signal(object)     # (저장 경로, 누락 목록) 튜플 또는 Exception
 
     def __init__(self, template_path: str, folder: str, paths: list,
                  investor_name: str, warranty_years: int = 2, parent=None) -> None:
@@ -509,11 +510,25 @@ class _QuoteListWindow(QWidget):
             self._session_entries.insert(0, entry)
         self._apply_filter()
 
-    def refresh_session(self, files: List[str]) -> None:
-        self._session_entries = [
-            e for e in (QuoteBuilderPage._parse_quote_entry(f) for f in files)
-            if e is not None
-        ]
+    def add_submit_item(self, path: str) -> None:
+        """제출용 엑셀 항목을 '(제출용) 레이블' 형식으로 추가."""
+        _, label = QuoteBuilderPage._parse_quote_label(path)
+        display_label = f"(제출용) {label}" if label else f"(제출용) {os.path.basename(path)}"
+        self._session_entries.insert(0, ("__submit__", display_label, path))
+        self._apply_filter()
+
+    def refresh_session(self, files: List[str],
+                        submit_paths: frozenset = frozenset()) -> None:
+        self._session_entries = []
+        for f in files:
+            if f in submit_paths:
+                _, label = QuoteBuilderPage._parse_quote_label(f)
+                display_label = f"(제출용) {label}" if label else f"(제출용) {os.path.basename(f)}"
+                self._session_entries.append(("__submit__", display_label, f))
+            else:
+                e = QuoteBuilderPage._parse_quote_entry(f)
+                if e is not None:
+                    self._session_entries.append(e)
         self._apply_filter()
 
     def _apply_filter(self) -> None:
@@ -543,7 +558,9 @@ class _QuoteListWindow(QWidget):
             item.setData(Qt.UserRole, full)
             item.setToolTip(full)
             if tool == "":
-                item.setBackground(QBrush(QColor(255, 153, 153)))
+                item.setBackground(QBrush(QColor(255, 153, 153)))   # 갑지: 연빨강
+            elif tool == "__submit__":
+                item.setBackground(QBrush(QColor(255, 243, 160)))   # 제출용: 연노랑
             self.list_widget.addItem(item)
 
     def _open_item(self, item: QListWidgetItem) -> None:
@@ -585,6 +602,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._gen_cv_thread  : Optional[_GenCoverThread]        = None
         self._cover_progress : Optional[QProgressDialog]      = None
         self._list_all_files : List[str]                       = []
+        self._submit_paths   : set                             = set()
         self._quote_list_window: Optional[_QuoteListWindow]    = None
 
         self._build_ui()
@@ -593,6 +611,29 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         sc = QShortcut(QKeySequence.Delete, self)
         sc.activated.connect(self._delete_checked_rows)
+
+        self._restore_settings()
+
+    # ══════════════════════════════════════════
+    # 설정 복원 / 저장
+    # ══════════════════════════════════════════
+    def _restore_settings(self) -> None:
+        """이전 실행에서 저장한 설정을 복원한다."""
+        self.state.investor_name = (
+            app_settings.get_str(app_settings.Key.INVESTOR_NAME)
+            or self.state.investor_name
+        )
+        self.state.warranty_years = app_settings.get_int(
+            app_settings.Key.WARRANTY_YEARS, self.state.warranty_years)
+        self.state.last_output_dir = (
+            app_settings.get_dir(app_settings.Key.OUTPUT_DIR) or None)
+
+        # 마지막 통합양식이 그대로 있으면 자동으로 다시 읽는다.
+        # (백그라운드 스레드이므로 창 표시를 막지 않는다)
+        tpl = app_settings.get_path(app_settings.Key.TEMPLATE_PATH)
+        if tpl:
+            self._log(f"이전 통합양식 자동 로드: {os.path.basename(tpl)}")
+            QTimer.singleShot(0, lambda: self._start_template_load(tpl, silent=True))
 
     # ══════════════════════════════════════════
     # UI 구성
@@ -651,10 +692,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         tint_button(self.btn_step2, "#BBDEFB")
         self.btn_step2.setEnabled(False)
 
-        self.btn_gen_quote = self._action_btn("견적서 생성", self._generate_quote)
-        self.btn_gen_cover = self._action_btn("갑지 생성",   self._generate_cover)
-        tint_button(self.btn_gen_quote, "#B3E5FC")
-        tint_button(self.btn_gen_cover, "#F8BBD0")
+        self.btn_gen_quote  = self._action_btn("견적서 생성",    self._generate_quote)
+        self.btn_gen_cover  = self._action_btn("갑지 생성",      self._generate_cover)
+        self.btn_submit_xls = self._action_btn("제출용 엑셀 생성", self._export_submit_excel)
+        tint_button(self.btn_gen_quote,  "#B3E5FC")
+        tint_button(self.btn_gen_cover,  "#F8BBD0")
+        tint_button(self.btn_submit_xls, "#FFF9C4")
 
         btn_list = QPushButton("견적서 LIST"); btn_list.setFixedHeight(52)
         f = btn_list.font(); f.setPointSize(10); f.setBold(True); btn_list.setFont(f)
@@ -668,6 +711,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         h.addWidget(sep)
         h.addWidget(self.btn_gen_quote)
         h.addWidget(self.btn_gen_cover)
+        h.addWidget(self.btn_submit_xls)
         h.addWidget(btn_list)
         h.addStretch(1)
         return bar
@@ -854,8 +898,16 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # ══════════════════════════════════════════
 
     def _load_template(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "통합양식 선택", "", "Excel Files (*.xlsx)")
+        start = app_settings.get_path(app_settings.Key.TEMPLATE_PATH) or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "통합양식 선택", start, "Excel Files (*.xlsx)")
         if not path:
+            return
+        self._start_template_load(path)
+
+    def _start_template_load(self, path: str, silent: bool = False) -> None:
+        """통합양식을 백그라운드로 읽는다. silent=True 면 자동 복원 경로."""
+        if self._tpl_thread and self._tpl_thread.isRunning():
             return
         # 시트명 사전 검증 (빠름 — 메타만 읽음)
         try:
@@ -864,24 +916,35 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             missing = [n for n in SheetName.REQUIRED if n not in wb_meta.sheetnames]
             wb_meta.close()
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"파일을 열 수 없습니다.\n{e}")
+            if not silent:
+                QMessageBox.critical(self, "오류", f"파일을 열 수 없습니다.\n{e}")
+            else:
+                self._log(f"통합양식 자동 로드 실패: {e}")
             return
         if missing:
-            QMessageBox.warning(self, "통합양식 오류", "필수 시트 없음:\n" + "\n".join(missing))
+            if not silent:
+                QMessageBox.warning(self, "통합양식 오류",
+                                    "필수 시트 없음:\n" + "\n".join(missing))
+            else:
+                self._log("통합양식 자동 로드 실패: 필수 시트 없음")
             return
 
         self.btn_step1.setEnabled(False)
         self.btn_step1.setText("STEP 1\n로딩 중…")
         self._tpl_thread = _TemplateLoaderThread(path, self)
-        self._tpl_thread.done.connect(lambda result: self._on_template_loaded(path, result))
+        self._tpl_thread.done.connect(
+            lambda result: self._on_template_loaded(path, result, silent))
         self._tpl_thread.start()
 
-    def _on_template_loaded(self, path: str, result) -> None:
+    def _on_template_loaded(self, path: str, result, silent: bool = False) -> None:
         self.btn_step1.setEnabled(True)
         self.btn_step1.setText("STEP 1\n통합양식 LOAD")
         if isinstance(result, Exception):
             logger.error("통합양식 파싱 오류", exc_info=result)
-            QMessageBox.critical(self, "파싱 오류", str(result))
+            if silent:
+                self._log(f"통합양식 자동 로드 실패: {result}")
+            else:
+                QMessageBox.critical(self, "파싱 오류", str(result))
             return
         rows, by_class, price_by_spec, order, cmap = result
         self.state.template_path = path
@@ -893,8 +956,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._apply_filter()
         self.btn_step2.setEnabled(True)
         self._step3_frame.setEnabled(True)
+        app_settings.set_str(app_settings.Key.TEMPLATE_PATH, path)
         self._log(f"STEP1 완료: {path}  (품목 {len(rows)}건, 코드매핑 키 {len(cmap)}개)")
-        QMessageBox.information(self, "완료", "통합양식 LOAD 완료")
+        if not silent:
+            QMessageBox.information(self, "완료", "통합양식 LOAD 완료")
 
     # ══════════════════════════════════════════
     # STEP2
@@ -905,7 +970,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             QMessageBox.warning(self, "순서 오류", "STEP1을 먼저 완료하세요."); return
         if self._req_thread and self._req_thread.isRunning():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "의뢰파일 선택", "", "Excel Files (*.xlsx)")
+        start = os.path.dirname(
+            app_settings.get_path(app_settings.Key.REQUEST_PATH)) or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "의뢰파일 선택", start, "Excel Files (*.xlsx)")
         if not path: return
         self._req_thread = _RequestLoaderThread(path, self)
         self._req_thread.done.connect(lambda result: self._on_request_loaded(path, result))
@@ -913,12 +981,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _on_request_loaded(self, path: str, result) -> None:
         if isinstance(result, Exception):
-            logger.error("의뢰파일 파싱 오류", exc_info=True)
+            logger.error("의뢰파일 파싱 오류", exc_info=result)
             QMessageBox.critical(self, "오류", f"파일을 읽을 수 없습니다.\n{result}"); return
         sheet_name, rows = result
         if not rows:
             QMessageBox.warning(self, "의뢰파일", "읽을 데이터가 없습니다."); return
         self.state.request_path = path; self.state.request_sheet_name = sheet_name
+        app_settings.set_str(app_settings.Key.REQUEST_PATH, path)
         self.state.request_rows = rows
         self._fill_req_table(rows); self._step3_frame.setEnabled(True)
         self._log(f"STEP2 완료: {path}  ({len(rows)}건, 시트={sheet_name})")
@@ -1243,6 +1312,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         if dlg.exec() == QDialog.Accepted:
             self.state.warranty_years = spin.value()
+            app_settings.set_int(app_settings.Key.WARRANTY_YEARS,
+                                 self.state.warranty_years)
             self._log(f"보증기간: {self.state.warranty_years} Year after delivery")
 
     def _change_investor(self) -> None:
@@ -1252,6 +1323,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         )
         if ok:
             self.state.investor_name = name.strip() or "채승철"
+            app_settings.set_str(app_settings.Key.INVESTOR_NAME,
+                                 self.state.investor_name)
             self._log(f"투자자: {self.state.investor_name}")
 
     def _open_credit_dialog(self) -> None:
@@ -1399,6 +1472,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _set_gen_buttons(self, enabled: bool) -> None:
         self.btn_gen_quote.setEnabled(enabled)
         self.btn_gen_cover.setEnabled(enabled)
+        self.btn_submit_xls.setEnabled(enabled)
 
     def _generate_quote(self) -> None:
         if not self.state.template_path:
@@ -1437,17 +1511,34 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             user_msg, hint = _friendly_error_msg(result)
             _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
-        for i, (rd, path) in enumerate(result):
+        failures = []
+        for i, (rd, path, err) in enumerate(result):
             if path:
                 self._add_done(path)
                 self.state.last_output_dir = os.path.dirname(path)
+                app_settings.set_str(app_settings.Key.OUTPUT_DIR,
+                                     self.state.last_output_dir)
                 if i < len(self._pending_req_indices):
                     idx = self._pending_req_indices[i]
                     self._done_req_indices.add(idx)
                     self._mark_req_done(idx)
-        ok = sum(1 for _, p in result if p)
+            else:
+                failures.append((s(rd.get("Z")) or f"{i + 1}번째 행", err))
+        ok = len(result) - len(failures)
         self._log(f"견적서 생성 완료: {ok}/{len(result)}건")
-        QMessageBox.information(self, "완료", f"견적서 {ok}건 생성 완료")
+
+        if failures:
+            # 실패를 '완료'로 알리면 사용자가 누락을 알아챌 방법이 없다.
+            detail = "\n".join(f"  • {name}: {err}" for name, err in failures[:15])
+            if len(failures) > 15:
+                detail += f"\n  … 외 {len(failures) - 15}건"
+            QMessageBox.warning(
+                self, "일부 실패",
+                f"견적서 {ok}/{len(result)}건 생성 완료\n"
+                f"{len(failures)}건 실패:\n\n{detail}",
+            )
+        else:
+            QMessageBox.information(self, "완료", f"견적서 {ok}건 생성 완료")
         self._open_quote_list_window()
 
     def _generate_cover(self) -> None:
@@ -1490,11 +1581,49 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             user_msg, hint = _friendly_error_msg(result)
             _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
-        out = result
+        out, failed = result
         self.state.last_output_dir = os.path.dirname(out)
+        app_settings.set_str(app_settings.Key.OUTPUT_DIR, self.state.last_output_dir)
         self._add_done_cover(out)
-        self._log(f"갑지 생성 완료: {out}")
-        QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
+        self._log(f"갑지 생성 완료: {out} (누락 {len(failed)}건)")
+
+        if failed:
+            # 읽기에 실패한 원본은 갑지에서 빠진다. 조용히 넘어가면
+            # 갑지가 한 건 모자란 채 정상으로 보인다.
+            detail = "\n".join(f"  • {name}: {why}" for name, why in failed[:15])
+            if len(failed) > 15:
+                detail += f"\n  … 외 {len(failed) - 15}건"
+            QMessageBox.warning(
+                self, "일부 누락",
+                f"갑지 생성 완료\n{os.path.basename(out)}\n\n"
+                f"다음 {len(failed)}건은 읽지 못해 갑지에서 제외되었습니다:\n\n{detail}",
+            )
+        else:
+            QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
+
+    def _export_submit_excel(self) -> None:
+        """갑지DATA 시트만 추출해 제출용 엑셀 파일로 저장."""
+        import re as _re
+        path, _ = QFileDialog.getOpenFileName(
+            self, "갑지를 선택하세요", self.state.last_output_dir or exe_dir(),
+            "Excel Files (*.xlsx)")
+        if not path:
+            return
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if not _re.search(r"_갑지(?:_\d+)?$", stem):
+            QMessageBox.warning(self, "갑지가 아닙니다",
+                                "선택한 파일의 이름에 '_갑지'가 없습니다.\n갑지 파일을 선택해 주세요.")
+            return
+        try:
+            import excel_io
+            out = excel_io.export_cover_data_sheet(path)
+        except Exception as e:
+            logger.error("제출용 엑셀 생성 실패", exc_info=True)
+            QMessageBox.critical(self, "오류", f"제출용 엑셀 생성 실패:\n{e}")
+            return
+        self._add_done_submit(out)
+        self._log(f"제출용 엑셀 생성 완료: {out}")
+        QMessageBox.information(self, "완료", f"제출용 엑셀 생성 완료\n{os.path.basename(out)}")
 
     def _pick_rd_index(self) -> int:
         """클릭(선택)된 행 → 체크된 첫 번째 행 → 0 순으로 의뢰행 인덱스 반환."""
@@ -1529,6 +1658,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._list_all_files.insert(0, path)
         if self._quote_list_window:
             self._quote_list_window.add_item(path)
+
+    def _add_done_submit(self, path: str) -> None:
+        self._submit_paths.add(path)
+        self._list_all_files.insert(0, path)
+        if self._quote_list_window:
+            self._quote_list_window.add_submit_item(path)
 
     @staticmethod
     def _parse_quote_label(full_path: str) -> Tuple[Optional[str], str]:
@@ -1594,7 +1729,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         """견적서 LIST 독립 창을 열거나 앞으로 가져온다."""
         if self._quote_list_window is None:
             self._quote_list_window = _QuoteListWindow(self)
-            self._quote_list_window.refresh_session(self._list_all_files)
+            self._quote_list_window.refresh_session(
+                self._list_all_files, frozenset(self._submit_paths))
         self._quote_list_window.show_and_raise()
 
     def _log(self, text: str) -> None:

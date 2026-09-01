@@ -7,6 +7,7 @@ widgets.py
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer, QPointF, QMimeData
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
 )
 
 from core import fmt_krw, s, to_float
+
+logger = logging.getLogger("QuoteApp")
 
 
 # ══════════════════════════════════════════════
@@ -219,9 +222,14 @@ class SignatureItem(QGraphicsPixmapItem):
     드래그 이동 + 우클릭 삭제 지원.
     """
 
-    def __init__(self, pixmap: QPixmap, page_index: int) -> None:
+    def __init__(self, pixmap: QPixmap, page_index: int,
+                 on_delete=None) -> None:
         super().__init__(pixmap)
         self.page_index = page_index
+        # 삭제 시 소유자(ESignPage)의 목록에서도 제거하기 위한 콜백.
+        # 이게 없으면 씬에서만 사라지고 _sign_items 에 남아
+        # 페이지 전환 시 되살아나거나 PDF 에 그대로 찍힌다.
+        self._on_delete = on_delete
         self.setFlags(
             QGraphicsPixmapItem.ItemIsMovable |
             QGraphicsPixmapItem.ItemIsSelectable
@@ -236,6 +244,11 @@ class SignatureItem(QGraphicsPixmapItem):
             scene = self.scene()
             if scene:
                 scene.removeItem(self)
+            if self._on_delete:
+                try:
+                    self._on_delete(self)
+                except Exception:
+                    logger.exception("서명 삭제 콜백 실패")
         event.accept()
 
 

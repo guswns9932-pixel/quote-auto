@@ -694,22 +694,52 @@ def _fill_domestic(state: QuoteState,
         for col in (DOM.COL_SPEC, DOM.COL_QTY, DOM.COL_PRICE, DOM.COL_AMT):
             ws_spec[f"{col}{rr}"] = None
 
-    # ⑤ 품목 기입 — Credit 은 Pump/Rack 구분 없이 실제 금액으로 기입한다.
+    # ⑤ 품목 기입
     #
-    # [주의] 템플릿(ver.1.8) 실제 수식 구조:
+    # [템플릿(ver.1.8) 실제 수식 구조]
     #     사양서!E15 = 견적의뢰복사본!H2                     (수량)
-    #     사양서!F15 = VLOOKUP(A15,'Pump 단가표'!F:M,6,0)    (단가)
-    #     사양서!G15 = E15*F15                              ← P2 를 참조하지 않는다
-    #     사양서!G16 = SUM(G17:G41)                         ← 이 구간이 코드가 쓰는 곳
+    #     사양서!F15 = VLOOKUP(A15,'Pump 단가표'!F:M,6,0)    (PUMP CH당 단가)
+    #     사양서!G15 = E15*F15                              ← PUMP 총액
+    #     사양서!G16 = SUM(G17:G41)                         ← Rack system 합계
     #     사양서!F43 = ROUNDDOWN((G16+G15)/견적의뢰복사본!H2,-3)
-    #     견적의뢰복사본!P2 = 사양서!F15                      ← 사양서를 '읽는' 방향
     #
-    # 즉 P2 에 Pump Credit 을 써도 사양서!G15/F43 에는 반영되지 않는다.
-    # Pump Credit 을 G열에서 빼면 인쇄되는 사양서 금액에서 완전히 사라지고
-    # 갑지(S2/T2)와 금액이 어긋난다. 반드시 G17:G41 에 실금액으로 남긴다.
+    # [Pump Credit 처리]
+    # Pump Credit 을 G17:G41 에 실금액으로 넣으면 G16(=Rack system 합계)에서
+    # 차감되어, PUMP 값이어야 할 금액이 Rack 쪽에서 빠지는 것처럼 보인다.
+    # 그래서 PUMP 는 credit 반영된 CH당 단가를 F15 에 직접 기입해 G15 에서
+    # 차감되도록 하고, 아래 라인은 표시 전용(G=0)으로 남긴다.
+    #   · Rack Credit → 기존대로 G열에 실금액 (G16 에서 차감)
+    #   · Pump Credit → F15 하드코딩 + 표시행 G=0 (이중 차감 방지)
+    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
+    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
+
+    pump_items      = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
+    pump_spec       = pump_items[0]["spec"] if pump_items else None
+    pump_amt        = sum(r["amt"] for r in pump_items)
+    rack_amt        = sum(r["amt"] for r in rack_items)
+    pump_credit_amt = sum(c["amt"] for c in pump_credits)   # 통상 음수
+    rack_credit_amt = sum(c["amt"] for c in rack_credits)   # 통상 음수
+
+    h_qty = to_float(rd.get("H"))
+    if h_qty <= 0:
+        h_qty = 1.0
+
+    # PUMP CH당 단가 — credit 반영 후 정수(원)로 확정한다.
+    # 소수점이 남으면 견적서에 13,900,000.333 같은 값이 찍히고,
+    # G15=E15*F15 결과도 원 단위로 떨어지지 않는다.
+    p_unit_net = round((pump_amt + pump_credit_amt) / h_qty)
+    # 표시용 CH당 Credit 단가 (음수)
+    _pump_credit_unit = round(pump_credit_amt / h_qty) if pump_credits else 0
+
     out_list = rack_items[:25]
-    for cr in credits:
+    for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": 0.0, "amt": cr["amt"]})
+    for cr in pump_credits:
+        # 표시 전용: CH당 단가는 F열에, 금액(G열)은 0 — G16 에 영향 없음
+        out_list.append({
+            "spec": cr["spec"], "qty": 0.0,
+            "price": _pump_credit_unit, "amt": 0, "display_only": True,
+        })
     out_list = out_list[:25]
 
     # 템플릿 용량 초과 시 조용히 잘리면 사양서 합계와 갑지 금액이 어긋난다.
@@ -720,15 +750,32 @@ def _fill_domestic(state: QuoteState,
             f"품목을 줄이거나 템플릿 행을 늘려주세요."
         )
 
+    def _won(v) -> int:
+        """금액은 원 단위 정수로 — 소수점이 찍히지 않게 한다."""
+        return int(round(to_float(v)))
+
     for i, r in enumerate(out_list):
         rr = DOM.SPEC_START + i
         ws_spec[f"{DOM.COL_SPEC}{rr}"] = r["spec"]
-        if r.get("qty") == 0.0 and r.get("price") == 0.0 and "amt" in r:
-            ws_spec[f"{DOM.COL_AMT}{rr}"] = r["amt"]
+        if r.get("display_only"):
+            # Pump Credit 표시행: CH당 단가만 보여주고 금액은 0
+            # (F15 에서 이미 차감했으므로 G16 에 또 넣으면 이중 차감)
+            ws_spec[f"{DOM.COL_QTY}{rr}"]   = None
+            ws_spec[f"{DOM.COL_PRICE}{rr}"] = _won(r["price"])
+            ws_spec[f"{DOM.COL_AMT}{rr}"]   = 0
+        elif r.get("qty") == 0.0 and r.get("price") == 0.0 and "amt" in r:
+            ws_spec[f"{DOM.COL_AMT}{rr}"] = _won(r["amt"])
         else:
             ws_spec[f"{DOM.COL_QTY}{rr}"]   = r["qty"]
-            ws_spec[f"{DOM.COL_PRICE}{rr}"]  = r["price"]
-            ws_spec[f"{DOM.COL_AMT}{rr}"]    = r["amt"]
+            ws_spec[f"{DOM.COL_PRICE}{rr}"]  = _won(r["price"])
+            ws_spec[f"{DOM.COL_AMT}{rr}"]    = _won(r["amt"])
+
+    # ⑤-b PUMP CH당 단가를 F15 에 직접 기입 — Pump Credit 을 G15 에서 차감시킨다.
+    # 템플릿 F15 는 'Pump 단가표' VLOOKUP 수식이지만, credit 이 있으면 그 값을
+    # 그대로 두면 credit 이 반영되지 않는다. 값으로 덮어써 G15=E15*F15 가
+    # net 금액이 되게 한다. credit 이 없으면 수식을 그대로 둔다.
+    if pump_credits:
+        ws_spec[f"{DOM.COL_PRICE}15"] = p_unit_net
 
     # ⑤-a 견적의뢰복사본 수식 셀 → 계산값 직접 기입 ─────────────────────────
     # openpyxl 저장 시 수식 캐시(cached value)가 소멸된다.
@@ -740,32 +787,28 @@ def _fill_domestic(state: QuoteState,
     #
     # 아래 값들은 Excel 이 재계산할 값과 반드시 일치해야 한다.
     # 어긋나면 인쇄되는 사양서와 갑지 금액이 서로 다른 견적서가 나간다.
-    copy_ws    = wb[SheetName.REQ_COPY]
-    pump_items = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
-    pump_spec  = pump_items[0]["spec"] if pump_items else None
-    pump_amt   = sum(r["amt"] for r in pump_items)
-    rack_amt   = sum(r["amt"] for r in rack_items)
-    credit_amt = sum(c["amt"] for c in credits)      # 통상 음수
+    copy_ws = wb[SheetName.REQ_COPY]
 
-    h_qty = to_float(rd.get("H"))
-    if h_qty <= 0:
-        h_qty = 1.0
-
-    # 템플릿 수식 그대로 재현:
-    #   G15 = E15*F15 = H2 × (Pump 단가표 VLOOKUP 단가)  → credit 미반영
-    #   G16 = SUM(G17:G41) = rack_items + 모든 credit    → credit 반영
+    # 템플릿 수식 그대로 재현한다. Excel 이 재계산할 값과 어긋나면
+    # 인쇄되는 사양서와 갑지 금액이 서로 다른 견적서가 나간다.
+    #   G15 = E15*F15  = H2 × F15
+    #        · Pump Credit 있음 → F15 는 위에서 기입한 p_unit_net (credit 반영)
+    #        · 없음            → F15 는 Pump 단가표 VLOOKUP (= pump 단가)
+    #   G16 = SUM(G17:G41) = rack_items + Rack Credit  (Pump Credit 은 0 으로 표시만)
     #   F43 = ROUNDDOWN((G16+G15)/H2, -3)
     #
-    # g15 는 나눗셈/곱셈 왕복 없이 직접 계산한다. (A/h)*h 는 부동소수점에서
-    # A 와 1 ulp 어긋날 수 있고, 단가가 1,000원 배수에 정확히 걸리면
-    # floor 가 1,000원 낮게 떨어진다.
-    g15 = pump_amt                    # PUMP 총금액 (gross — 템플릿 G15 와 동일)
-    g16 = rack_amt + credit_amt       # Rack 합계 + 전체 credit (템플릿 G16 과 동일)
+    # ※ p_unit_net 은 이미 정수로 반올림했으므로 g15 도 그 값에서 직접 만든다.
+    #   (A/h)*h 식으로 되돌리면 부동소수점 1 ulp 오차로 floor 가 1,000원
+    #   낮게 떨어질 수 있다.
+    if pump_credits:
+        p_unit = p_unit_net                 # F15 에 실제로 쓴 값
+        g15    = p_unit_net * h_qty         # Excel 의 E15*F15 와 정확히 동일
+    else:
+        p_unit = round(pump_amt / h_qty) if h_qty else 0
+        g15    = pump_amt
 
-    # P2 = 사양서!F15 = PUMP '단가'. 템플릿 정의상 gross 이며,
-    # 여기에 credit 을 섞으면 사양서와 어긋난다.
-    p_unit = pump_amt / h_qty if h_qty else 0.0
-    q_val  = g16                      # Q2 = 사양서!G16 (credit 반영됨)
+    g16   = rack_amt + rack_credit_amt      # Pump Credit 은 G열 0 이라 미포함
+    q_val = g16                             # Q2 = 사양서!G16
 
     # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
     s_raw = (g15 + g16) / h_qty
@@ -776,12 +819,14 @@ def _fill_domestic(state: QuoteState,
     u_raw = (p_unit * h_qty + q_val) / h_qty
     u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
 
-    copy_ws.cell(2, 15).value = pump_spec    # O: PUMP 메인모듈 (=사양서!A15)
-    copy_ws.cell(2, 16).value = p_unit       # P: PUMP 단가 (=사양서!F15, gross)
-    copy_ws.cell(2, 17).value = q_val        # Q: Rack 합계 (=사양서!G16, credit 반영)
-    copy_ws.cell(2, 19).value = s_val        # S: 견적단가 (=사양서!F43)
-    copy_ws.cell(2, 20).value = t_val        # T: 견적금액 (=S2*H2)
-    copy_ws.cell(2, 21).value = u_val        # U: 견적단가(Check)
+    # 금액은 모두 원 단위 정수로 기입한다 — 소수점이 남으면 갑지·견적서에
+    # 13,900,000.333 같은 값이 찍힌다.
+    copy_ws.cell(2, 15).value = pump_spec         # O: PUMP 메인모듈 (=사양서!A15)
+    copy_ws.cell(2, 16).value = int(p_unit)       # P: PUMP CH당 단가 (=사양서!F15)
+    copy_ws.cell(2, 17).value = int(q_val)        # Q: Rack 합계 (=사양서!G16)
+    copy_ws.cell(2, 19).value = int(s_val)        # S: 견적단가 (=사양서!F43)
+    copy_ws.cell(2, 20).value = int(t_val)        # T: 견적금액 (=S2*H2)
+    copy_ws.cell(2, 21).value = int(u_val)        # U: 견적단가(Check)
 
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True

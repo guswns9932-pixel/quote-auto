@@ -1550,15 +1550,6 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     except Exception:
                         continue
 
-            # 페이지 나누기 미리보기 → 기본 보기 전환은 창(Window) 속성이라
-            # 워크북당 한 번이면 된다 — 이전엔 시트마다 반복 설정하고 있었다.
-            if target_sheets:
-                try:
-                    target_sheets[0][1].Activate()
-                    app.ActiveWindow.View = 1  # xlNormalView
-                except Exception:
-                    pass
-
             total = len(target_sheets)
             for idx, (name, ws) in enumerate(target_sheets):
                 if should_cancel is not None:
@@ -1572,6 +1563,17 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
                     ws.Activate()
+                    # 페이지 나누기 미리보기 → 기본 보기로 전환 후 캡처.
+                    # [주의] View 는 창 속성이지만, 시트마다 마지막 저장 시점의
+                    # 보기 모드를 따로 기억하고 있어 Activate() 로 다른 시트로
+                    # 넘어가면 그 시트의 저장된 모드(페이지 나누기 미리보기)가
+                    # 되살아날 수 있다. 워크북당 1회로 줄였다가 "1 페이지"
+                    # 워터마크가 다시 나타나는 회귀가 있었다 — 반드시 시트마다
+                    # 매번 설정해야 한다.
+                    try:
+                        app.ActiveWindow.View = 1  # xlNormalView
+                    except Exception:
+                        pass
                     rng = _print_area_range(ws)
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()

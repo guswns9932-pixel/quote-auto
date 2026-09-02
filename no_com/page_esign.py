@@ -170,20 +170,24 @@ class ESignPage(QWidget):
         top.addWidget(self.btn_save);  top.addSpacing(8)
         top.addWidget(self.btn_code);  top.addSpacing(6)
 
-        # 승인코드 LOAD 바로 옆 — 로드 성공/실패와 실제 찍힐 서명 이미지를
-        # 즉시 눈으로 확인할 수 있게. 텍스트만으론 "어떤 서명인지" 알 수 없어
-        # 축소 썸네일을 같이 보여준다.
+        # 승인코드 LOAD 바로 옆 — 로드 성공/실패와 실제 찍힐 서명(대표로 서명1
+        # 하나만)을 즉시 눈으로 확인할 수 있게. 실제 문서에 찍히는 크기
+        # (SIGN_W x SIGN_H)와 동일하게 보여줘야 알아보기 쉽다 — 축소된
+        # 썸네일은 작아서 잘 안 보인다.
         self.code_status_frame = QFrame()
         self.code_status_frame.setFrameShape(QFrame.StyledPanel)
         self._set_code_status_style(ok=None)
         csf = QHBoxLayout(self.code_status_frame)
         csf.setContentsMargins(8, 3, 8, 3)
-        csf.setSpacing(6)
+        csf.setSpacing(8)
         self.lbl_code_state = QLabel("승인코드 미로드")
         self.lbl_sign_preview = QLabel()
-        self.lbl_sign_preview.setFixedHeight(18)
+        self.lbl_sign_preview.setFixedSize(self.SIGN_W, self.SIGN_H)
+        self.lbl_sign_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_sign_preview.setStyleSheet(
+            "background: white; border: 1px solid #CCC;")
         self.lbl_sign_preview.setToolTip(
-            "더블클릭: 서명1 배치 / Shift+더블클릭: 서명2 배치")
+            "서명1 미리보기 (더블클릭 시 배치)\nShift+더블클릭: 서명2 배치")
         csf.addWidget(self.lbl_code_state)
         csf.addWidget(self.lbl_sign_preview)
         top.addWidget(self.code_status_frame)
@@ -212,18 +216,11 @@ class ESignPage(QWidget):
         self.code_status_frame.setStyleSheet(
             f"QFrame {{ background: {color}; border: 1px solid {border}; border-radius: 4px; }}")
 
-    def _build_sign_preview_pixmap(self, pm1: QPixmap, pm2: QPixmap) -> QPixmap:
-        """승인코드 LOAD 옆에 붙일 작은 서명 미리보기(서명1·서명2 나란히)."""
-        th_w, th_h, gap = 40, 16, 5
-        canvas = QPixmap(th_w * 2 + gap, th_h)
-        canvas.fill(Qt.transparent)
-        painter = QPainter(canvas)
-        painter.drawPixmap(0, 0, pm1.scaled(
-            th_w, th_h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        painter.drawPixmap(th_w + gap, 0, pm2.scaled(
-            th_w, th_h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        painter.end()
-        return canvas
+    def _build_sign_preview_pixmap(self, pm: QPixmap) -> QPixmap:
+        """승인코드 LOAD 옆에 붙일 서명 미리보기 — 대표로 서명1 하나만,
+        실제 문서에 찍히는 크기(SIGN_W x SIGN_H)와 같게 보여준다."""
+        return pm.scaled(self.SIGN_W, self.SIGN_H,
+                         Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def _reset_code_status(self, text: str, ok: Optional[bool] = None) -> None:
         self.lbl_code_state.setText(text)
@@ -276,9 +273,9 @@ class ESignPage(QWidget):
         # 승인코드 LOAD 버튼 옆에 상태 + 실제 찍힐 서명 이미지를 바로 보여준다.
         self.lbl_code_state.setText("✓ 승인코드 로드됨")
         self._set_code_status_style(ok=True)
-        self.lbl_sign_preview.setPixmap(self._build_sign_preview_pixmap(pm1, pm2))
+        self.lbl_sign_preview.setPixmap(self._build_sign_preview_pixmap(pm1))
         self.lbl_sign_preview.setToolTip(
-            f"서명1: {os.path.basename(p1)}  (더블클릭)\n"
+            f"서명1(대표): {os.path.basename(p1)}  (더블클릭)\n"
             f"서명2: {os.path.basename(p2)}  (Shift+더블클릭)")
 
         self.lbl_status.setText(f"승인코드 OK / {os.path.basename(p1)}, {os.path.basename(p2)}")

@@ -369,6 +369,7 @@ class Step5Manager:
         self._clear_credit_rows()
         if self.state.pump_credit: self._add_credit_row("Pump Credit", -abs(self.state.pump_credit))
         if self.state.rack_credit: self._add_credit_row("Rack Credit", -abs(self.state.rack_credit))
+        self._refresh_options_display()
 
     # ── STEP5 정렬 (STEP4 품목 순서 기준) ────────
     def _sort_step5_items(self) -> None:
@@ -634,6 +635,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             app_settings.Key.WARRANTY_YEARS, self.state.warranty_years)
         self.state.last_output_dir = (
             app_settings.get_dir(app_settings.Key.OUTPUT_DIR) or None)
+        self._refresh_options_display()
 
         # 마지막 통합양식이 그대로 있으면 자동으로 다시 읽는다.
         # (백그라운드 스레드이므로 창 표시를 막지 않는다)
@@ -680,11 +682,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         outer.addWidget(content, 1)
 
-        # ── 하단: 로그 + 옵션 ────────────────────────────────────────
-        bottom = QWidget(); bottom.setFixedHeight(140)
+        # ── 하단: 로그(참고용, 축소) + 옵션(2단 구조, 확대) ────────────
+        bottom = QWidget(); bottom.setFixedHeight(168)
         bh = QHBoxLayout(bottom); bh.setContentsMargins(0, 0, 0, 0); bh.setSpacing(12)
-        bh.addWidget(self._build_worklog(), 1)
-        bh.addWidget(self._build_bottom_right_panel())
+        bh.addWidget(self._build_worklog())
+        bh.addWidget(self._build_bottom_right_panel(), 1)
         outer.addWidget(bottom)
 
 
@@ -842,55 +844,104 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         return step5
 
     def _build_worklog(self) -> QFrame:
+        # 참고용으로만 쓰여 옵션 패널에 폭을 더 내주기 위해 좁게 고정한다.
         frame = labeled_frame("작업로그", min_h=140)
-        frame.setFixedHeight(140); frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        frame.setFixedSize(220, 168)
         self.log_view = QTextEdit(); self.log_view.setReadOnly(True)
         frame.layout().addWidget(self.log_view, 1); return frame
 
     def _build_bottom_right_panel(self) -> QWidget:
-        w = QWidget(); w.setFixedHeight(140)
+        w = QWidget(); w.setFixedHeight(168)
         h = QHBoxLayout(w); h.setContentsMargins(0,0,0,0); h.setSpacing(12)
         h.addWidget(self._build_options_panel(), 1)
         h.addWidget(self._build_quote_info_panel())
         return w
 
-    def _build_options_panel(self) -> QFrame:
-        frame = labeled_frame("옵션", min_h=55)
-        frame.setMaximumHeight(140); frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        row = QHBoxLayout()
+    @staticmethod
+    def _vline() -> QFrame:
+        ln = QFrame(); ln.setFrameShape(QFrame.VLine); ln.setFrameShadow(QFrame.Sunken)
+        return ln
 
-        self.btn_credit = QPushButton("Credit"); self.btn_credit.setMinimumHeight(32)
+    def _build_options_panel(self) -> QFrame:
+        """
+        2단 구조: 위 칸(항목/조작) 아래 칸(현재 상태 표기).
+        Credit | 보증기간 | 투자자 | 견적서 타입 4개 항목을 열로 나란히 배치해
+        조작과 그 결과가 한눈에 짝지어 보이도록 한다.
+        """
+        frame = labeled_frame("옵션", min_h=60)
+        frame.setMaximumHeight(168); frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row = QHBoxLayout(); row.setSpacing(14)
+
+        def _col(action: QWidget, status: QWidget) -> QVBoxLayout:
+            v = QVBoxLayout(); v.setSpacing(6)
+            v.addWidget(action); v.addWidget(status)
+            return v
+
+        # ── Credit ──────────────────────────────
+        self.btn_credit = QPushButton("Credit"); self.btn_credit.setMinimumHeight(30)
         self.btn_credit.clicked.connect(self._open_credit_dialog)
         tint_button(self.btn_credit, "#FFF9C4")   # 연노랑
+        self.lbl_credit_status = QLabel(); self.lbl_credit_status.setAlignment(Qt.AlignCenter)
+        self.lbl_credit_status.setMinimumHeight(28); self.lbl_credit_status.setWordWrap(True)
+        row.addLayout(_col(self.btn_credit, self.lbl_credit_status), 1)
+        row.addWidget(self._vline())
 
-        # 보증기간 변경 + 투자자 변경을 세로로 묶음
-        self.btn_warranty = QPushButton("보증기간 변경"); self.btn_warranty.setMinimumHeight(28)
+        # ── 보증기간 ────────────────────────────
+        self.btn_warranty = QPushButton("보증기간 변경"); self.btn_warranty.setMinimumHeight(30)
         self.btn_warranty.clicked.connect(self._change_warranty)
         tint_button(self.btn_warranty, "#E0F2F1")   # 연민트
+        self.lbl_warranty_disp = info_label(""); self.lbl_warranty_disp.setAlignment(Qt.AlignCenter)
+        row.addLayout(_col(self.btn_warranty, self.lbl_warranty_disp), 1)
+        row.addWidget(self._vline())
 
-        self.btn_investor = QPushButton("투자자 변경"); self.btn_investor.setMinimumHeight(28)
+        # ── 투자자 ──────────────────────────────
+        self.btn_investor = QPushButton("투자자 변경"); self.btn_investor.setMinimumHeight(30)
         self.btn_investor.clicked.connect(self._change_investor)
         tint_button(self.btn_investor, "#E8EAF6")   # 연라벤더
+        self.lbl_investor_disp = info_label(""); self.lbl_investor_disp.setAlignment(Qt.AlignCenter)
+        row.addLayout(_col(self.btn_investor, self.lbl_investor_disp), 1)
+        row.addWidget(self._vline())
 
-        btn_col = QVBoxLayout(); btn_col.setSpacing(4)
-        btn_col.addWidget(self.btn_warranty)
-        btn_col.addWidget(self.btn_investor)
-
+        # ── 견적서 타입 ─────────────────────────
+        lbl_qtype_hdr = bold_label("견적서 타입", size=9)
+        lbl_qtype_hdr.setAlignment(Qt.AlignCenter)
+        qtype_row = QHBoxLayout(); qtype_row.setSpacing(6); qtype_row.addStretch(1)
         self.chk_qt_kr = QCheckBox("국내"); self.chk_qt_cn = QCheckBox("중국"); self.chk_qt_us = QCheckBox("미국")
         self.chk_qt_kr.setChecked(True)
         for chk, qt in [(self.chk_qt_kr,"국내"),(self.chk_qt_cn,"중국"),(self.chk_qt_us,"미국")]:
             chk.clicked.connect(lambda checked, t=qt: self._on_qt_checked(t, checked))
+            qtype_row.addWidget(chk)
+        qtype_row.addStretch(1)
+        qtype_host = QWidget(); qtype_host.setLayout(qtype_row)
+        row.addLayout(_col(lbl_qtype_hdr, qtype_host), 1)
 
-        row.addWidget(self.btn_credit)
-        row.addLayout(btn_col)
-        row.addSpacing(10)
-        row.addWidget(QLabel("견적서 타입"))
-        row.addWidget(self.chk_qt_kr); row.addWidget(self.chk_qt_cn); row.addWidget(self.chk_qt_us)
-        row.addStretch(1); frame.layout().addLayout(row); return frame
+        frame.layout().addLayout(row)
+        self._refresh_options_display()
+        return frame
+
+    def _refresh_options_display(self) -> None:
+        """옵션 패널 2번째 줄(현재 상태 표기)을 state 값에 맞춰 갱신한다."""
+        self.lbl_warranty_disp.setText(f"{self.state.warranty_years} Year after delivery")
+        self.lbl_investor_disp.setText(self.state.investor_name or "-")
+
+        applied = bool(self.state.pump_credit or self.state.rack_credit)
+        if applied:
+            parts = []
+            if self.state.pump_credit:
+                parts.append(f"Pump {fmt_krw(self.state.pump_credit)}")
+            if self.state.rack_credit:
+                parts.append(f"Rack {fmt_krw(self.state.rack_credit)}")
+            self.lbl_credit_status.setText("✓ Credit 적용됨\n" + " / ".join(parts))
+            self.lbl_credit_status.setStyleSheet(
+                "background:#E8F5E9; border:1px solid #A5D6A7; border-radius:4px; padding:2px;")
+        else:
+            self.lbl_credit_status.setText("Credit 미적용")
+            self.lbl_credit_status.setStyleSheet(
+                "background:#F5F5F5; border:1px solid #DDD; border-radius:4px; padding:2px;")
 
     def _build_quote_info_panel(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2)
-        frame.setFixedHeight(140); frame.setFixedWidth(260)
+        frame.setFixedHeight(168); frame.setFixedWidth(260)
         v = QVBoxLayout(frame); v.setContentsMargins(12,6,12,6); v.setSpacing(4)
         v.addWidget(bold_label("견적서정보", size=9))
         self.lbl_pr = info_label("PR: -"); self.lbl_item = info_label("항번: -")
@@ -1359,6 +1410,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             app_settings.set_int(app_settings.Key.WARRANTY_YEARS,
                                  self.state.warranty_years)
             self._log(f"보증기간: {self.state.warranty_years} Year after delivery")
+            self._refresh_options_display()
 
     def _change_investor(self) -> None:
         name, ok = QInputDialog.getText(
@@ -1370,6 +1422,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             app_settings.set_str(app_settings.Key.INVESTOR_NAME,
                                  self.state.investor_name)
             self._log(f"투자자: {self.state.investor_name}")
+            self._refresh_options_display()
 
     def _open_credit_dialog(self) -> None:
         try:

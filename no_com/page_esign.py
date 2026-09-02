@@ -156,29 +156,40 @@ class ESignPage(QWidget):
         self._com_init_ok      : bool                        = False
         self._build_ui()
 
+    @staticmethod
+    def _action_btn(label: str, slot) -> QPushButton:
+        """견적서작성 페이지(page_quote._action_btn)와 크기·폰트를 통일한다."""
+        btn = QPushButton(label); btn.setFixedHeight(52)
+        f = btn.font(); f.setPointSize(10); f.setBold(True); btn.setFont(f)
+        btn.clicked.connect(slot); return btn
+
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self); outer.setContentsMargins(14,14,14,14); outer.setSpacing(10)
+
+        # 1행: 버튼 — 작업 순서대로(승인코드 준비 → 문서 로드 → 저장)
         top = QHBoxLayout()
-        # 순서: 엑셀 LOAD → PDF 저장 → 승인코드 LOAD (+ 로드 상태/서명 미리보기)
-        self.btn_excel  = QPushButton("엑셀 LOAD")
-        self.btn_save   = QPushButton("PDF 저장")
-        self.btn_code   = QPushButton("승인코드 LOAD")
+        self.btn_code   = self._action_btn("승인코드 LOAD", self._load_code)
+        self.btn_excel  = self._action_btn("엑셀 LOAD",     self._load_excels)
+        self.btn_save   = self._action_btn("PDF 저장",      self._save_pdf)
+        tint_button(self.btn_code,  "#DCEDC8")   # 연초록
         tint_button(self.btn_excel, "#B3E5FC")   # 연하늘
         tint_button(self.btn_save,  "#FFE0B2")   # 연주황
-        tint_button(self.btn_code,  "#DCEDC8")   # 연초록
+        top.addWidget(self.btn_code); top.addSpacing(8)
         top.addWidget(self.btn_excel); top.addSpacing(8)
-        top.addWidget(self.btn_save);  top.addSpacing(8)
-        top.addWidget(self.btn_code);  top.addSpacing(6)
+        top.addWidget(self.btn_save)
+        top.addStretch(1)
+        self.lbl_status = QLabel("준비")
+        top.addWidget(self.lbl_status)
+        outer.addLayout(top)
 
-        # 승인코드 LOAD 바로 옆 — 로드 성공/실패와 실제 찍힐 서명(대표로 서명1
-        # 하나만)을 즉시 눈으로 확인할 수 있게. 실제 문서에 찍히는 크기
-        # (SIGN_W x SIGN_H)와 동일하게 보여줘야 알아보기 쉽다 — 축소된
-        # 썸네일은 작아서 잘 안 보인다.
+        # 2행: 승인코드 상태 + 서명 미리보기 — 버튼 줄과 높이가 안 맞아
+        # (미리보기가 실제 서명 크기 170x40) 별도 줄로 분리했다.
+        code_row = QHBoxLayout()
         self.code_status_frame = QFrame()
         self.code_status_frame.setFrameShape(QFrame.StyledPanel)
         self._set_code_status_style(ok=None)
         csf = QHBoxLayout(self.code_status_frame)
-        csf.setContentsMargins(8, 3, 8, 3)
+        csf.setContentsMargins(8, 6, 8, 6)
         csf.setSpacing(8)
         self.lbl_code_state = QLabel("승인코드 미로드")
         self.lbl_sign_preview = QLabel()
@@ -190,21 +201,17 @@ class ESignPage(QWidget):
             "서명1 미리보기 (더블클릭 시 배치)\nShift+더블클릭: 서명2 배치")
         csf.addWidget(self.lbl_code_state)
         csf.addWidget(self.lbl_sign_preview)
-        top.addWidget(self.code_status_frame)
+        code_row.addWidget(self.code_status_frame)
+        code_row.addStretch(1)
+        outer.addLayout(code_row)
 
-        top.addStretch(1)
-        self.lbl_status = QLabel("준비")
-        top.addWidget(self.lbl_status)
-        outer.addLayout(top)
         mid = QHBoxLayout()
         self.file_list = QListWidget(); self.file_list.setFixedWidth(360); mid.addWidget(self.file_list)
         self.scene = QGraphicsScene(self)
         self.view  = PdfView(self); self.view.setScene(self.scene); self.view.setAlignment(Qt.AlignCenter)
         self.view.setFocusPolicy(Qt.StrongFocus); self.view.setFocus(); mid.addWidget(self.view, 1)
         outer.addLayout(mid, 1)
-        self.btn_code.clicked.connect(self._load_code)
-        self.btn_excel.clicked.connect(self._load_excels)
-        self.btn_save.clicked.connect(self._save_pdf)
+        # 버튼 클릭 연결은 _action_btn() 생성 시 이미 처리했다(중복 연결 금지).
         self.file_list.currentRowChanged.connect(self._on_select_file)
         self.view.on_prev = self._prev_page; self.view.on_next = self._next_page
         self.view.on_double_click = self._add_sign
@@ -261,7 +268,6 @@ class ESignPage(QWidget):
             self._signs = []
             self._reset_code_status("⚠ 서명 이미지 없음", ok=False)
             QMessageBox.warning(self, "안내", "서명 이미지 2개를 찾지 못했습니다.")
-            self.lbl_status.setText("승인코드 OK, 서명 없음")
             return
         pm1 = QPixmap(p1).scaled(self.SIGN_W,self.SIGN_H,Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
         pm2 = QPixmap(p2).scaled(self.SIGN_W,self.SIGN_H,Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
@@ -278,7 +284,6 @@ class ESignPage(QWidget):
             f"서명1(대표): {os.path.basename(p1)}  (더블클릭)\n"
             f"서명2: {os.path.basename(p2)}  (Shift+더블클릭)")
 
-        self.lbl_status.setText(f"승인코드 OK / {os.path.basename(p1)}, {os.path.basename(p2)}")
         QMessageBox.information(self, "완료", "승인코드 LOAD 완료\n전자서명 ON")
 
     def _load_excels(self) -> None:

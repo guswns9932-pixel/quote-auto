@@ -122,10 +122,9 @@ def _launch_content_searcher(parent: Optional[QWidget] = None) -> None:
 
 
 # ──────────────────────────────────────────────
-# 업데이트 안내 — 굵직한 변경사항만, 최초 1회
+# 업데이트 안내 — 굵직한 변경사항만, 실행할 때마다
 # ──────────────────────────────────────────────
-# id 는 날짜(ISO) 접두라 문자열 비교로 시간순 정렬된다. 마지막으로 본 id
-# 보다 뒤에 있는 항목만 다음 실행 때 안내하고, 자잘한 버그 수정·성능
+# id 앞 10자(YYYY-MM-DD)를 날짜로 그대로 쓴다. 자잘한 버그 수정·성능
 # 개선·내부 리팩터링은 이 목록에 올리지 않는다 — 사용자가 체감할 만한
 # 기능 추가/변경만 적는다.
 WHATS_NEW = [
@@ -157,6 +156,11 @@ WHATS_NEW = [
 ]
 
 
+def _entry_date(entry: dict) -> str:
+    """id 앞 10자를 날짜(YYYY-MM-DD)로 뽑아낸다."""
+    return entry["id"][:10]
+
+
 class _WhatsNewDialog(QDialog):
     """굵직한 업데이트 안내 — 창 어디를 클릭하든(또는 X) 바로 닫힌다."""
 
@@ -166,17 +170,23 @@ class _WhatsNewDialog(QDialog):
         self.setFixedWidth(420)
         self.setWindowModality(Qt.ApplicationModal)
 
+        # 최신순(내림차순) 정렬 — 방금 추가된 기능이 맨 위에 보이게
+        entries = sorted(entries, key=_entry_date, reverse=True)
+        latest_date = _entry_date(entries[0]) if entries else ""
+
         v = QVBoxLayout(self)
         v.setContentsMargins(24, 20, 24, 16)
         v.setSpacing(14)
 
-        head = QLabel("새로워진 점")
+        head = QLabel(f"새로워진 점  <span style='color:#888; font-weight:normal; "
+                      f"font-size:11px;'>(최근 업데이트: {latest_date})</span>")
+        head.setTextFormat(Qt.RichText)
         hf = head.font(); hf.setPointSize(13); hf.setBold(True); head.setFont(hf)
         v.addWidget(head)
 
         for e in entries:
             item = QLabel(
-                f"<b>• {e['title']}</b><br>"
+                f"<b>• [{_entry_date(e)}] {e['title']}</b><br>"
                 f"<span style='color:#555;'>{e['desc']}</span>"
             )
             item.setTextFormat(Qt.RichText)
@@ -203,18 +213,14 @@ class _WhatsNewDialog(QDialog):
         return super().eventFilter(obj, event)
 
 
-def _maybe_show_whats_new(parent: QWidget) -> None:
-    """새로 추가된 업데이트가 있을 때만 안내하고, 본 것으로 기록한다."""
-    last_seen = app_settings.get_str(app_settings.Key.LAST_SEEN_UPDATE)
-    new_entries = [e for e in WHATS_NEW if e["id"] > last_seen]
-    if not new_entries:
+def _show_whats_new(parent: QWidget) -> None:
+    """굵직한 업데이트 안내. 실행할 때마다 전체 목록을 보여준다."""
+    if not WHATS_NEW:
         return
-    try:
-        _WhatsNewDialog(new_entries, parent).exec()
-    finally:
-        # 표시가 실패했더라도 같은 항목으로 다음 실행마다 막히지 않도록 기록한다.
-        latest_id = max(e["id"] for e in WHATS_NEW)
-        app_settings.set_str(app_settings.Key.LAST_SEEN_UPDATE, latest_id)
+    _WhatsNewDialog(WHATS_NEW, parent).exec()
+    # 가장 최근에 본 업데이트 일자를 기록(참고용 — 노출 여부와는 무관).
+    latest_id = max(e["id"] for e in WHATS_NEW)
+    app_settings.set_str(app_settings.Key.LAST_SEEN_UPDATE, latest_id)
 
 
 # ──────────────────────────────────────────────
@@ -410,7 +416,7 @@ def main() -> None:
     window = MainWindow()
     splash.finish(window)
     window.show()
-    _maybe_show_whats_new(window)
+    _show_whats_new(window)
 
     if _standalone:
         sys.exit(app.exec())

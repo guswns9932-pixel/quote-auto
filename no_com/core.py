@@ -211,3 +211,8 @@ class QuoteState:
     last_output_dir : Optional[str] = None
     investor_name   : str            = "채승철"
     warranty_years  : int            = 2
+
+    # 국내 견적서 하드코딩 옵션 — 값이 있을 때만(0/빈 문자열이면 미기입) 셀에 반영된다.
+    equip_qty   : int = 0    # 사양서!A43
+    actual_line : str = ""   # 현업 사인용 사양서!B6
+    exh_size    : int = 0    # 입고검수확인서!D27

@@ -633,6 +633,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         )
         self.state.warranty_years = app_settings.get_int(
             app_settings.Key.WARRANTY_YEARS, self.state.warranty_years)
+        self.state.equip_qty = app_settings.get_int(
+            app_settings.Key.EQUIP_QTY, self.state.equip_qty)
+        self.state.actual_line = (
+            app_settings.get_str(app_settings.Key.ACTUAL_LINE) or self.state.actual_line)
+        self.state.exh_size = app_settings.get_int(
+            app_settings.Key.EXH_SIZE, self.state.exh_size)
         self.state.last_output_dir = (
             app_settings.get_dir(app_settings.Key.OUTPUT_DIR) or None)
         self._refresh_options_display()
@@ -865,8 +871,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _build_options_panel(self) -> QFrame:
         """
         2단 구조: 위 칸(항목/조작) 아래 칸(현재 상태 표기).
-        Credit | 보증기간 | 투자자 | 견적서 타입 4개 항목을 열로 나란히 배치해
-        조작과 그 결과가 한눈에 짝지어 보이도록 한다.
+        Credit | 보증기간 | 투자자 | 견적서 타입 | 설비수량 | 실반입라인 | Exh Size
+        7개 항목을 열로 나란히 배치해 조작과 그 결과가 한눈에 짝지어 보이도록 한다.
         """
         frame = labeled_frame("옵션", min_h=60)
         frame.setMaximumHeight(168); frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -914,15 +920,75 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         qtype_row.addStretch(1)
         qtype_host = QWidget(); qtype_host.setLayout(qtype_row)
         row.addLayout(_col(lbl_qtype_hdr, qtype_host), 1)
+        row.addWidget(self._vline())
+
+        # ── 설비수량 (국내 사양서!A43) ───────────
+        self.btn_equip_qty = QPushButton("설비수량"); self.btn_equip_qty.setMinimumHeight(30)
+        self.btn_equip_qty.clicked.connect(self._change_equip_qty)
+        tint_button(self.btn_equip_qty, "#FFE0B2")   # 연주황
+        self.lbl_equip_qty_disp = info_label(""); self.lbl_equip_qty_disp.setAlignment(Qt.AlignCenter)
+        row.addLayout(_col(self.btn_equip_qty, self.lbl_equip_qty_disp), 1)
+        row.addWidget(self._vline())
+
+        # ── 실반입라인 (국내 현업 사인용 사양서!B6) ──
+        self.btn_actual_line = QPushButton("실반입라인"); self.btn_actual_line.setMinimumHeight(30)
+        self.btn_actual_line.clicked.connect(self._change_actual_line)
+        tint_button(self.btn_actual_line, "#D1C4E9")   # 연보라
+        self.lbl_actual_line_disp = info_label(""); self.lbl_actual_line_disp.setAlignment(Qt.AlignCenter)
+        row.addLayout(_col(self.btn_actual_line, self.lbl_actual_line_disp), 1)
+        row.addWidget(self._vline())
+
+        # ── Exh Size (국내 입고검수확인서!D27) ───
+        self.btn_exh_size = QPushButton("Exh Size"); self.btn_exh_size.setMinimumHeight(30)
+        self.btn_exh_size.clicked.connect(self._change_exh_size)
+        tint_button(self.btn_exh_size, "#B2DFDB")   # 연청록
+        self.lbl_exh_size_disp = info_label(""); self.lbl_exh_size_disp.setAlignment(Qt.AlignCenter)
+        row.addLayout(_col(self.btn_exh_size, self.lbl_exh_size_disp), 1)
 
         frame.layout().addLayout(row)
         self._refresh_options_display()
         return frame
 
+    def _change_equip_qty(self) -> None:
+        n, ok = QInputDialog.getInt(
+            self, "설비수량 변경", "설비수량:",
+            self.state.equip_qty, 0, 999999,
+        )
+        if ok:
+            self.state.equip_qty = n
+            app_settings.set_int(app_settings.Key.EQUIP_QTY, n)
+            self._log(f"설비수량: {n}")
+            self._refresh_options_display()
+
+    def _change_actual_line(self) -> None:
+        text, ok = QInputDialog.getText(
+            self, "실반입라인 변경", "실반입라인:",
+            text=self.state.actual_line,
+        )
+        if ok:
+            self.state.actual_line = text.strip()
+            app_settings.set_str(app_settings.Key.ACTUAL_LINE, self.state.actual_line)
+            self._log(f"실반입라인: {self.state.actual_line or '-'}")
+            self._refresh_options_display()
+
+    def _change_exh_size(self) -> None:
+        n, ok = QInputDialog.getInt(
+            self, "Exh Size 변경", "Exh Size:",
+            self.state.exh_size, 0, 999999,
+        )
+        if ok:
+            self.state.exh_size = n
+            app_settings.set_int(app_settings.Key.EXH_SIZE, n)
+            self._log(f"Exh Size: {n}")
+            self._refresh_options_display()
+
     def _refresh_options_display(self) -> None:
         """옵션 패널 2번째 줄(현재 상태 표기)을 state 값에 맞춰 갱신한다."""
         self.lbl_warranty_disp.setText(f"{self.state.warranty_years} Year after delivery")
         self.lbl_investor_disp.setText(self.state.investor_name or "-")
+        self.lbl_equip_qty_disp.setText(str(self.state.equip_qty) if self.state.equip_qty else "-")
+        self.lbl_actual_line_disp.setText(self.state.actual_line or "-")
+        self.lbl_exh_size_disp.setText(str(self.state.exh_size) if self.state.exh_size else "-")
 
         applied = bool(self.state.pump_credit or self.state.rack_credit)
         if applied:

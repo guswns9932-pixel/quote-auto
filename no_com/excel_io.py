@@ -678,6 +678,7 @@ def _fill_domestic(state: QuoteState,
 
     ws_spec = wb[SheetName.SPEC]
     ws_sign = wb[SheetName.SIGN_SPEC]
+    ws_incoming = wb[SheetName.INCOMING]
 
     # ② 의뢰파일 행 → 견적의뢰복사본 시트 복사
     _write_req_row_openpyxl(wb, state, rd, req_ws_cache)
@@ -685,6 +686,15 @@ def _fill_domestic(state: QuoteState,
     # ③ 투자자명
     investor = s(state.investor_name) or "채승철"
     ws_spec["B4"] = f"{investor} 님 / 설비구매그룹"
+
+    # ③-1 옵션에서 지정한 설비수량/실반입라인/Exh Size — 값이 있을 때만 기입.
+    #     0/빈 문자열(=옵션 미설정)이면 템플릿 원본 셀을 건드리지 않는다.
+    if state.equip_qty:
+        ws_spec["A43"] = int(state.equip_qty)
+    if state.actual_line:
+        ws_sign["B6"] = state.actual_line
+    if state.exh_size:
+        ws_incoming["D27"] = int(state.exh_size)
 
     rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
     credits    = [r for r in items if r["role"] == "CREDIT"]

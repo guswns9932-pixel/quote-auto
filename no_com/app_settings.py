@@ -120,3 +120,6 @@ class Key:
     WARRANTY_YEARS  = "quote/warranty_years"
     AUTOLOAD_TEMPLATE = "quote/autoload_template"
     LAST_SEEN_UPDATE  = "app/last_seen_update"
+    EQUIP_QTY         = "quote/equip_qty"
+    ACTUAL_LINE       = "quote/actual_line"
+    EXH_SIZE          = "quote/exh_size"

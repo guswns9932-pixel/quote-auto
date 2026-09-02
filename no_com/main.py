@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import sys
 import threading
 import traceback
@@ -72,6 +73,52 @@ def _setup_exception_hook() -> None:
 
 
 logger = logging.getLogger("QuoteApp")
+
+
+# ──────────────────────────────────────────────
+# 키워드 검색기 (Tkinter, 별도 프로세스)
+# ──────────────────────────────────────────────
+# Tk 와 Qt 는 각자 자기 스레드에서 자기 이벤트 루프를 독점하려 해서 한 프로세스
+# 안에 공존시킬 수 없다. 그래서 이 앱 자신을 --content-searcher 인자로 다시
+# 실행해 별도 프로세스에서 Tk 만 띄운다(onedir 빌드에서도 sys.executable 이
+# 이 exe 자신이므로 그대로 재실행하면 된다).
+_CONTENT_SEARCHER_FLAG = "--content-searcher"
+
+
+def _setup_exception_hook_tk() -> None:
+    """Tk 전용 실행 경로 — QApplication 이 없으므로 QMessageBox 대신 tkinter로."""
+    def _hook(exc_type, exc_value, exc_tb):
+        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logging.getLogger("QuoteApp").critical("키워드 검색기 치명적 오류:\n%s", msg)
+        try:
+            import tkinter.messagebox as mb
+            mb.showerror("치명적 오류", f"예상치 못한 오류가 발생했습니다:\n\n{exc_value}")
+        except Exception:
+            pass
+    sys.excepthook = _hook
+
+
+def _run_content_searcher() -> None:
+    """키워드 검색기(Tkinter) 실행. main() 이 QApplication 을 만들기 전에만 호출한다."""
+    _setup_logging()
+    _setup_exception_hook_tk()
+    logger.info("키워드 검색기 시작")
+    from content_search.gui import ContentSearchApp
+    app = ContentSearchApp()
+    app.mainloop()
+
+
+def _launch_content_searcher(parent: Optional[QWidget] = None) -> None:
+    """런처 버튼에서 호출 — 이 앱을 --content-searcher 로 재실행한다."""
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, _CONTENT_SEARCHER_FLAG]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), _CONTENT_SEARCHER_FLAG]
+        subprocess.Popen(cmd)
+    except Exception as e:
+        logger.error("키워드 검색기 실행 실패", exc_info=True)
+        QMessageBox.critical(parent, "키워드 검색기 오류", f"실행할 수 없습니다.\n{e}")
 
 
 # ──────────────────────────────────────────────
@@ -173,7 +220,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("견적/전자서명 통합 시스템")
-        self.setFixedSize(340, 210)
+        self.setFixedSize(340, 280)
         app_settings.restore_geometry("MainWindow", self)
 
         self._quote_win: Optional[_PageWindow] = None
@@ -185,10 +232,12 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(30, 30, 30, 30)
         v.setSpacing(18)
 
-        btn_quote = QPushButton("견적서작성")
-        btn_esign = QPushButton("전자서명")
+        btn_quote  = QPushButton("견적서작성")
+        btn_esign  = QPushButton("전자서명")
+        btn_search = QPushButton("키워드 검색기")
 
-        for btn, color in [(btn_quote, "#BBDEFB"), (btn_esign, "#C8E6C9")]:
+        for btn, color in [(btn_quote, "#BBDEFB"), (btn_esign, "#C8E6C9"),
+                            (btn_search, "#FFE0B2")]:
             btn.setMinimumHeight(60)
             f = btn.font(); f.setPointSize(14); f.setBold(True); btn.setFont(f)
             tint_button(btn, color)
@@ -198,6 +247,7 @@ class MainWindow(QMainWindow):
             lambda: self._open_page("견적서작성", "pages", "QuoteBuilderPage", "_quote_win"))
         btn_esign.clicked.connect(
             lambda: self._open_page("전자서명", "pages", "ESignPage", "_esign_win"))
+        btn_search.clicked.connect(lambda: _launch_content_searcher(self))
 
     def _open_page(self, title: str, mod: str, cls: str, attr: str) -> None:
         win: Optional[_PageWindow] = getattr(self, attr)
@@ -221,6 +271,12 @@ class MainWindow(QMainWindow):
 # 진입점
 # ──────────────────────────────────────────────
 def main() -> None:
+    # --content-searcher: QApplication 생성 전에 분기해야 한다.
+    # Tk 와 Qt 이벤트 루프는 한 프로세스 안에서 공존할 수 없다.
+    if _CONTENT_SEARCHER_FLAG in sys.argv:
+        _run_content_searcher()
+        return
+
     _setup_logging()
     _setup_exception_hook()
     logger.info("앱 시작")

@@ -126,6 +126,17 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "core",
                 "widgets",
                 "approval_auto",
+                # 키워드 검색기(Tkinter, 별도 프로세스) — main.py 가
+                # "from content_search.gui import ..." 로 함수 내부에서 임포트
+                "content_search",
+                "content_search.gui",
+                "content_search.parsers",
+                "content_search.scanner",
+                "content_search.text_utils",
+                "tkinter",
+                "tkinter.filedialog",
+                "tkinter.messagebox",
+                "tkinter.ttk",
                 "PySide6.QtCore",
                 "PySide6.QtGui",
                 "PySide6.QtWidgets",
@@ -172,8 +183,6 @@ def _make_spec(app_name: str, icon: str) -> str:
             hookspath=[],
             runtime_hooks=[],
             excludes=[
-                # UI 툴킷
-                "tkinter",
                 # 과학 계산 / 데이터 분석 (앱 미사용)
                 "matplotlib", "numpy", "scipy",
                 # pandas: 앱 미사용. collect_all("openpyxl")이 openpyxl.utils.dataframe을

@@ -166,7 +166,7 @@ class ESignPage(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self); outer.setContentsMargins(14,14,14,14); outer.setSpacing(10)
 
-        # 1행: 버튼 — 작업 순서대로(승인코드 준비 → 문서 로드 → 저장)
+        # 1행: 버튼 — 작업 순서대로(서명 준비 → 문서 로드 → 저장)
         top = QHBoxLayout()
         self.btn_code   = self._action_btn("서명 Load",           self._load_code)
         self.btn_excel  = self._action_btn("원본 견적(엑셀) Load", self._load_excels)
@@ -182,7 +182,7 @@ class ESignPage(QWidget):
         top.addWidget(self.lbl_status)
         outer.addLayout(top)
 
-        # 2행: 승인코드 상태 + 서명 미리보기 — 버튼 줄과 높이가 안 맞아
+        # 2행: 서명 로드 상태 + 서명 미리보기 — 버튼 줄과 높이가 안 맞아
         # (미리보기가 실제 서명 크기 170x40) 별도 줄로 분리했다.
         code_row = QHBoxLayout()
         self.code_status_frame = QFrame()
@@ -191,7 +191,7 @@ class ESignPage(QWidget):
         csf = QHBoxLayout(self.code_status_frame)
         csf.setContentsMargins(8, 6, 8, 6)
         csf.setSpacing(8)
-        self.lbl_code_state = QLabel("승인코드 미로드")
+        self.lbl_code_state = QLabel("서명 미로드")
         self.lbl_sign_preview = QLabel()
         self.lbl_sign_preview.setFixedSize(self.SIGN_W, self.SIGN_H)
         self.lbl_sign_preview.setAlignment(Qt.AlignCenter)
@@ -217,7 +217,7 @@ class ESignPage(QWidget):
         self.view.on_double_click = self._add_sign
 
     def _set_code_status_style(self, ok: Optional[bool]) -> None:
-        """승인코드 상태 프레임 배경색. ok=None(미로드/회색) True(성공/연초록) False(실패/연빨강)."""
+        """서명 로드 상태 프레임 배경색. ok=None(미로드/회색) True(성공/연초록) False(실패/연빨강)."""
         color = {"None": "#F5F5F5", "True": "#E8F5E9", "False": "#FFEBEE"}[str(ok)]
         border = {"None": "#DDD", "True": "#A5D6A7", "False": "#EF9A9A"}[str(ok)]
         self.code_status_frame.setStyleSheet(
@@ -242,7 +242,7 @@ class ESignPage(QWidget):
             with open(path, encoding="utf-8") as f:
                 self._code = f.read().strip()
         except Exception as e:
-            self._reset_code_status("⚠ 승인코드 읽기 실패", ok=False)
+            self._reset_code_status("⚠ 서명 읽기 실패", ok=False)
             QMessageBox.critical(self, "오류", str(e))
             return
         # 코드를 새로 불러오면 이전 세션에서 기억해둔 값을 지운다 —
@@ -277,7 +277,7 @@ class ESignPage(QWidget):
         self._signs = [pm1, pm2]
 
         # 서명 Load 버튼 옆에 상태 + 실제 찍힐 서명 이미지를 바로 보여준다.
-        self.lbl_code_state.setText("✓ 승인코드 로드됨")
+        self.lbl_code_state.setText("✓ 서명 로드됨")
         self._set_code_status_style(ok=True)
         self.lbl_sign_preview.setPixmap(self._build_sign_preview_pixmap(pm1))
         self.lbl_sign_preview.setToolTip(

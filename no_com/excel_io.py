@@ -1356,7 +1356,7 @@ def export_cover_data_sheet(*args, **kwargs) -> str:
 class ExcelCOM:
     """
     Excel COM 세션 컨텍스트 매니저.
-    excel_to_merged_pdf 에서만 사용한다.
+    _ExcelLoaderThread(전자서명 시트 캡처)가 공유 Application 객체로 사용한다.
     """
 
     def __init__(self) -> None:
@@ -1370,6 +1370,19 @@ class ExcelCOM:
             self._excel = win32.DispatchEx("Excel.Application")
             self._excel.Visible = False
             self._excel.DisplayAlerts = False
+            # 자동화 스위치: 이 세션에서 여는 워크북(이 앱이 만든 파일)은
+            # 전부 fullCalcOnLoad=True 가 저장되어 있어, 스위치 없이 열면
+            # Workbooks.Open 마다 전체 재계산이 돈다 — 파일 수만큼 반복되는
+            # 비용이라 가장 이득이 큰 최적화다. 세션 종료 시 프로세스 자체를
+            # Quit() 하므로 복원할 필요는 없다.
+            try:
+                self._excel.Calculation = -4135     # xlCalculationManual
+                self._excel.EnableEvents = False
+                self._excel.ScreenUpdating = False
+            except Exception:
+                # 일부 Excel 버전/보안 정책에서 속성 설정이 막힐 수 있다.
+                # 최적화일 뿐 필수 기능이 아니므로 실패해도 세션은 계속한다.
+                logger.warning("Excel 자동화 스위치 설정 실패 — 계속 진행", exc_info=True)
         except BaseException:
             # DispatchEx 실패(Excel 미설치·손상) 시 __exit__ 가 호출되지 않으므로
             # 여기서 아파트먼트를 되돌리지 않으면 호출할 때마다 하나씩 누수된다.
@@ -1495,12 +1508,16 @@ def _print_area_range(ws):
 
 
 def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
-                                  xl_app=None) -> List[str]:
+                                  xl_app=None, progress_cb=None,
+                                  should_cancel=None) -> List[str]:
     """
     xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
     ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
 
-    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
+    xl_app       : 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
+    progress_cb  : (완료 시트수, 전체 시트수, 시트명) 콜백. 시트 캡처가 끝날 때마다 호출.
+    should_cancel: 인자 없이 bool 반환하는 콜백. True 면 남은 시트를 건너뛰고 지금까지
+                   캡처한 것만 반환한다 (파일 단위보다 촘촘한 취소 체크).
     반환: 저장된 PNG 경로 리스트 (순서 = ESIGN_TARGET 순서)
     """
     try:
@@ -1514,40 +1531,47 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
     def _process(app) -> List[str]:
         wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
         try:
-            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처
-            target_names = []
+            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처.
+            # 이름 조회 + Visible 확인을 한 번만 하고 ws 프록시를 그대로 들고 있는다
+            # (기존엔 이 목록을 만들 때 한 번, 캡처 루프에서 또 한 번 조회했다).
+            target_sheets = []   # [(name, ws), ...]
             for name in SheetName.ESIGN_TARGET:
                 try:
                     ws = wb.Worksheets(name)
                     if int(ws.Visible) == -1:
-                        target_names.append(name)
+                        target_sheets.append((name, ws))
                 except Exception:
                     continue
-            if not target_names:
+            if not target_sheets:
                 for ws in wb.Worksheets:
                     try:
                         if int(ws.Visible) == -1:
-                            target_names.append(ws.Name)
+                            target_sheets.append((ws.Name, ws))
                     except Exception:
                         continue
 
-            for idx, name in enumerate(target_names):
+            # 페이지 나누기 미리보기 → 기본 보기 전환은 창(Window) 속성이라
+            # 워크북당 한 번이면 된다 — 이전엔 시트마다 반복 설정하고 있었다.
+            if target_sheets:
                 try:
-                    ws = wb.Worksheets(name)
+                    target_sheets[0][1].Activate()
+                    app.ActiveWindow.View = 1  # xlNormalView
                 except Exception:
-                    continue
-                if int(ws.Visible) != -1:
-                    continue
+                    pass
+
+            total = len(target_sheets)
+            for idx, (name, ws) in enumerate(target_sheets):
+                if should_cancel is not None:
+                    try:
+                        if should_cancel():
+                            break
+                    except Exception:
+                        pass
                 safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
                 png_path = os.path.join(
                     tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
                     ws.Activate()
-                    # 페이지 나누기 미리보기 → 기본(기본 보기)으로 전환 후 캡처
-                    try:
-                        app.ActiveWindow.View = 1  # xlNormalView
-                    except Exception:
-                        pass
                     rng = _print_area_range(ws)
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()
@@ -1566,12 +1590,19 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                                 os.remove(_dst)
                             except OSError:
                                 _dst = unique_path(_dst)
-                        img.save(_dst, "PNG")
+                        # compress_level=1: 잠깐 쓰고 지울 임시 파일이라 압축률보다
+                        # 저장/전송 속도가 낫다(기본값 6 대비 체감 저하 없음).
+                        img.save(_dst, "PNG", compress_level=1)
                         png_paths.append(_dst)
                     else:
                         logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
                 except Exception as e:
                     logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
+                if progress_cb is not None:
+                    try:
+                        progress_cb(idx + 1, total, name)
+                    except Exception:
+                        pass
         finally:
             _clear_clipboard()   # 워크북 닫기 전 최종 클립보드 해제
             try:

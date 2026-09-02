@@ -183,7 +183,7 @@ def get_checkbox_from_cell(widget: Optional[QWidget]) -> Optional[QCheckBox]:
 # ══════════════════════════════════════════════
 
 class PasswordDialog(QDialog):
-    def __init__(self, parent, expected: str) -> None:
+    def __init__(self, parent, expected: str, prefill: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("패스워드")
         self._expected = expected or ""
@@ -193,6 +193,8 @@ class PasswordDialog(QDialog):
         v.addWidget(QLabel("패스워드를 입력하세요"))
         self._edit = QLineEdit()
         self._edit.setEchoMode(QLineEdit.Password)
+        if prefill:
+            self._edit.setText(prefill)
         v.addWidget(self._edit)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -201,6 +203,10 @@ class PasswordDialog(QDialog):
         v.addWidget(bb)
 
         QTimer.singleShot(0, self._edit.setFocus)
+        if prefill:
+            # 값이 채워진 채로 뜨되, 바로 지우고 다시 입력하기 쉽게 전체 선택.
+            # Enter 한 번(또는 OK 클릭)으로 바로 확인되는 것도 그대로 유지된다.
+            QTimer.singleShot(0, self._edit.selectAll)
 
     def _check(self):
         if self._edit.text() == self._expected:

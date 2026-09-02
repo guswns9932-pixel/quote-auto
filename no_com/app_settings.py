@@ -119,3 +119,4 @@ class Key:
     INVESTOR_NAME   = "quote/investor_name"
     WARRANTY_YEARS  = "quote/warranty_years"
     AUTOLOAD_TEMPLATE = "quote/autoload_template"
+    LAST_SEEN_UPDATE  = "app/last_seen_update"

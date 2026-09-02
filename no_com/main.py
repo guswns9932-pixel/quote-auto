@@ -14,10 +14,10 @@ import threading
 import traceback
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import Qt, QEvent, QRect
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QMainWindow, QMessageBox,
+    QApplication, QDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPushButton, QSizePolicy, QSplashScreen, QVBoxLayout, QWidget,
 )
 
@@ -122,6 +122,102 @@ def _launch_content_searcher(parent: Optional[QWidget] = None) -> None:
 
 
 # ──────────────────────────────────────────────
+# 업데이트 안내 — 굵직한 변경사항만, 최초 1회
+# ──────────────────────────────────────────────
+# id 는 날짜(ISO) 접두라 문자열 비교로 시간순 정렬된다. 마지막으로 본 id
+# 보다 뒤에 있는 항목만 다음 실행 때 안내하고, 자잘한 버그 수정·성능
+# 개선·내부 리팩터링은 이 목록에 올리지 않는다 — 사용자가 체감할 만한
+# 기능 추가/변경만 적는다.
+WHATS_NEW = [
+    {
+        "id": "2026-08-05-window-split",
+        "title": "창 분리 + 의뢰파일DATA 컬럼 확장",
+        "desc": "견적서작성 창을 독립 창으로 분리하고 Rack/Maker/설비/5D 컬럼을 추가했습니다.",
+    },
+    {
+        "id": "2026-08-26-submit-excel",
+        "title": "제출용 엑셀 생성 기능 추가",
+        "desc": "갑지에서 갑지DATA 시트만 추출해 제출용 파일을 바로 만들 수 있습니다.",
+    },
+    {
+        "id": "2026-09-01-autoload-template",
+        "title": "통합양식 자동 로드",
+        "desc": "마지막에 쓴 통합양식·투자자명·보증기간·출력 폴더를 다음 실행 때 자동으로 불러옵니다.",
+    },
+    {
+        "id": "2026-09-01-credit-fix",
+        "title": "Credit 계산 정확도 개선",
+        "desc": "Pump/Rack Credit이 사양서·갑지 금액에 정확히 반영되도록 계산 방식을 바로잡았습니다.",
+    },
+    {
+        "id": "2026-09-02-keyword-search",
+        "title": "키워드 검색기 앱 추가",
+        "desc": "런처에서 폴더 안 파일명·내용을 검색하는 키워드 검색기를 바로 실행할 수 있습니다.",
+    },
+]
+
+
+class _WhatsNewDialog(QDialog):
+    """굵직한 업데이트 안내 — 창 어디를 클릭하든(또는 X) 바로 닫힌다."""
+
+    def __init__(self, entries: list, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("업데이트 소식")
+        self.setFixedWidth(420)
+        self.setWindowModality(Qt.ApplicationModal)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 20, 24, 16)
+        v.setSpacing(14)
+
+        head = QLabel("새로워진 점")
+        hf = head.font(); hf.setPointSize(13); hf.setBold(True); head.setFont(hf)
+        v.addWidget(head)
+
+        for e in entries:
+            item = QLabel(
+                f"<b>• {e['title']}</b><br>"
+                f"<span style='color:#555;'>{e['desc']}</span>"
+            )
+            item.setTextFormat(Qt.RichText)
+            item.setWordWrap(True)
+            v.addWidget(item)
+
+        hint = QLabel("클릭하면 닫힙니다")
+        hint.setStyleSheet("color: #999; font-size: 10px;")
+        hint.setAlignment(Qt.AlignRight)
+        v.addWidget(hint)
+
+        # 배경이든 라벨 위든 어디를 클릭해도 닫히게 한다.
+        # Qt 마우스 이벤트는 부모로 자동 전파되지 않으므로, 다이얼로그와
+        # 모든 자식 위젯에 이벤트 필터를 걸어 직접 가로챈다.
+        # (창의 X 버튼은 창 관리자 기본 동작으로 이미 닫힘 — 별도 처리 불필요)
+        self.installEventFilter(self)
+        for w in self.findChildren(QWidget):
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.MouseButtonPress:
+            self.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+
+def _maybe_show_whats_new(parent: QWidget) -> None:
+    """새로 추가된 업데이트가 있을 때만 안내하고, 본 것으로 기록한다."""
+    last_seen = app_settings.get_str(app_settings.Key.LAST_SEEN_UPDATE)
+    new_entries = [e for e in WHATS_NEW if e["id"] > last_seen]
+    if not new_entries:
+        return
+    try:
+        _WhatsNewDialog(new_entries, parent).exec()
+    finally:
+        # 표시가 실패했더라도 같은 항목으로 다음 실행마다 막히지 않도록 기록한다.
+        latest_id = max(e["id"] for e in WHATS_NEW)
+        app_settings.set_str(app_settings.Key.LAST_SEEN_UPDATE, latest_id)
+
+
+# ──────────────────────────────────────────────
 # 스플래시 스크린
 # ──────────────────────────────────────────────
 def _make_splash_pix() -> QPixmap:
@@ -133,7 +229,7 @@ def _make_splash_pix() -> QPixmap:
     f = QFont("Malgun Gothic", 20)
     f.setBold(True)
     p.setFont(f)
-    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, "견적/전자서명 통합 시스템")
+    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, "업무자동화 통합 시스템")
 
     p.setPen(QColor("#BBDEFB"))
     f2 = QFont("Malgun Gothic", 11)
@@ -153,7 +249,7 @@ class _PageWindow(QMainWindow):
     def __init__(self, title: str, mod_name: str, cls_name: str,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.Window)
-        self.setWindowTitle(f"견적/전자서명 통합 시스템 — {title}")
+        self.setWindowTitle(f"업무자동화 통합 시스템 — {title}")
         self._mod_name = mod_name
         self._cls_name = cls_name
 
@@ -219,7 +315,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("견적/전자서명 통합 시스템")
+        self.setWindowTitle("업무자동화 통합 시스템")
         self.setFixedSize(340, 280)
         app_settings.restore_geometry("MainWindow", self)
 
@@ -314,6 +410,7 @@ def main() -> None:
     window = MainWindow()
     splash.finish(window)
     window.show()
+    _maybe_show_whats_new(window)
 
     if _standalone:
         sys.exit(app.exec())

@@ -168,9 +168,9 @@ class ESignPage(QWidget):
 
         # 1행: 버튼 — 작업 순서대로(승인코드 준비 → 문서 로드 → 저장)
         top = QHBoxLayout()
-        self.btn_code   = self._action_btn("승인코드 LOAD", self._load_code)
-        self.btn_excel  = self._action_btn("엑셀 LOAD",     self._load_excels)
-        self.btn_save   = self._action_btn("PDF 저장",      self._save_pdf)
+        self.btn_code   = self._action_btn("서명 Load",           self._load_code)
+        self.btn_excel  = self._action_btn("원본 견적(엑셀) Load", self._load_excels)
+        self.btn_save   = self._action_btn("제출용 견적(PDF) Print", self._save_pdf)
         tint_button(self.btn_code,  "#DCEDC8")   # 연초록
         tint_button(self.btn_excel, "#B3E5FC")   # 연하늘
         tint_button(self.btn_save,  "#FFE0B2")   # 연주황
@@ -224,7 +224,7 @@ class ESignPage(QWidget):
             f"QFrame {{ background: {color}; border: 1px solid {border}; border-radius: 4px; }}")
 
     def _build_sign_preview_pixmap(self, pm: QPixmap) -> QPixmap:
-        """승인코드 LOAD 옆에 붙일 서명 미리보기 — 대표로 서명1 하나만,
+        """서명 Load 옆에 붙일 서명 미리보기 — 대표로 서명1 하나만,
         실제 문서에 찍히는 크기(SIGN_W x SIGN_H)와 같게 보여준다."""
         return pm.scaled(self.SIGN_W, self.SIGN_H,
                          Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -276,7 +276,7 @@ class ESignPage(QWidget):
             QMessageBox.critical(self,"오류","서명 이미지 로드 실패"); return
         self._signs = [pm1, pm2]
 
-        # 승인코드 LOAD 버튼 옆에 상태 + 실제 찍힐 서명 이미지를 바로 보여준다.
+        # 서명 Load 버튼 옆에 상태 + 실제 찍힐 서명 이미지를 바로 보여준다.
         self.lbl_code_state.setText("✓ 승인코드 로드됨")
         self._set_code_status_style(ok=True)
         self.lbl_sign_preview.setPixmap(self._build_sign_preview_pixmap(pm1))
@@ -284,7 +284,7 @@ class ESignPage(QWidget):
             f"서명1(대표): {os.path.basename(p1)}  (더블클릭)\n"
             f"서명2: {os.path.basename(p2)}  (Shift+더블클릭)")
 
-        QMessageBox.information(self, "완료", "승인코드 LOAD 완료\n전자서명 ON")
+        QMessageBox.information(self, "완료", "서명 Load 완료\n전자서명 ON")
 
     def _load_excels(self) -> None:
         import excel_io
@@ -469,7 +469,7 @@ class ESignPage(QWidget):
 
     def _add_sign(self, scene_pos: QPointF) -> None:
         if not self._signs:
-            QMessageBox.information(self, "안내", "승인코드 LOAD 후 서명 이미지가 필요합니다."); return
+            QMessageBox.information(self, "안내", "서명 Load 후 서명 이미지가 필요합니다."); return
         if not self._cur_pngs: return
         dlg = PasswordDialog(self, self._code, prefill=self._last_password)
         if dlg.exec() != QDialog.Accepted or not dlg.verified: return
@@ -541,8 +541,8 @@ class ESignPage(QWidget):
         # 취소 불가 대기 다이얼로그 — page_common._BgWorker.run_with_progress 와
         # 같은 패턴(cancelButtonText=None). fitz 문서 작성 도중 취소하면 PDF가
         # 반쯤 쓰인 상태로 남는 처리가 새로 필요해져 범위를 늘리므로 지금은 두지 않는다.
-        self._pdf_progress = QProgressDialog("PDF 저장 준비 중…", None, 0, len(plan), self)
-        self._pdf_progress.setWindowTitle("PDF 저장")
+        self._pdf_progress = QProgressDialog("제출용 견적(PDF) 준비 중…", None, 0, len(plan), self)
+        self._pdf_progress.setWindowTitle("제출용 견적(PDF) Print")
         self._pdf_progress.setWindowModality(Qt.WindowModal)
         self._pdf_progress.setMinimumDuration(0)
         self._pdf_progress.setValue(0)
@@ -565,7 +565,7 @@ class ESignPage(QWidget):
         # (_on_load_progress 에서 이미 겪은 것과 같은 패턴 — 재확인 필수).
         if self._pdf_progress is None:
             return
-        self._pdf_progress.setLabelText(f"PDF 저장 중 ({done}/{total})")
+        self._pdf_progress.setLabelText(f"제출용 견적(PDF) 저장 중 ({done}/{total})")
 
     def _on_pdf_done(self, result, out: str) -> None:
         if self._pdf_progress:
@@ -582,7 +582,7 @@ class ESignPage(QWidget):
             return
         self._cleanup_tmp()
         QMessageBox.information(self, "완료", f"저장 완료:\n{out}")
-        self.lbl_status.setText("PDF 저장 완료")
+        self.lbl_status.setText("제출용 견적(PDF) Print 완료")
 
 
 class _PdfBuildThread(QThread):

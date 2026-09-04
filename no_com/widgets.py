@@ -7,9 +7,10 @@ widgets.py
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QPointF
+from PySide6.QtCore import Qt, QTimer, QPointF, QMimeData
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QDrag, QKeySequence, QPixmap, QShortcut,
 )
@@ -17,12 +18,14 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog,
     QDialogButtonBox, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QMessageBox, QMimeData, QPushButton, QScrollBar,
+    QMessageBox, QPushButton, QScrollBar,
     QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget, QFrame,
 )
 
 from core import fmt_krw, s, to_float
+
+logger = logging.getLogger("QuoteApp")
 
 
 # ══════════════════════════════════════════════
@@ -62,6 +65,19 @@ def bold_label(text: str, size: int = 12) -> QLabel:
     f.setBold(True)
     lbl.setFont(f)
     return lbl
+
+
+def tint_button(btn: QPushButton, bg: str) -> None:
+    """버튼에 파스텔 배경색 + hover 어둡게 + disabled 회색 적용."""
+    r = max(0, int(bg[1:3], 16) - 28)
+    g = max(0, int(bg[3:5], 16) - 28)
+    b = max(0, int(bg[5:7], 16) - 28)
+    hover = f"#{r:02X}{g:02X}{b:02X}"
+    btn.setStyleSheet(
+        f"QPushButton {{ background-color: {bg}; border: 1px solid #bbb; border-radius: 4px; padding: 2px 6px; }}"
+        f"QPushButton:hover {{ background-color: {hover}; }}"
+        f"QPushButton:disabled {{ background-color: #E0E0E0; color: #999; }}"
+    )
 
 
 def info_label(text: str) -> QLabel:
@@ -167,7 +183,7 @@ def get_checkbox_from_cell(widget: Optional[QWidget]) -> Optional[QCheckBox]:
 # ══════════════════════════════════════════════
 
 class PasswordDialog(QDialog):
-    def __init__(self, parent, expected: str) -> None:
+    def __init__(self, parent, expected: str, prefill: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("패스워드")
         self._expected = expected or ""
@@ -177,6 +193,8 @@ class PasswordDialog(QDialog):
         v.addWidget(QLabel("패스워드를 입력하세요"))
         self._edit = QLineEdit()
         self._edit.setEchoMode(QLineEdit.Password)
+        if prefill:
+            self._edit.setText(prefill)
         v.addWidget(self._edit)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -185,6 +203,10 @@ class PasswordDialog(QDialog):
         v.addWidget(bb)
 
         QTimer.singleShot(0, self._edit.setFocus)
+        if prefill:
+            # 값이 채워진 채로 뜨되, 바로 지우고 다시 입력하기 쉽게 전체 선택.
+            # Enter 한 번(또는 OK 클릭)으로 바로 확인되는 것도 그대로 유지된다.
+            QTimer.singleShot(0, self._edit.selectAll)
 
     def _check(self):
         if self._edit.text() == self._expected:
@@ -206,9 +228,14 @@ class SignatureItem(QGraphicsPixmapItem):
     드래그 이동 + 우클릭 삭제 지원.
     """
 
-    def __init__(self, pixmap: QPixmap, page_index: int) -> None:
+    def __init__(self, pixmap: QPixmap, page_index: int,
+                 on_delete=None) -> None:
         super().__init__(pixmap)
         self.page_index = page_index
+        # 삭제 시 소유자(ESignPage)의 목록에서도 제거하기 위한 콜백.
+        # 이게 없으면 씬에서만 사라지고 _sign_items 에 남아
+        # 페이지 전환 시 되살아나거나 PDF 에 그대로 찍힌다.
+        self._on_delete = on_delete
         self.setFlags(
             QGraphicsPixmapItem.ItemIsMovable |
             QGraphicsPixmapItem.ItemIsSelectable
@@ -223,6 +250,11 @@ class SignatureItem(QGraphicsPixmapItem):
             scene = self.scene()
             if scene:
                 scene.removeItem(self)
+            if self._on_delete:
+                try:
+                    self._on_delete(self)
+                except Exception:
+                    logger.exception("서명 삭제 콜백 실패")
         event.accept()
 
 

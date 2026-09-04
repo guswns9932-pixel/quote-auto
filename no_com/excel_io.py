@@ -339,8 +339,10 @@ def append_code_map_rows(
 
     template_path 는 여러 견적서가 공유하는 마스터 파일이라 직접 덮어쓴다.
     openpyxl 저장은 머리글/바닥글 그림(VML)을 읽지도 쓰지도 못해 저장 시
-    사라지므로, 저장 전에 만든 백업으로 restore_header_footer_images 를 호출해
-    되살린다 — 이 백업은 복원용인 동시에 만약을 대비한 안전장치이기도 하다.
+    사라지므로, 저장 전에 템플릿과 같은 폴더의 Backup/ 하위에 만든 백업으로
+    restore_header_footer_images 를 호출해 되살린다 — 이 백업은 복원용인 동시에
+    만약을 대비한 안전장치이기도 하다. 저장 자체가 실패하면(파일이 다른
+    프로그램에서 열려 있는 등) 백업을 지우고 예외를 그대로 올린다.
 
     반환: (added, skipped) — 실제로 추가된 (품목,수량) 목록 / 중복이라 건너뛴 목록.
     """
@@ -364,10 +366,10 @@ def append_code_map_rows(
         wb.close()
         return added, skipped
 
+    backup_dir = ensure_dir(os.path.join(os.path.dirname(template_path) or ".", "Backup"))
+    base, ext = os.path.splitext(os.path.basename(template_path))
     backup_path = unique_path(
-        f"{os.path.splitext(template_path)[0]}"
-        f".backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        f"{os.path.splitext(template_path)[1]}"
+        os.path.join(backup_dir, f"{base}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
     )
     shutil.copy2(template_path, backup_path)
 
@@ -381,7 +383,17 @@ def append_code_map_rows(
         ws.cell(row, 5, qty_val)
         row += 1
 
-    wb.save(template_path)
+    try:
+        wb.save(template_path)
+    except Exception:
+        # 저장이 실패하면(권한 없음·다른 프로그램에서 열림 등) 원본은 그대로이므로
+        # 방금 만든 백업도 쓸모가 없다 — 지워서 Backup 폴더에 쌓이지 않게 한다.
+        wb.close()
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
+        raise
     wb.close()
     restore_header_footer_images(backup_path, template_path)
     return added, skipped

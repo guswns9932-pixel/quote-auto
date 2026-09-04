@@ -1297,8 +1297,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             import excel_io
             added, skipped = excel_io.append_code_map_rows(
                 self.state.template_path, process, vendor, code5d, rack_items)
-        except Exception:
-            QMessageBox.critical(self, "5D Object 생성 오류", traceback.format_exc())
+        except Exception as e:
+            logger.error("5D Object 생성 실패", exc_info=e)
+            tb = traceback.format_exc()
+            user_msg, hint = _friendly_error_msg(e)
+            _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
 
         if not added:

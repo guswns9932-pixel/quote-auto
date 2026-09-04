@@ -626,22 +626,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # 설정 복원 / 저장
     # ══════════════════════════════════════════
     def _restore_settings(self) -> None:
-        """이전 실행에서 저장한 설정을 복원한다."""
-        self.state.investor_name = (
-            app_settings.get_str(app_settings.Key.INVESTOR_NAME)
-            or self.state.investor_name
-        )
-        self.state.warranty_years = app_settings.get_int(
-            app_settings.Key.WARRANTY_YEARS, self.state.warranty_years)
-        self.state.equip_qty = app_settings.get_int(
-            app_settings.Key.EQUIP_QTY, self.state.equip_qty)
-        self.state.actual_line = (
-            app_settings.get_str(app_settings.Key.ACTUAL_LINE) or self.state.actual_line)
-        self.state.exh_size = app_settings.get_int(
-            app_settings.Key.EXH_SIZE, self.state.exh_size)
+        """이전 실행에서 저장한 설정을 복원한다.
+
+        옵션(Credit/보증기간/투자자/설비수량/실반입라인/Exh Size)은 통합양식과
+        달리 매 실행마다 초기화 상태로 시작한다 — 의도적으로 복원하지 않는다.
+        """
         self.state.last_output_dir = (
             app_settings.get_dir(app_settings.Key.OUTPUT_DIR) or None)
-        self._refresh_options_display()
 
         # 마지막 통합양식이 그대로 있으면 자동으로 다시 읽는다.
         # (백그라운드 스레드이므로 창 표시를 막지 않는다)
@@ -956,7 +947,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         )
         if ok:
             self.state.equip_qty = n
-            app_settings.set_int(app_settings.Key.EQUIP_QTY, n)
             self._log(f"설비수량: {n}")
             self._refresh_options_display()
 
@@ -967,7 +957,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         )
         if ok:
             self.state.actual_line = text.strip()
-            app_settings.set_str(app_settings.Key.ACTUAL_LINE, self.state.actual_line)
             self._log(f"실반입라인: {self.state.actual_line or '-'}")
             self._refresh_options_display()
 
@@ -978,7 +967,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         )
         if ok:
             self.state.exh_size = n
-            app_settings.set_int(app_settings.Key.EXH_SIZE, n)
             self._log(f"Exh Size: {n}")
             self._refresh_options_display()
 
@@ -1473,8 +1461,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         if dlg.exec() == QDialog.Accepted:
             self.state.warranty_years = spin.value()
-            app_settings.set_int(app_settings.Key.WARRANTY_YEARS,
-                                 self.state.warranty_years)
             self._log(f"보증기간: {self.state.warranty_years} Year after delivery")
             self._refresh_options_display()
 
@@ -1485,8 +1471,6 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         )
         if ok:
             self.state.investor_name = name.strip() or "채승철"
-            app_settings.set_str(app_settings.Key.INVESTOR_NAME,
-                                 self.state.investor_name)
             self._log(f"투자자: {self.state.investor_name}")
             self._refresh_options_display()
 

@@ -325,6 +325,68 @@ def parse_code_map_sheet(ws: Worksheet) -> Dict[Tuple[str, str, str], List[Tuple
     return cmap
 
 
+def append_code_map_rows(
+    template_path: str,
+    process: str,
+    vendor: str,
+    code5d: str,
+    items: List[Tuple[str, float]],
+) -> Tuple[List[Tuple[str, float]], List[Tuple[str, float]]]:
+    """
+    통합양식(마스터 템플릿) 코드매핑 시트에 (공정,설비사,5D,품목,수량) 행을 추가한다.
+    items 중 (공정,설비사,5D,품목,수량)이 완전히 동일한 행이 이미 있으면 그 항목은
+    건너뛴다. 새로 추가할 행이 하나도 없으면(전부 중복) 파일을 저장하지 않는다.
+
+    template_path 는 여러 견적서가 공유하는 마스터 파일이라 직접 덮어쓴다.
+    openpyxl 저장은 머리글/바닥글 그림(VML)을 읽지도 쓰지도 못해 저장 시
+    사라지므로, 저장 전에 만든 백업으로 restore_header_footer_images 를 호출해
+    되살린다 — 이 백업은 복원용인 동시에 만약을 대비한 안전장치이기도 하다.
+
+    반환: (added, skipped) — 실제로 추가된 (품목,수량) 목록 / 중복이라 건너뛴 목록.
+    """
+    wb = load_workbook(template_path)
+    ws = wb[SheetName.CODE_MAP]
+    existing = parse_code_map_sheet(ws)
+    key = (process, vendor, code5d)
+    seen = set(existing.get(key, []))
+
+    added: List[Tuple[str, float]] = []
+    skipped: List[Tuple[str, float]] = []
+    for spec, qty in items:
+        pair = (spec, qty)
+        if pair in seen:
+            skipped.append(pair)
+            continue
+        added.append(pair)
+        seen.add(pair)   # 이번 호출 안에서의 자체 중복도 방지
+
+    if not added:
+        wb.close()
+        return added, skipped
+
+    backup_path = unique_path(
+        f"{os.path.splitext(template_path)[0]}"
+        f".backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{os.path.splitext(template_path)[1]}"
+    )
+    shutil.copy2(template_path, backup_path)
+
+    row = ws.max_row + 1
+    for spec, qty in added:
+        qty_val = int(qty) if float(qty).is_integer() else qty
+        ws.cell(row, 1, process)
+        ws.cell(row, 2, vendor)
+        ws.cell(row, 3, code5d)
+        ws.cell(row, 4, spec)
+        ws.cell(row, 5, qty_val)
+        row += 1
+
+    wb.save(template_path)
+    wb.close()
+    restore_header_footer_images(backup_path, template_path)
+    return added, skipped
+
+
 def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     의뢰파일 파싱.

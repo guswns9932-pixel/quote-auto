@@ -742,12 +742,16 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.ed_code = QLineEdit(); self.ed_code.setPlaceholderText("5D")
         self.btn_apply_map = QPushButton("코드매핑 적용 → STEP5(RACK)"); self.btn_apply_map.setEnabled(False)
         tint_button(self.btn_apply_map, "#FFE0B2")  # 연주황
-        row2.addWidget(QLabel("5D")); row2.addWidget(self.ed_code, 1); row2.addWidget(self.btn_apply_map)
+        self.btn_gen_5d_obj = QPushButton("5D Object 생성")
+        tint_button(self.btn_gen_5d_obj, "#C5CAE9")  # 연남색
+        row2.addWidget(QLabel("5D")); row2.addWidget(self.ed_code, 1)
+        row2.addWidget(self.btn_apply_map); row2.addWidget(self.btn_gen_5d_obj)
         v.addLayout(row1); v.addLayout(row2)
         self.cb_process.currentTextChanged.connect(self._on_step3_changed)
         self.cb_vendor.currentTextChanged.connect(self._on_step3_changed)
         self.ed_code.textChanged.connect(self._on_step3_changed)
         self.btn_apply_map.clicked.connect(self._apply_code_map)
+        self.btn_gen_5d_obj.clicked.connect(self._gen_5d_object)
         return frame
 
     # ── 의뢰파일 패널 ─────────────────────────
@@ -1260,6 +1264,62 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             price = float(self.state.price_by_spec.get(acc, 0))
             self._add_row("RACK", acc, qty, price)
         self._log(f"코드매핑 적용 {key} → {len(entries)}개"); self._sync_step4_highlight()
+
+    def _gen_5d_object(self) -> None:
+        """현재 STEP5의 RACK 품목/수량을 공정·설비사·5D 키로 코드매핑 시트에 저장한다."""
+        if not self.state.template_path:
+            QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
+        process, vendor = self.state.process, self.state.vendor
+        if not process or not vendor:
+            QMessageBox.warning(self, "오류", "STEP3에서 공정/설비사를 먼저 선택하세요."); return
+
+        # 코드매핑은 STEP5(RACK)에만 적용되는 개념이라 RACK 품목만 대상으로 한다.
+        # (코드매핑 적용 버튼도 항상 RACK으로만 STEP5에 되돌려 넣는다.)
+        rack_items = [
+            (it["spec"], it["qty"]) for it in self._snapshot_items()
+            if it["role"] == "ITEM" and it["cat"] == "RACK" and it["spec"] and it["qty"]
+        ]
+        if not rack_items:
+            QMessageBox.warning(
+                self, "오류",
+                "STEP5에 RACK 품목이 없습니다. (코드매핑은 RACK 품목/수량만 저장됩니다)")
+            return
+
+        code5d, ok = QInputDialog.getText(
+            self, "5D Object 생성", "5D를 입력하세요:", text=self.state.code_5d or "")
+        if not ok:
+            return
+        code5d = code5d.strip()
+        if not code5d:
+            QMessageBox.warning(self, "오류", "5D 값을 입력하세요."); return
+
+        try:
+            import excel_io
+            added, skipped = excel_io.append_code_map_rows(
+                self.state.template_path, process, vendor, code5d, rack_items)
+        except Exception:
+            QMessageBox.critical(self, "5D Object 생성 오류", traceback.format_exc())
+            return
+
+        if not added:
+            QMessageBox.warning(
+                self, "중복된 값",
+                f"이미 완전히 동일한 코드매핑이 있어 저장하지 않았습니다.\n"
+                f"공정/설비사/5D: {process}/{vendor}/{code5d}  (품목 {len(skipped)}건 모두 중복)")
+            return
+
+        key = (process, vendor, code5d)
+        self.state.code_map.setdefault(key, []).extend(added)
+        # STEP3의 5D 입력칸을 방금 만든 값으로 맞춰, "코드매핑 적용" 버튼으로
+        # 바로 이어서 쓸 수 있게 한다 (_on_step3_changed 가 활성화 여부도 갱신).
+        self.ed_code.setText(code5d)
+
+        msg = f"코드매핑에 {len(added)}건을 추가했습니다."
+        if skipped:
+            msg += f" (중복 {len(skipped)}건은 건너뜀)"
+        QMessageBox.information(self, "완료", msg)
+        self._log(f"5D Object 생성 {key} → {len(added)}건 추가"
+                   + (f", 중복 {len(skipped)}건 제외" if skipped else ""))
 
     # ══════════════════════════════════════════
     # STEP4

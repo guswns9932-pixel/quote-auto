@@ -85,11 +85,13 @@ logger = logging.getLogger("QuoteApp")
 _CONTENT_SEARCHER_FLAG = "--content-searcher"
 
 
-def _setup_exception_hook_tk() -> None:
-    """Tk 전용 실행 경로 — QApplication 이 없으므로 QMessageBox 대신 tkinter로."""
+def _setup_exception_hook_tk(app_label: str = "Tk 앱") -> None:
+    """Tk 전용 실행 경로 — QApplication 이 없으므로 QMessageBox 대신 tkinter로.
+    키워드 검색기/CSP UPLOAD 자동화가 공유하는 훅이라, 로그에 어느 앱인지
+    남기도록 app_label 을 받는다."""
     def _hook(exc_type, exc_value, exc_tb):
         msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        logging.getLogger("QuoteApp").critical("키워드 검색기 치명적 오류:\n%s", msg)
+        logging.getLogger("QuoteApp").critical("%s 치명적 오류:\n%s", app_label, msg)
         try:
             import tkinter.messagebox as mb
             mb.showerror("치명적 오류", f"예상치 못한 오류가 발생했습니다:\n\n{exc_value}")
@@ -101,7 +103,7 @@ def _setup_exception_hook_tk() -> None:
 def _run_content_searcher() -> None:
     """키워드 검색기(Tkinter) 실행. main() 이 QApplication 을 만들기 전에만 호출한다."""
     _setup_logging()
-    _setup_exception_hook_tk()
+    _setup_exception_hook_tk("키워드 검색기")
     logger.info("키워드 검색기 시작")
     from content_search.gui import ContentSearchApp
     app = ContentSearchApp()
@@ -119,6 +121,36 @@ def _launch_content_searcher(parent: Optional[QWidget] = None) -> None:
     except Exception as e:
         logger.error("키워드 검색기 실행 실패", exc_info=True)
         QMessageBox.critical(parent, "키워드 검색기 오류", f"실행할 수 없습니다.\n{e}")
+
+
+# ──────────────────────────────────────────────
+# CSP UPLOAD 자동화 (Tkinter, 별도 프로세스)
+# ──────────────────────────────────────────────
+# 키워드 검색기와 동일한 이유로 별도 프로세스에서 Tk 만 띄운다.
+_CSP_UPLOAD_FLAG = "--csp-upload"
+
+
+def _run_csp_upload() -> None:
+    """CSP UPLOAD 자동화(Tkinter) 실행. main() 이 QApplication 을 만들기 전에만 호출한다."""
+    _setup_logging()
+    _setup_exception_hook_tk("CSP UPLOAD 자동화")
+    logger.info("CSP UPLOAD 자동화 시작")
+    from csp_order_maker import App
+    app = App()
+    app.mainloop()
+
+
+def _launch_csp_upload(parent: Optional[QWidget] = None) -> None:
+    """런처 버튼에서 호출 — 이 앱을 --csp-upload 로 재실행한다."""
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, _CSP_UPLOAD_FLAG]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), _CSP_UPLOAD_FLAG]
+        subprocess.Popen(cmd)
+    except Exception as e:
+        logger.error("CSP UPLOAD 자동화 실행 실패", exc_info=True)
+        QMessageBox.critical(parent, "CSP UPLOAD 자동화 오류", f"실행할 수 없습니다.\n{e}")
 
 
 # ──────────────────────────────────────────────
@@ -183,6 +215,12 @@ WHATS_NEW = [
         "desc": "STEP5에 담은 RACK 품목/수량을 공정·설비사·5D 키로 통합양식 "
                 "코드매핑 시트에 바로 저장합니다. 완전히 같은 매핑이 이미 "
                 "있으면 중복 경고만 띄우고 저장하지 않습니다.",
+    },
+    {
+        "id": "2026-09-06-csp-upload",
+        "title": "CSP UPLOAD 자동화 앱 추가",
+        "desc": "런처에서 CSP 주문접수 업로드 파일 생성기를 바로 실행할 수 "
+                "있습니다.",
     },
 ]
 
@@ -353,7 +391,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("업무자동화 통합 시스템")
-        self.setFixedSize(340, 280)
+        self.setFixedSize(340, 354)
         app_settings.restore_geometry("MainWindow", self)
 
         self._quote_win: Optional[_PageWindow] = None
@@ -365,12 +403,13 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(30, 30, 30, 30)
         v.setSpacing(18)
 
-        btn_quote  = QPushButton("견적서작성")
-        btn_esign  = QPushButton("전자서명")
-        btn_search = QPushButton("키워드 검색기")
+        btn_quote     = QPushButton("견적서작성")
+        btn_esign     = QPushButton("전자서명")
+        btn_search    = QPushButton("키워드 검색기")
+        btn_csp_upload = QPushButton("CSP UPLOAD 자동화")
 
         for btn, color in [(btn_quote, "#BBDEFB"), (btn_esign, "#C8E6C9"),
-                            (btn_search, "#FFE0B2")]:
+                            (btn_search, "#FFE0B2"), (btn_csp_upload, "#D1C4E9")]:
             btn.setMinimumHeight(60)
             f = btn.font(); f.setPointSize(14); f.setBold(True); btn.setFont(f)
             tint_button(btn, color)
@@ -381,6 +420,7 @@ class MainWindow(QMainWindow):
         btn_esign.clicked.connect(
             lambda: self._open_page("전자서명", "pages", "ESignPage", "_esign_win"))
         btn_search.clicked.connect(lambda: _launch_content_searcher(self))
+        btn_csp_upload.clicked.connect(lambda: _launch_csp_upload(self))
 
     def _open_page(self, title: str, mod: str, cls: str, attr: str) -> None:
         win: Optional[_PageWindow] = getattr(self, attr)
@@ -408,6 +448,9 @@ def main() -> None:
     # Tk 와 Qt 이벤트 루프는 한 프로세스 안에서 공존할 수 없다.
     if _CONTENT_SEARCHER_FLAG in sys.argv:
         _run_content_searcher()
+        return
+    if _CSP_UPLOAD_FLAG in sys.argv:
+        _run_csp_upload()
         return
 
     _setup_logging()

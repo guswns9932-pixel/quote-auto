@@ -133,6 +133,9 @@ def _make_spec(app_name: str, icon: str) -> str:
                 "content_search.parsers",
                 "content_search.scanner",
                 "content_search.text_utils",
+                # CSP UPLOAD 자동화(Tkinter, 별도 프로세스) — main.py 가
+                # "from csp_order_maker import App" 로 함수 내부에서 임포트
+                "csp_order_maker",
                 "tkinter",
                 "tkinter.filedialog",
                 "tkinter.messagebox",

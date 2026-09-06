@@ -653,7 +653,6 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1280x820")
         self.minsize(1100, 700)
 
         try:
@@ -673,11 +672,29 @@ class App(tk.Tk):
         self._build_ui()
         self._load_master(initial=True)
         self._load_settings()
+        self._fit_window_to_content()
 
     # ---------- 초기화
     def _find_template(self):
         p = os.path.join(app_dir(), TEMPLATE_NAME)
         return p if os.path.exists(p) else ""
+
+    def _fit_window_to_content(self):
+        """최초 실행 시 창이 고정 크기(1280x820)보다 실제 내용이 더 커서
+        하단 버튼 등이 화면 밖으로 밀려나 안 보이던 문제를 고친다
+        (창 크기를 조절하면 다시 보이는 게 바로 이 증상이었다).
+        고정값 대신 update_idletasks() 로 실제 필요한 크기를 계산해
+        화면 크기를 넘지 않는 선에서 창을 그 크기로 맞추고 화면 중앙에 놓는다."""
+        self.update_idletasks()
+        req_w = self.winfo_reqwidth()
+        req_h = self.winfo_reqheight()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        w = min(max(req_w, 1100), screen_w - 80)
+        h = min(max(req_h, 700), screen_h - 80)
+        x = max(0, (screen_w - w) // 2)
+        y = max(0, (screen_h - h) // 2)
+        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
 
     def _load_master(self, initial=False):
         path = self.master_path.get()
@@ -1191,12 +1208,12 @@ class App(tk.Tk):
         if entry is not None:
             entry.configure(foreground=color)
 
-    def _clear_line_form(self):
+    def _clear_line_form(self, reset_qty=True):
         for k in LINE_KEYS:
             self.line_vars[k].set("")
         if hasattr(self, "_name_C"):
             self._name_C.config(text="")
-        if hasattr(self, "line_qty"):
+        if reset_qty and hasattr(self, "line_qty"):
             self.line_qty.set("1")
 
     def _validate_line(self, data):
@@ -1230,8 +1247,11 @@ class App(tk.Tk):
             self.lines.append(dict(data))
         self._refresh_tree()
         # 다음 행 입력 편의를 위해 유지 (자재코드/단가/금액만 새로 입력)
+        # 생성수량도 여기서 "1"로 되돌리지 않는다 — 의뢰파일 더블클릭으로
+        # 채워진 값(H열 수량)이 방금 몇 행 생성했는지 그대로 남아 있어야
+        # 방금 생성된 수량과 화면이 어긋나 보이지 않는다.
         keep = {k: data[k] for k in ("C", "F", "I", "L", "M", "N", "O", "P", "T")}
-        self._clear_line_form()
+        self._clear_line_form(reset_qty=False)
         for k, v in keep.items():
             self.line_vars[k].set(v)
 

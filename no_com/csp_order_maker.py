@@ -576,14 +576,27 @@ def load_price_map(path=None):
 class PickerDialog(tk.Toplevel):
     """검색 + 목록 선택 공용 팝업."""
 
-    def __init__(self, parent, title, columns, widths, rows, key_index=0, initial=""):
+    def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
+                 highlight_keys=None):
+        """
+        highlight_keys : 강조 표시할 키 값들의 집합. 지정하면
+          1) 해당 값이 key_index 열과 일치하는 행을 목록 맨 위로 올리고
+          2) 그 행들을 색으로 강조 표시한다.
+        (예: 전체 로그에 이미 등장한 자재코드를 FSC 선택창에서 강조)
+        """
         super().__init__(parent)
         self.title(title)
         self.transient(parent)
         self.grab_set()
         self.result = None
-        self._rows = rows
         self._key_index = key_index
+        self._highlight_keys = {str(k) for k in highlight_keys} if highlight_keys else set()
+
+        rows = list(rows)
+        if self._highlight_keys:
+            # 안정 정렬이므로 강조 그룹/비강조 그룹 각각의 원래 순서는 유지된다.
+            rows.sort(key=lambda r: str(r[key_index]) not in self._highlight_keys)
+        self._rows = rows
 
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
@@ -595,6 +608,9 @@ class PickerDialog(tk.Toplevel):
         self.var.trace_add("write", lambda *_: self._refresh())
         self.count = ttk.Label(top, text="")
         self.count.pack(side="left", padx=6)
+        if self._highlight_keys:
+            ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
+                      foreground="#2e7d32").pack(side="left", padx=(10, 0))
 
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
@@ -603,6 +619,7 @@ class PickerDialog(tk.Toplevel):
         for c, w in zip(columns, widths):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
+        self.tree.tag_configure("used", background="#C8E6C9")
         vs = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vs.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -627,7 +644,8 @@ class PickerDialog(tk.Toplevel):
         for row in self._rows:
             if kw and not any(kw in str(v).lower() for v in row):
                 continue
-            self.tree.insert("", "end", values=row)
+            used = str(row[self._key_index]) in self._highlight_keys
+            self.tree.insert("", "end", values=row, tags=("used",) if used else ())
             shown += 1
             if shown >= 500:
                 break
@@ -810,9 +828,19 @@ class App(tk.Tk):
                    command=self._export).pack(side="right")
         ttk.Button(bottom, text="생성 폴더 열기",
                    command=self._open_upload_dir).pack(side="right", padx=(0, 6))
+        ttk.Button(bottom, text="초기화",
+                   command=self._reset_all).pack(side="right", padx=(0, 6))
 
         # 양식을 아직 불러오기 전에는 입력칸을 잠그고, 클릭하면 안내 문구를 띄운다.
         self.bind_all("<Button-1>", self._on_locked_click, add="+")
+
+    @staticmethod
+    def _common_defaults():
+        """공통값 최초 기본값. 초기화 버튼에서도 동일한 값을 써야 하므로
+        (재)로딩 시점에 상관없이 항상 오늘 날짜를 기준으로 새로 계산한다."""
+        today = dt.date.today().strftime("%Y%m%d")
+        return {"E": "10", "G": today, "R": "1", "S": "EA",
+                "U": "1100", "V": "PR00"}
 
     def _common_grid(self, parent):
         """공통값 입력칸을 4열로 배치."""
@@ -822,9 +850,7 @@ class App(tk.Tk):
             ("R", "fixed"), ("S", "entry"), ("U", "entry"), ("V", "entry"),
             ("Y", "combo"),
         ]
-        today = dt.date.today().strftime("%Y%m%d")
-        defaults = {"E": "10", "G": today, "R": "1", "S": "EA",
-                    "U": "1100", "V": "PR00"}
+        defaults = self._common_defaults()
         for i, (key, kind) in enumerate(specs):
             r, c = divmod(i, 4)
             cell = ttk.Frame(parent)
@@ -1140,10 +1166,13 @@ class App(tk.Tk):
     def _pick_fsc(self, initial_search=""):
         if not self.md:
             return
+        # 전체 로그(price_map)에 등장한 적 있는 자재코드는 강조 표시하고
+        # 목록 맨 위로 올려서, 이전에 실제로 주문했던 FSC를 빠르게 찾을 수 있게 한다.
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
                            ("FSC", "VER", "모델명", "설명", "상태"),
                            (120, 45, 110, 300, 90), self.md.fsc,
-                           initial=initial_search)
+                           initial=initial_search,
+                           highlight_keys=set(self.price_map.keys()))
         self.wait_window(dlg)
         if dlg.result:
             self.line_vars["Q"].set(dlg.result)
@@ -1339,6 +1368,34 @@ class App(tk.Tk):
             self._clear_line_form()
             self._refresh_tree()
 
+    def _reset_all(self):
+        """공통값·의뢰파일·품목 라인을 전부 초기 상태로 되돌린다.
+        통합양식(마스터) 파일 선택은 그대로 둔다 — 다시 읽을 필요가
+        없고, 매번 파일을 다시 고르게 하면 오히려 불편하다."""
+        if not messagebox.askyesno(
+                "초기화 확인",
+                "공통값·의뢰파일·품목 라인이 모두 초기화됩니다. 계속할까요?"):
+            return
+
+        defaults = self._common_defaults()
+        for k, var in self.common_vars.items():
+            if k == "J":     # G와 변수를 공유하므로 G에서 이미 반영됨
+                continue
+            var.set(defaults.get(k, ""))
+        if self.md:          # 콤보박스 첫 항목 재적용 (A/D/H/K/Y)
+            self._fill_combos()
+
+        self.request_path.set("")
+        self.request_rows = []
+        self._refresh_request_tree()
+        self.request_status.config(text="")
+
+        self.lines = []
+        self._clear_line_form()
+        self._refresh_tree()
+
+        self.status.config(text="초기화했습니다.")
+
     def _refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
         cip = self.md.cip_fsc if self.md else set()
@@ -1447,7 +1504,10 @@ class App(tk.Tk):
             q, w = row.get("Q"), row.get("W")
             if q and w is not None:
                 self.price_map[str(q)] = w
-        self.status.config(text="생성 완료 : %s" % out)
+        # 상태 라벨에 전체 경로를 넣으면 길이 때문에 하단 버튼이 화면 밖으로
+        # 밀려 사라지는 문제가 있어(가로 한 줄 배치), 경로 없이 완료 사실만
+        # 짧게 표시한다. 실제 저장 위치는 완료 팝업에서 확인할 수 있다.
+        self.status.config(text="생성 완료 (%d행)" % len(self.lines))
         messagebox.showinfo("완료", "%d행이 생성되었습니다.\n전체 로그에 누적 저장되었습니다.\n\n%s"
                              % (len(self.lines), out))
 

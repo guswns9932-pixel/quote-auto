@@ -76,6 +76,30 @@ logger = logging.getLogger("QuoteApp")
 
 
 # ──────────────────────────────────────────────
+# 별도 프로세스 중복 실행 방지 (키워드 검색기 / CSP UPLOAD 공용)
+# ──────────────────────────────────────────────
+# subprocess.Popen 은 자식 프로세스가 실제로 창을 띄우기까지 기다리지 않고
+# 즉시 반환한다. Tk 앱은 인터프리터 기동 + 무거운 임포트(+ CSP 쪽은 로그
+# 파일 로딩)로 창이 뜨기까지 수 초가 걸릴 수 있어, 그 사이 런처 버튼을
+# 실수로 여러 번 누르면 그때마다 새 프로세스가 계속 떠 버린다. 마지막으로
+# 띄운 프로세스가 아직 살아 있으면(poll() is None) 새로 띄우지 않는다.
+_launched_procs: dict = {}
+
+
+def _launch_once(key: str, cmd: list, parent: Optional[QWidget], label: str) -> None:
+    """key로 구분되는 프로세스가 이미 실행 중이면 새로 띄우지 않는다."""
+    proc = _launched_procs.get(key)
+    if proc is not None and proc.poll() is None:
+        logger.info("%s가 이미 실행 중이라 재실행을 건너뜀", label)
+        return
+    try:
+        _launched_procs[key] = subprocess.Popen(cmd)
+    except Exception as e:
+        logger.error("%s 실행 실패", label, exc_info=True)
+        QMessageBox.critical(parent, f"{label} 오류", f"실행할 수 없습니다.\n{e}")
+
+
+# ──────────────────────────────────────────────
 # 키워드 검색기 (Tkinter, 별도 프로세스)
 # ──────────────────────────────────────────────
 # Tk 와 Qt 는 각자 자기 스레드에서 자기 이벤트 루프를 독점하려 해서 한 프로세스
@@ -112,15 +136,11 @@ def _run_content_searcher() -> None:
 
 def _launch_content_searcher(parent: Optional[QWidget] = None) -> None:
     """런처 버튼에서 호출 — 이 앱을 --content-searcher 로 재실행한다."""
-    try:
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, _CONTENT_SEARCHER_FLAG]
-        else:
-            cmd = [sys.executable, os.path.abspath(__file__), _CONTENT_SEARCHER_FLAG]
-        subprocess.Popen(cmd)
-    except Exception as e:
-        logger.error("키워드 검색기 실행 실패", exc_info=True)
-        QMessageBox.critical(parent, "키워드 검색기 오류", f"실행할 수 없습니다.\n{e}")
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, _CONTENT_SEARCHER_FLAG]
+    else:
+        cmd = [sys.executable, os.path.abspath(__file__), _CONTENT_SEARCHER_FLAG]
+    _launch_once("content_searcher", cmd, parent, "키워드 검색기")
 
 
 # ──────────────────────────────────────────────
@@ -142,15 +162,11 @@ def _run_csp_upload() -> None:
 
 def _launch_csp_upload(parent: Optional[QWidget] = None) -> None:
     """런처 버튼에서 호출 — 이 앱을 --csp-upload 로 재실행한다."""
-    try:
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, _CSP_UPLOAD_FLAG]
-        else:
-            cmd = [sys.executable, os.path.abspath(__file__), _CSP_UPLOAD_FLAG]
-        subprocess.Popen(cmd)
-    except Exception as e:
-        logger.error("CSP UPLOAD 자동화 실행 실패", exc_info=True)
-        QMessageBox.critical(parent, "CSP UPLOAD 자동화 오류", f"실행할 수 없습니다.\n{e}")
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, _CSP_UPLOAD_FLAG]
+    else:
+        cmd = [sys.executable, os.path.abspath(__file__), _CSP_UPLOAD_FLAG]
+    _launch_once("csp_upload", cmd, parent, "CSP UPLOAD 자동화")
 
 
 # ──────────────────────────────────────────────
@@ -221,6 +237,12 @@ WHATS_NEW = [
         "title": "CSP UPLOAD 자동화 앱 추가",
         "desc": "런처에서 CSP 주문접수 업로드 파일 생성기를 바로 실행할 수 "
                 "있습니다.",
+    },
+    {
+        "id": "2026-09-07-launcher-dedup",
+        "title": "런처 버튼 중복 실행 방지",
+        "desc": "키워드 검색기·CSP UPLOAD 자동화 버튼을 실행 중에 여러 번 눌러도 "
+                "창이 여러 개 뜨지 않고 하나만 실행됩니다.",
     },
 ]
 

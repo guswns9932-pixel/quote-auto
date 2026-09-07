@@ -572,6 +572,31 @@ def load_price_map(path=None):
     return prices
 
 
+# ---------------------------------------------------------------- 버튼 색상
+def _darken(hex_color, amount):
+    """hex_color(#RRGGBB)를 amount만큼 어둡게 해 hover 색을 만든다."""
+    hex_color = hex_color.lstrip("#")
+    r = max(0, int(hex_color[0:2], 16) - amount)
+    g = max(0, int(hex_color[2:4], 16) - amount)
+    b = max(0, int(hex_color[4:6], 16) - amount)
+    return "#%02X%02X%02X" % (r, g, b)
+
+
+def _colored_button(parent, text, command=None, bg="#E0E0E0", fg="#000000", **kw):
+    """색이 잘 안 보이는 기본 ttk.Button 대신 tk.Button으로 배경색을 확실히
+    넣는다 (ttk.Button은 Windows 기본 테마(vista 등)에서 배경색 지정이
+    무시되는 경우가 많아, 테마를 바꾸지 않고도 항상 보이는 classic
+    tk.Button을 색상 버튼 전용으로 쓴다)."""
+    hover = _darken(bg, 24)
+    return tk.Button(
+        parent, text=text, command=command,
+        bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
+        relief="raised", bd=1, font=("맑은 고딕", 9),
+        padx=8, pady=3, cursor="hand2",
+        **kw,
+    )
+
+
 # ---------------------------------------------------------------- 검색 팝업
 class PickerDialog(tk.Toplevel):
     """검색 + 목록 선택 공용 팝업."""
@@ -631,8 +656,9 @@ class PickerDialog(tk.Toplevel):
 
         btn = ttk.Frame(self, padding=(8, 0, 8, 8))
         btn.pack(fill="x")
-        ttk.Button(btn, text="선택", command=self._ok).pack(side="right")
-        ttk.Button(btn, text="취소", command=self.destroy).pack(side="right", padx=6)
+        _colored_button(btn, "선택", command=self._ok, bg="#C8E6C9").pack(side="right")
+        _colored_button(btn, "취소", command=self.destroy, bg="#ECEFF1").pack(
+            side="right", padx=6)
 
         self._refresh()
         self.geometry("+%d+%d" % (parent.winfo_rootx() + 60, parent.winfo_rooty() + 60))
@@ -771,6 +797,13 @@ class App(tk.Tk):
                     child.state([flag])
                 except tk.TclError:
                     pass
+            elif isinstance(child, tk.Button):
+                # 색상 버튼(_colored_button)은 ttk가 아닌 classic tk.Button이라
+                # .state()가 없다 — .config(state=...)로 동일하게 잠근다.
+                try:
+                    child.config(state=(tk.DISABLED if disabled else tk.NORMAL))
+                except tk.TclError:
+                    pass
             self._set_state_recursive(child, disabled)
 
     def _set_form_locked(self, locked):
@@ -791,15 +824,16 @@ class App(tk.Tk):
         ttk.Label(bar, text="양식 파일").pack(side="left")
         ttk.Entry(bar, textvariable=self.master_path).pack(
             side="left", fill="x", expand=True, padx=6)
-        ttk.Button(bar, text="찾아보기", command=self._pick_master).pack(side="left")
-        ttk.Button(bar, text="다시 읽기",
-                   command=lambda: self._load_master()).pack(side="left", padx=4)
+        _colored_button(bar, "찾아보기", command=self._pick_master,
+                        bg="#BBDEFB").pack(side="left")
+        _colored_button(bar, "다시 읽기", command=lambda: self._load_master(),
+                        bg="#BBDEFB").pack(side="left", padx=4)
 
         # 공통값
         common_head = ttk.Frame(root)
         ttk.Label(common_head, text=" 공통값 (모든 행에 동일하게 들어감) ").pack(side="left")
-        ttk.Button(common_head, text="공통값 고정",
-                   command=self._save_settings).pack(side="left", padx=(6, 0))
+        _colored_button(common_head, "공통값 고정", command=self._save_settings,
+                        bg="#E0F2F1").pack(side="left", padx=(6, 0))
         box = ttk.LabelFrame(root, labelwidget=common_head, padding=8)
         box.pack(fill="x")
         self._common_box = box
@@ -824,12 +858,12 @@ class App(tk.Tk):
         bottom.pack(fill="x", pady=(8, 0))
         self.status = ttk.Label(bottom, text="", foreground="#555")
         self.status.pack(side="left")
-        ttk.Button(bottom, text="엑셀 파일 생성",
-                   command=self._export).pack(side="right")
-        ttk.Button(bottom, text="생성 폴더 열기",
-                   command=self._open_upload_dir).pack(side="right", padx=(0, 6))
-        ttk.Button(bottom, text="초기화",
-                   command=self._reset_all).pack(side="right", padx=(0, 6))
+        _colored_button(bottom, "엑셀 파일 생성", command=self._export,
+                        bg="#FFE0B2").pack(side="right")
+        _colored_button(bottom, "생성 폴더 열기", command=self._open_upload_dir,
+                        bg="#E8EAF6").pack(side="right", padx=(0, 6))
+        _colored_button(bottom, "초기화", command=self._reset_all,
+                        bg="#FFCDD2").pack(side="right", padx=(0, 6))
 
         # 양식을 아직 불러오기 전에는 입력칸을 잠그고, 클릭하면 안내 문구를 띄운다.
         self.bind_all("<Button-1>", self._on_locked_click, add="+")
@@ -877,9 +911,9 @@ class App(tk.Tk):
             elif kind == "pick_sold":
                 # 창이 좁아져도 '찾기' 버튼이 가장 먼저 자리를 확보하도록
                 # 오른쪽에 먼저 배치하고, 이름 표시 라벨이 남는 공간을 흡수/축소한다.
-                ttk.Button(cell, text="찾기", width=5,
-                           command=lambda v=var: self._pick_partner("sold", v)
-                           ).pack(side="right")
+                _colored_button(cell, "찾기", width=5, bg="#E8EAF6",
+                                command=lambda v=var: self._pick_partner("sold", v)
+                                ).pack(side="right")
                 ttk.Entry(cell, textvariable=var, width=12).pack(side="left")
                 lbl = ttk.Label(cell, text="", foreground="#0a6")
                 lbl.pack(side="left", fill="x", expand=True, padx=3)
@@ -897,7 +931,8 @@ class App(tk.Tk):
         bar.pack(fill="x")
         ttk.Entry(bar, textvariable=self.request_path).pack(
             side="left", fill="x", expand=True, padx=(0, 6))
-        ttk.Button(bar, text="불러오기", command=self._pick_request_file).pack(side="left")
+        _colored_button(bar, "불러오기", command=self._pick_request_file,
+                        bg="#BBDEFB").pack(side="left")
         self.request_status = ttk.Label(bar, text="", foreground="#555")
         self.request_status.pack(side="left", padx=(10, 0))
 
@@ -1025,13 +1060,13 @@ class App(tk.Tk):
             elif key == "Q":
                 self.entry_Q = entry
             if key == "C":
-                ttk.Button(row, text="찾기", width=5,
-                           command=self._pick_line_ship).pack(side="left", padx=2)
+                _colored_button(row, "찾기", width=5, bg="#E8EAF6",
+                                command=self._pick_line_ship).pack(side="left", padx=2)
                 self._name_C = ttk.Label(cell, text="", foreground="#0a6")
                 self._name_C.pack(anchor="w")
             elif key == "Q":
-                ttk.Button(row, text="찾기", width=5,
-                           command=self._pick_fsc).pack(side="left", padx=2)
+                _colored_button(row, "찾기", width=5, bg="#E8EAF6",
+                                command=self._pick_fsc).pack(side="left", padx=2)
 
         # 금액(X) 옆 : 이 값으로 몇 행을 한번에 만들지 지정 (기본 1)
         qty_cell = ttk.Frame(form)
@@ -1065,10 +1100,11 @@ class App(tk.Tk):
                        "여러 행을 체크한 뒤 [선택 행에 반영]을 누르면 아래 입력칸의 "
                        "값이 체크된 모든 행에 그대로 적용됩니다",
                   foreground="#777").pack(side="left")
-        self.btn_add = ttk.Button(btns, text="행 추가", command=self._add_line)
+        self.btn_add = _colored_button(btns, "행 추가", command=self._add_line,
+                                        bg="#C8E6C9")
         self.btn_add.pack(side="right")
-        ttk.Button(btns, text="입력칸 비우기",
-                   command=self._clear_line_form).pack(side="right", padx=6)
+        _colored_button(btns, "입력칸 비우기", command=self._clear_line_form,
+                        bg="#ECEFF1").pack(side="right", padx=6)
 
     def _line_table(self, parent):
         wrap = ttk.Frame(parent)
@@ -1099,12 +1135,16 @@ class App(tk.Tk):
 
         tb = ttk.Frame(parent)
         tb.pack(fill="x", pady=(6, 0))
-        ttk.Button(tb, text="전체 선택", command=self._select_all_lines).pack(side="left")
-        ttk.Button(tb, text="선택 행에 반영", command=self._apply_to_selected).pack(
-            side="left", padx=6)
-        ttk.Button(tb, text="선택 행 복제", command=self._dup_line).pack(side="left")
-        ttk.Button(tb, text="선택 행 삭제", command=self._del_line).pack(side="left", padx=6)
-        ttk.Button(tb, text="전체 삭제", command=self._clear_lines).pack(side="left")
+        _colored_button(tb, "전체 선택", command=self._select_all_lines,
+                        bg="#BBDEFB").pack(side="left")
+        _colored_button(tb, "선택 행에 반영", command=self._apply_to_selected,
+                        bg="#FFF9C4").pack(side="left", padx=6)
+        _colored_button(tb, "선택 행 복제", command=self._dup_line,
+                        bg="#E8EAF6").pack(side="left")
+        _colored_button(tb, "선택 행 삭제", command=self._del_line,
+                        bg="#FFCDD2").pack(side="left", padx=6)
+        _colored_button(tb, "전체 삭제", command=self._clear_lines,
+                        bg="#EF9A9A").pack(side="left")
         self.line_count = ttk.Label(tb, text="0 행")
         self.line_count.pack(side="right")
 

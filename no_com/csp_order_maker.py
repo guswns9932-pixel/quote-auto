@@ -1125,9 +1125,12 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=vs.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="left", fill="y")
-        self.tree.tag_configure("cip_warn", foreground="red")
+        # cip_warn은 배경색, due_* 는 글자색을 쓴다 — 서로 다른 속성이라
+        # 한 행에 둘 다 적용돼도 충돌 없이 동시에 표시된다(ttk.Treeview는
+        # 같은 속성(예: 글자색)을 여러 태그가 지정하면 하나만 적용된다).
+        self.tree.tag_configure("cip_warn", background="#FFCDD2")
         self.tree.tag_configure("due_red", foreground="red")
-        self.tree.tag_configure("due_orange", foreground="orange")
+        self.tree.tag_configure("due_orange", foreground="#E65100")
         self.tree.tag_configure("due_blue", foreground="blue")
         self.tree.bind("<Double-1>", lambda e: self._load_selected())
         self.tree.bind("<Button-1>", self._on_tree_click)
@@ -1440,16 +1443,16 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         cip = self.md.cip_fsc if self.md else set()
         for n, d in enumerate(self.lines, start=1):
-            # 자재코드 경고(cip_warn)와 납품요청일 임박색은 ttk.Treeview가
-            # 행 하나에 글자색을 하나만 줄 수 있어 동시에 표시하지 못한다.
-            # 자재코드 문제가 더 치명적이므로 그쪽을 우선한다.
+            # 자재코드 경고(cip_warn, 배경색)와 납품요청일 임박색(due_*, 글자색)은
+            # 서로 다른 속성이라 우선순위 없이 둘 다 동시에 붙일 수 있다.
+            tags = []
             if d["Q"].strip() in cip:
-                tags = ("cip_warn",)
-            else:
-                color = due_date_color(parse_date(d["T"]))
-                tags = ("due_%s" % color,) if color else ()
+                tags.append("cip_warn")
+            color = due_date_color(parse_date(d["T"]))
+            if color:
+                tags.append("due_%s" % color)
             self.tree.insert("", "end", values=["☐", n] + [d[k] for k in LINE_KEYS],
-                             tags=tags)
+                             tags=tuple(tags))
         self.line_count.config(text="%d 행" % len(self.lines))
 
     # ---------- 출력

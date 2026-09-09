@@ -159,11 +159,15 @@ def _find_cip_subheader_col(ws, section_label, sub_label):
 
 
 # ---------------------------------------------------------------- CIP 매치(AS-IS FSC 알람)
-# "ALL"(사업장) / "-"(대공정·설비사·세부공정)은 CIP 시트에서 "해당 항목 전체에
-# 적용됨"을 뜻하는 값이라 와일드카드로 취급한다. 옵션 칸이 아직 비어 있는
-# 경우는(아직 입력 안 함) 와일드카드로 보지 않는다 — 그래야 세부공정만 빈
+# "-"(대공정·설비사·세부공정)은 CIP 시트에서 "해당 항목 전체에 적용됨"을
+# 뜻하는 값이라 와일드카드로 취급한다. 옵션 칸이 아직 비어 있는 경우는
+# (아직 입력 안 함) 와일드카드로 보지 않는다 — 그래야 세부공정만 빈
 # 상태에서도 "세부공정 제외 동일"(orange)로 자연스럽게 떨어진다.
-_CIP_WILDCARDS = {"ALL", "-"}
+_CIP_WILDCARDS = {"-"}
+
+# 사업장의 "ALL"도 와일드카드이지만, SCS·TAYLOR는 별도로 전담 관리되는
+# 사업장이라 "ALL"의 적용 범위에 들어가지 않는다(실사용자 확인).
+_CIP_SITE_ALL_EXCLUDES = {"SCS", "TAYLOR"}
 
 
 def _norm_plain(v):
@@ -190,6 +194,23 @@ def _cip_field_eq(cip_val, opt_val, normalize=_norm_plain):
     return a == b or a in _CIP_WILDCARDS or b in _CIP_WILDCARDS
 
 
+def _cip_site_eq(cip_val, opt_val):
+    """사업장 전용 비교. "ALL"은 와일드카드이지만 SCS/TAYLOR는 예외로
+    취급한다 — 그 두 사업장은 "ALL"에 포함되지 않고 각자 별도 CIP 행으로
+    관리된다. 어느 쪽이 "ALL"이든(옵션 쪽이든 CIP 쪽이든) 상대가 제외
+    목록에 있으면 매치하지 않는다."""
+    a, b = _norm_plain(cip_val), _norm_plain(opt_val)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a == "ALL":
+        return b not in _CIP_SITE_ALL_EXCLUDES
+    if b == "ALL":
+        return a not in _CIP_SITE_ALL_EXCLUDES
+    return False
+
+
 def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
     """옵션(사업장/DEVICE/대공정/설비사/세부공정) + 자재코드(fsc)를 CIP AS-IS
     데이터와 비교한다.
@@ -207,7 +228,7 @@ def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
     for r in cip_rows:
         if _norm_plain(r.get("fsc")) != fsc_n:
             continue
-        if not _cip_field_eq(r.get("site"), site):
+        if not _cip_site_eq(r.get("site"), site):
             continue
         if not _cip_field_eq(r.get("device"), device):
             continue

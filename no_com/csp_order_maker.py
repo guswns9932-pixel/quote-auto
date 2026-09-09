@@ -489,6 +489,24 @@ def extract_after_underscore(text):
     return text.rsplit("_", 1)[-1].strip()
 
 
+_MODEL_KEYWORD_RE = re.compile(r"^[A-Za-z]+[0-9]+")
+
+
+def extract_model_keyword(text):
+    """'DRY_PUMP;EQ,LOT,HD4500PW' -> 'HD4500'
+    ('LOT,' 뒤 값에서 스펠링+숫자까지만 추출하고, 그 뒤에 붙는 서브모델
+    스펠링(PW 등)은 잘라낸다). 패턴과 안 맞으면 'LOT,' 뒤 값 전체를
+    그대로 돌려준다."""
+    text = str(text or "")
+    marker = "LOT,"
+    idx = text.find(marker)
+    if idx == -1:
+        return ""
+    after = text[idx + len(marker):].strip()
+    m = _MODEL_KEYWORD_RE.match(after)
+    return m.group(0) if m else after
+
+
 def load_request_rows(path):
     """의뢰파일에서 D/F/G/H/N/X/Z/AA 열 값을 읽어 dict 리스트로 반환한다."""
     wb = load_workbook(path, read_only=True, data_only=True)
@@ -925,6 +943,9 @@ class App(tk.Tk):
         self.price_map = load_price_map()   # 자재코드 -> 최근 단가 (모든 로그 파일 취합)
         self.request_path = tk.StringVar()
         self.request_rows = []    # 의뢰파일에서 읽은 dict 리스트
+        # 의뢰파일 더블클릭 시 규격(desc)에서 뽑아낸 모델 키워드. "찾기"
+        # 버튼을 누르면 이 값으로 자재코드 찾기 창의 검색창을 채운다.
+        self._last_model_keyword = ""
 
         self._build_ui()
         self._load_master(initial=True)
@@ -1274,6 +1295,11 @@ class App(tk.Tk):
         elif due:
             self.line_vars["T"].set(format_date_mask(str(due)))
 
+        # 규격(desc)의 "LOT," 뒤 값에서 스펠링+숫자까지만 뽑아 기억해둔다 —
+        # "찾기" 버튼을 누르면 이 값으로 검색창이 채워진다(모델 서브타입
+        # 스펠링까지 넣으면 오히려 검색이 너무 좁아져서 거기까지는 뺀다).
+        self._last_model_keyword = extract_model_keyword(r.get("desc"))
+
     # ---------- 옵션 (자재코드 + CIP AS-IS FSC 알람 조건)
     def _build_options_box(self, parent):
         # 옵션(사업장/DEVICE/대공정/설비사/세부공정)을 먼저 고르고, 그
@@ -1536,7 +1562,7 @@ class App(tk.Tk):
             lbl.config(text=name if name else ("코드 없음" if code else ""),
                        foreground="#0a6" if name else "#c00")
 
-    def _pick_fsc(self, initial_search=""):
+    def _pick_fsc(self):
         if not self.md:
             return
         # 전체 로그(price_map)에 등장한 적 있는 자재코드는 강조 표시하고
@@ -1556,7 +1582,7 @@ class App(tk.Tk):
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
                            ("FSC", "VER", "모델명", "설명", "상태"),
                            (130, 45, 100, 260, 80), self.md.fsc,
-                           initial=initial_search,
+                           initial=self._last_model_keyword,
                            highlight_keys=set(self.price_map.keys()),
                            warn_levels=warn_levels)
         self.wait_window(dlg)
@@ -1775,6 +1801,7 @@ class App(tk.Tk):
 
         self.request_path.set("")
         self.request_rows = []
+        self._last_model_keyword = ""
         self._refresh_request_tree()
         self.request_status.config(text="")
 

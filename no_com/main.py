@@ -18,7 +18,8 @@ from PySide6.QtCore import Qt, QEvent, QRect
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QSizePolicy, QSplashScreen, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QScrollBar, QSizePolicy, QSplashScreen,
+    QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 import app_settings
@@ -175,35 +176,44 @@ def _launch_csp_upload(parent: Optional[QWidget] = None) -> None:
 # id 앞 10자(YYYY-MM-DD)를 날짜로 그대로 쓴다. 자잘한 버그 수정·성능
 # 개선·내부 리팩터링은 이 목록에 올리지 않는다 — 사용자가 체감할 만한
 # 기능 추가/변경만 적는다.
+# app: 어느 런처 버튼(앱)의 소식인지. 업데이트 안내 창에서 앱별 탭으로
+# 나눠 보여주는 데 쓴다. "launcher"는 특정 앱 하나가 아니라 런처 자체
+# 또는 여러 앱에 걸친 변경사항.
 WHATS_NEW = [
     {
         "id": "2026-08-05-window-split",
+        "app": "quote",
         "title": "창 분리 + 의뢰파일DATA 컬럼 확장",
         "desc": "견적서작성 창을 독립 창으로 분리하고 Rack/Maker/설비/5D 컬럼을 추가했습니다.",
     },
     {
         "id": "2026-08-26-submit-excel",
+        "app": "quote",
         "title": "제출용 엑셀 생성 기능 추가",
         "desc": "갑지에서 갑지DATA 시트만 추출해 제출용 파일을 바로 만들 수 있습니다.",
     },
     {
         "id": "2026-09-01-autoload-template",
+        "app": "quote",
         "title": "통합양식 자동 로드",
         "desc": "마지막에 쓴 통합양식·출력 폴더를 다음 실행 때 자동으로 불러옵니다. "
                 "(Credit·보증기간·투자자 등 옵션 값은 실행마다 초기화됩니다.)",
     },
     {
         "id": "2026-09-01-credit-fix",
+        "app": "quote",
         "title": "Credit 계산 정확도 개선",
         "desc": "Pump/Rack Credit이 사양서·갑지 금액에 정확히 반영되도록 계산 방식을 바로잡았습니다.",
     },
     {
         "id": "2026-09-02-keyword-search",
+        "app": "search",
         "title": "키워드 검색기 앱 추가",
         "desc": "런처에서 폴더 안 파일명·내용을 검색하는 키워드 검색기를 바로 실행할 수 있습니다.",
     },
     {
         "id": "2026-09-02-esign-speed",
+        "app": "esign",
         "title": "전자서명 속도·편의성 개선",
         "desc": "PDF 저장이 백그라운드에서 진행돼 더는 창이 멈추지 않고, "
                 "페이지 이동이 빨라졌습니다. 서명 시 비밀번호가 다음부터 "
@@ -212,6 +222,7 @@ WHATS_NEW = [
     },
     {
         "id": "2026-09-02-options-panel-redesign",
+        "app": "quote",
         "title": "옵션 패널 2단 구조로 재정리",
         "desc": "Credit·보증기간·투자자·견적서 타입을 항목별 열로 나누고, "
                 "각 항목 아래에 현재 적용 상태(Credit 적용여부, 보증기간, "
@@ -220,6 +231,7 @@ WHATS_NEW = [
     },
     {
         "id": "2026-09-02-spec-hardcode-options",
+        "app": "quote",
         "title": "설비수량·실반입라인·Exh Size 옵션 추가",
         "desc": "옵션 패널에서 설비수량·실반입라인·Exh Size 값을 입력하면 "
                 "국내 견적서의 사양서/현업 사인용 사양서/입고검수확인서에 "
@@ -227,6 +239,7 @@ WHATS_NEW = [
     },
     {
         "id": "2026-09-04-5d-object-gen",
+        "app": "quote",
         "title": "5D Object 생성 버튼 추가",
         "desc": "STEP5에 담은 RACK 품목/수량을 공정·설비사·5D 키로 통합양식 "
                 "코드매핑 시트에 바로 저장합니다. 완전히 같은 매핑이 이미 "
@@ -234,18 +247,21 @@ WHATS_NEW = [
     },
     {
         "id": "2026-09-06-csp-upload",
+        "app": "csp",
         "title": "CSP UPLOAD 자동화 앱 추가",
         "desc": "런처에서 CSP 주문접수 업로드 파일 생성기를 바로 실행할 수 "
                 "있습니다.",
     },
     {
         "id": "2026-09-07-launcher-dedup",
+        "app": "launcher",
         "title": "런처 버튼 중복 실행 방지",
         "desc": "키워드 검색기·CSP UPLOAD 자동화 버튼을 실행 중에 여러 번 눌러도 "
                 "창이 여러 개 뜨지 않고 하나만 실행됩니다.",
     },
     {
         "id": "2026-09-09-csp-cip-alarm",
+        "app": "csp",
         "title": "CSP UPLOAD AS-IS FSC 알람 고도화",
         "desc": "옵션(사업장·DEVICE·대공정·설비사·세부공정)을 CIP 시트 기준으로 "
                 "입력하면, 자재코드 선택·추가 시 이 조건에서 AS-IS로 등록된 "
@@ -260,22 +276,42 @@ def _entry_date(entry: dict) -> str:
     return entry["id"][:10]
 
 
+# 앱별 탭 표시 이름. 런처 버튼과 같은 이름을 써서 어느 버튼 소식인지
+# 바로 알아볼 수 있게 한다. "launcher"는 버튼이 따로 없는 공용 탭.
+_APP_TAB_LABELS = {
+    "quote": "견적서작성",
+    "esign": "전자서명",
+    "search": "키워드 검색기",
+    "csp": "CSP UPLOAD",
+    "launcher": "런처",
+}
+
+
 class _WhatsNewDialog(QDialog):
-    """굵직한 업데이트 안내 — 창 어디를 클릭하든(또는 X) 바로 닫힌다."""
+    """굵직한 업데이트 안내 — 앱별 탭으로 나눠 보여준다.
+    탭/스크롤바가 아닌 곳을 클릭하거나 X를 누르면 바로 닫힌다."""
 
     def __init__(self, entries: list, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("업데이트 소식")
-        self.setFixedWidth(420)
+        self.setFixedSize(460, 480)
         self.setWindowModality(Qt.ApplicationModal)
 
-        # 최신순(내림차순) 정렬 — 방금 추가된 기능이 맨 위에 보이게
-        entries = sorted(entries, key=_entry_date, reverse=True)
-        latest_date = _entry_date(entries[0]) if entries else ""
+        # 앱별로 묶고, 각 그룹 안에서는 최신순(내림차순) 정렬.
+        by_app: dict[str, list] = {}
+        for e in entries:
+            by_app.setdefault(e.get("app", "launcher"), []).append(e)
+        for group in by_app.values():
+            group.sort(key=_entry_date, reverse=True)
+
+        # 탭 순서: 가장 최근에 업데이트된 앱이 맨 앞(기본 선택 탭)에 오게.
+        app_keys = sorted(by_app.keys(), key=lambda a: _entry_date(by_app[a][0]),
+                          reverse=True)
+        latest_date = max(_entry_date(e) for e in entries) if entries else ""
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(24, 20, 24, 16)
-        v.setSpacing(14)
+        v.setContentsMargins(20, 18, 20, 14)
+        v.setSpacing(10)
 
         head = QLabel(f"새로워진 점  <span style='color:#888; font-weight:normal; "
                       f"font-size:11px;'>(최근 업데이트: {latest_date})</span>")
@@ -283,30 +319,53 @@ class _WhatsNewDialog(QDialog):
         hf = head.font(); hf.setPointSize(13); hf.setBold(True); head.setFont(hf)
         v.addWidget(head)
 
-        for e in entries:
+        tabs = QTabWidget()
+        v.addWidget(tabs, 1)
+        for app_key in app_keys:
+            tabs.addTab(self._build_tab(by_app[app_key]),
+                       _APP_TAB_LABELS.get(app_key, app_key))
+
+        hint = QLabel("탭을 눌러 다른 앱 소식도 볼 수 있습니다 · 그 외 클릭하면 닫힙니다")
+        hint.setStyleSheet("color: #999; font-size: 10px;")
+        hint.setAlignment(Qt.AlignRight)
+        v.addWidget(hint)
+
+        # 배경이든 라벨 위든 어디를 클릭해도 닫히게 한다 — 단, 탭 헤더나
+        # 스크롤바를 클릭한 거라면 그 조작(탭 전환/스크롤)이 되게 둔다.
+        # Qt 마우스 이벤트는 부모로 자동 전파되지 않으므로, 다이얼로그와
+        # 모든 자식 위젯에 이벤트 필터를 직접 걸어 가로챈다.
+        # (창의 X 버튼은 창 관리자 기본 동작으로 이미 닫힘 — 별도 처리 불필요)
+        self.installEventFilter(self)
+        for w in self.findChildren(QWidget):
+            w.installEventFilter(self)
+
+    @staticmethod
+    def _build_tab(group_entries: list) -> QWidget:
+        """앱 한 개 분량의 항목 목록을 스크롤 가능한 탭 페이지로 만든다."""
+        content = QWidget()
+        cv = QVBoxLayout(content)
+        cv.setContentsMargins(4, 8, 4, 8)
+        cv.setSpacing(12)
+        for e in group_entries:
             item = QLabel(
                 f"<b>• [{_entry_date(e)}] {e['title']}</b><br>"
                 f"<span style='color:#555;'>{e['desc']}</span>"
             )
             item.setTextFormat(Qt.RichText)
             item.setWordWrap(True)
-            v.addWidget(item)
+            cv.addWidget(item)
+        cv.addStretch(1)
 
-        hint = QLabel("클릭하면 닫힙니다")
-        hint.setStyleSheet("color: #999; font-size: 10px;")
-        hint.setAlignment(Qt.AlignRight)
-        v.addWidget(hint)
-
-        # 배경이든 라벨 위든 어디를 클릭해도 닫히게 한다.
-        # Qt 마우스 이벤트는 부모로 자동 전파되지 않으므로, 다이얼로그와
-        # 모든 자식 위젯에 이벤트 필터를 걸어 직접 가로챈다.
-        # (창의 X 버튼은 창 관리자 기본 동작으로 이미 닫힘 — 별도 처리 불필요)
-        self.installEventFilter(self)
-        for w in self.findChildren(QWidget):
-            w.installEventFilter(self)
+        scroll = QScrollArea()
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        return scroll
 
     def eventFilter(self, obj, event) -> bool:
         if event.type() == QEvent.MouseButtonPress:
+            if isinstance(obj, (QTabBar, QScrollBar)):
+                return super().eventFilter(obj, event)
             self.accept()
             return True
         return super().eventFilter(obj, event)

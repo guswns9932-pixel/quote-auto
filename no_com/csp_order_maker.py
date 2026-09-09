@@ -754,11 +754,12 @@ class PickerDialog(tk.Toplevel):
         """
         highlight_keys : 강조 표시할 키 값들의 집합(초록 배경 + 목록 상위 정렬).
           (예: 전체 로그에 이미 등장한 적 있는 자재코드)
-        warn_levels    : {키 값: "red"/"orange"}. CIP AS-IS FSC 알람 —
-          표시 텍스트 앞에 마커를 붙이고(색이 아니라 텍스트라 강조 배경색과
-          충돌하지 않는다) highlight_keys보다 우선해 목록 맨 위로 올린다.
-          마커는 화면 표시용일 뿐 실제 반환값(self.result)에는 섞이지
-          않도록 원본 행을 iid로 따로 기억해둔다.
+        warn_levels    : {키 값: "red"/"orange"}. CIP AS-IS FSC 알람.
+          None이 아니면(빈 dict라도) key_index 열 왼쪽에 "검토" 전용 열을
+          따로 만든다 — 코드 칸 안에 마커 글자를 붙이면 칸이 좁아 코드
+          자체가 가려지는 문제가 있어 열을 분리했다. highlight_keys보다
+          우선해 목록 맨 위로 올린다. 실제 반환값(self.result)에는
+          섞이지 않도록 원본 행을 iid로 따로 기억해둔다.
         """
         super().__init__(parent)
         self.title(title)
@@ -767,6 +768,7 @@ class PickerDialog(tk.Toplevel):
         self.result = None
         self._key_index = key_index
         self._highlight_keys = {str(k) for k in highlight_keys} if highlight_keys else set()
+        self._show_review_col = warn_levels is not None
         self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
         self._iid_to_row = {}
 
@@ -801,15 +803,26 @@ class PickerDialog(tk.Toplevel):
         if self._highlight_keys:
             ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
                       foreground="#2e7d32").pack(side="left", padx=(10, 0))
-        if self._warn_levels:
-            ttk.Label(top, text="(🔴 검토 필요 / 🟠 검토 필요·세부공정 제외)",
+        if self._show_review_col:
+            ttk.Label(top, text="(검토 열: 🔴 완전 일치 / 🟠 세부공정만 다름)",
                       foreground="#c00").pack(side="left", padx=(10, 0))
 
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(body, columns=columns, show="headings",
+
+        if self._show_review_col:
+            # 알람 전용 열을 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
+            self._review_col_pos = key_index
+            display_columns = list(columns[:key_index]) + ["검토"] + list(columns[key_index:])
+            display_widths = list(widths[:key_index]) + [150] + list(widths[key_index:])
+        else:
+            self._review_col_pos = None
+            display_columns = list(columns)
+            display_widths = list(widths)
+
+        self.tree = ttk.Treeview(body, columns=display_columns, show="headings",
                                  height=18, selectmode="browse")
-        for c, w in zip(columns, widths):
+        for c, w in zip(display_columns, display_widths):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
         self.tree.tag_configure("used", background="#C8E6C9")
@@ -841,14 +854,26 @@ class PickerDialog(tk.Toplevel):
                 continue
             key = str(row[self._key_index])
             level = self._warn_levels.get(key)
-            display = list(row)
-            if level == "red":
-                display[self._key_index] = "🔴검토필요 " + display[self._key_index]
-            elif level == "orange":
-                display[self._key_index] = "🟠검토필요(세부공정↓) " + display[self._key_index]
             used = key in self._highlight_keys
+
+            if self._show_review_col:
+                if level == "red":
+                    review_text = "🔴 검토 필요"
+                elif level == "orange":
+                    review_text = "🟠 세부공정만 다름"
+                else:
+                    review_text = ""
+                pos = self._review_col_pos
+                display = list(row[:pos]) + [review_text] + list(row[pos:])
+            else:
+                display = list(row)
+
             iid = str(i)
             self._iid_to_row[iid] = row
+            # "used"(초록 배경, 이전 주문 이력)와 검토 열의 마커는 서로 다른
+            # 채널(배경색 vs 별도 열의 글자)이라 둘 다 해당돼도 항상 같이
+            # 보인다 — 이전에는 마커를 FSC 칸 글자에 붙여서 칸이 좁으면
+            # 하나가 가려 보이는 문제가 있었다.
             self.tree.insert("", "end", iid=iid, values=display,
                              tags=("used",) if used else ())
             shown += 1
@@ -1059,16 +1084,12 @@ class App(tk.Tk):
         self._option_box = obox
         self._build_options_box(obox)
 
-        # 품목 라인 입력
-        lbox = ttk.LabelFrame(root, text=" 품목 라인 (행마다 달라지는 값) ", padding=8)
-        lbox.pack(fill="both", expand=True, pady=(8, 0))
-        self._line_box = lbox
-        self._line_form(lbox)
-        self._line_table(lbox)
-
-        # 하단
+        # 하단 버튼 바 — 품목 라인(표)보다 먼저, side="bottom"으로 붙여서
+        # 창이 좁아져도 이 버튼들이 항상 온전히 보이게 한다. (나중에 붙이는
+        # expand=True 위젯이 남은 공간을 다 가져가버려 이 버튼들이 찌그러지던
+        # 문제가 있었다 — pack()은 먼저 붙인 위젯의 크기부터 확보한다.)
         bottom = ttk.Frame(root)
-        bottom.pack(fill="x", pady=(8, 0))
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
         self.status = ttk.Label(bottom, text="", foreground="#555")
         self.status.pack(side="left")
         _colored_button(bottom, "엑셀 파일 생성", command=self._export,
@@ -1077,6 +1098,15 @@ class App(tk.Tk):
                         bg="#E8EAF6").pack(side="right", padx=(0, 6))
         _colored_button(bottom, "초기화", command=self._reset_all,
                         bg="#FFCDD2").pack(side="right", padx=(0, 6))
+
+        # 품목 라인 입력 — 하단 버튼 바보다 나중에 붙여서, 창이 좁을 때
+        # 이 영역(특히 표)이 먼저 줄어들게 한다. 표 자체에 스크롤바가
+        # 있으니 버튼처럼 찌그러지는 대신 스크롤로 자연스럽게 대응된다.
+        lbox = ttk.LabelFrame(root, text=" 품목 라인 (행마다 달라지는 값) ", padding=8)
+        lbox.pack(fill="both", expand=True, pady=(8, 0))
+        self._line_box = lbox
+        self._line_form(lbox)
+        self._line_table(lbox)
 
         # 양식을 아직 불러오기 전에는 입력칸을 잠그고, 클릭하면 안내 문구를 띄운다.
         self.bind_all("<Button-1>", self._on_locked_click, add="+")
@@ -1246,23 +1276,14 @@ class App(tk.Tk):
 
     # ---------- 옵션 (자재코드 + CIP AS-IS FSC 알람 조건)
     def _build_options_box(self, parent):
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정)을 먼저 고르고, 그
+        # 조건으로 자재코드를 찾는 흐름이 더 직관적이라 자재코드 입력을
+        # 옵션 아래로 내렸다.
         row1 = ttk.Frame(parent)
         row1.pack(fill="x")
-        ttk.Label(row1, text="자재코드(Q)", width=16).pack(side="left")
-        var_q = tk.StringVar()
-        self.line_vars["Q"] = var_q
-        self.entry_Q = ttk.Entry(row1, textvariable=var_q, width=18)
-        self.entry_Q.pack(side="left")
-        _colored_button(row1, "찾기", width=5, bg="#E8EAF6",
-                        command=self._pick_fsc).pack(side="left", padx=2)
-        self.lbl_cip_status = ttk.Label(row1, text="", foreground="#c00")
-        self.lbl_cip_status.pack(side="left", padx=(10, 0))
-
-        row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=(8, 0))
 
         def _combo_cell(label, key):
-            cell = ttk.Frame(row2)
+            cell = ttk.Frame(row1)
             cell.pack(side="left", padx=(0, 14))
             ttk.Label(cell, text=label).pack(anchor="w")
             var = tk.StringVar()
@@ -1279,7 +1300,7 @@ class App(tk.Tk):
 
         # 세부공정: 특수문자를 '-'로 통일해 스펠링만 인식하고, 입력하는
         # 대로 드롭다운 목록을 실시간으로 좁혀 보여준다.
-        cell = ttk.Frame(row2)
+        cell = ttk.Frame(row1)
         cell.pack(side="left")
         ttk.Label(cell, text="세부공정").pack(anchor="w")
         var_sub = tk.StringVar()
@@ -1287,6 +1308,18 @@ class App(tk.Tk):
         self._subproc_cbo = ttk.Combobox(cell, textvariable=var_sub, width=14)
         self._subproc_cbo.pack()
         var_sub.trace_add("write", lambda *_: self._on_subproc_input())
+
+        row2 = ttk.Frame(parent)
+        row2.pack(fill="x", pady=(8, 0))
+        ttk.Label(row2, text="자재코드(Q)", width=16).pack(side="left")
+        var_q = tk.StringVar()
+        self.line_vars["Q"] = var_q
+        self.entry_Q = ttk.Entry(row2, textvariable=var_q, width=18)
+        self.entry_Q.pack(side="left")
+        _colored_button(row2, "찾기", width=5, bg="#E8EAF6",
+                        command=self._pick_fsc).pack(side="left", padx=2)
+        self.lbl_cip_status = ttk.Label(row2, text="", foreground="#c00")
+        self.lbl_cip_status.pack(side="left", padx=(10, 0))
 
         # 자재코드(Q) 입력시 로그상 최근 단가 자동입력 (없으면 그대로, 수정 가능)
         var_q.trace_add("write", lambda *_: self._auto_price())
@@ -1399,11 +1432,32 @@ class App(tk.Tk):
                         bg="#ECEFF1").pack(side="right", padx=6)
 
     def _line_table(self, parent):
+        # 행 조작 버튼 바를 표보다 먼저 side="bottom"으로 붙인다 — 창이
+        # 좁아졌을 때 표 대신 이 버튼들이 찌그러지는 일이 없게 하기 위함
+        # (표는 자체 스크롤바가 있어 공간이 부족하면 스크롤로 대응된다).
+        tb = ttk.Frame(parent)
+        tb.pack(side="bottom", fill="x", pady=(6, 0))
+        _colored_button(tb, "전체 선택", command=self._select_all_lines,
+                        bg="#BBDEFB").pack(side="left")
+        _colored_button(tb, "선택 행에 반영", command=self._apply_to_selected,
+                        bg="#FFF9C4").pack(side="left", padx=6)
+        _colored_button(tb, "선택 행 복제", command=self._dup_line,
+                        bg="#E8EAF6").pack(side="left")
+        _colored_button(tb, "선택 행 삭제", command=self._del_line,
+                        bg="#FFCDD2").pack(side="left", padx=6)
+        _colored_button(tb, "전체 삭제", command=self._clear_lines,
+                        bg="#EF9A9A").pack(side="left")
+        self.line_count = ttk.Label(tb, text="0 행")
+        self.line_count.pack(side="right")
+
         wrap = ttk.Frame(parent)
         wrap.pack(fill="both", expand=True)
         cols = ["선택", "No"] + LINE_KEYS
+        # 옵션 박스가 추가되며 창 전체 높이가 늘어나, 노트북 화면(1366x768
+        # 등)에서 창이 눌려 아래 버튼이 잘 안 보이던 문제가 있었다. 표
+        # 자체엔 스크롤바가 있으니 기본 표시 행 수를 줄여 여유를 둔다.
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
-                                 height=12, selectmode="extended")
+                                 height=8, selectmode="extended")
         self.tree.heading("선택", text="선택")
         self.tree.column("선택", width=40, anchor="center")
         self.tree.heading("No", text="No")
@@ -1426,21 +1480,6 @@ class App(tk.Tk):
         self.tree.bind("<Double-1>", lambda e: self._load_selected())
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<<TreeviewSelect>>", self._refresh_checks)
-
-        tb = ttk.Frame(parent)
-        tb.pack(fill="x", pady=(6, 0))
-        _colored_button(tb, "전체 선택", command=self._select_all_lines,
-                        bg="#BBDEFB").pack(side="left")
-        _colored_button(tb, "선택 행에 반영", command=self._apply_to_selected,
-                        bg="#FFF9C4").pack(side="left", padx=6)
-        _colored_button(tb, "선택 행 복제", command=self._dup_line,
-                        bg="#E8EAF6").pack(side="left")
-        _colored_button(tb, "선택 행 삭제", command=self._del_line,
-                        bg="#FFCDD2").pack(side="left", padx=6)
-        _colored_button(tb, "전체 삭제", command=self._clear_lines,
-                        bg="#EF9A9A").pack(side="left")
-        self.line_count = ttk.Label(tb, text="0 행")
-        self.line_count.pack(side="right")
 
     # ---------- 동작
     def _pick_master(self):
@@ -1512,9 +1551,11 @@ class App(tk.Tk):
                                     opt["process"], opt["vendor"], opt["subproc"], code)
             if level:
                 warn_levels[code] = level
+        # "검토" 열이 왼쪽에 따로 추가되는 만큼 나머지 열 너비를 조금씩
+        # 줄여 창이 과하게 넓어지지 않게 균형을 맞췄다.
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
                            ("FSC", "VER", "모델명", "설명", "상태"),
-                           (120, 45, 110, 300, 90), self.md.fsc,
+                           (130, 45, 100, 260, 80), self.md.fsc,
                            initial=initial_search,
                            highlight_keys=set(self.price_map.keys()),
                            warn_levels=warn_levels)

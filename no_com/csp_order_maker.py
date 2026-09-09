@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-CSP 주문접수 업로드 파일 생성기  (알파 v0.1)
+CSP 주문접수 업로드 파일 생성기  (알파 v0.2)
 
 사용법
   1) 이 파일과 'CSP_주문접수_업로드_통합양식.xlsx' 를 같은 폴더에 둔다
   2) python csp_order_maker.py
-  3) 공통값을 채우고 -> 품목 라인을 추가 -> [엑셀 파일 생성]
+  3) 공통값을 채우고 -> 옵션(자재코드/CIP 조건) 입력 -> 품목 라인을 추가
+     -> [엑셀 파일 생성]
+
+v0.2: CIP AS-IS FSC 알람 고도화 — 옵션(사업장/DEVICE/대공정/설비사/
+      세부공정)을 CIP 시트 기준으로 입력받아, 자재코드 선택/추가 시
+      옵션 조건까지 완전히 일치하면 빨강("검토 필요"), 세부공정만
+      다르면 주황으로 표시한다.
 
 필요 패키지 : openpyxl
 """
@@ -25,7 +31,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Alignment
 from openpyxl.utils import get_column_letter, column_index_from_string
 
-APP_TITLE = "CSP 주문접수 업로드 파일 생성기  (alpha v0.1)"
+APP_TITLE = "CSP 주문접수 업로드 파일 생성기  (alpha v0.2)"
 TEMPLATE_NAME = "CSP_주문접수_업로드_통합양식.xlsx"
 SETTINGS_NAME = "csp_order_maker_settings.json"
 LOG_NAME = "CSP_주문접수_전체로그.xlsx"
@@ -99,6 +105,122 @@ def open_folder(path):
         pass
 
 
+# ---------------------------------------------------------------- CIP 헤더 탐색
+# CIP 시트의 열 위치를 코드에 고정(하드코딩)하지 않고, 헤더 텍스트를 찾아서
+# 그 아래 실제 데이터가 있는 열을 알아낸다 — 열 순서가 바뀌어도 그대로 동작한다.
+_CIP_HEADER_SCAN_ROWS = 6   # 헤더 관련 텍스트는 이 안에 있다고 보고 그 안에서만 찾는다
+_CIP_MAX_COL = 40
+
+
+def _h(v):
+    """헤더 텍스트 비교용 정규화: 공백/하이픈/마침표 제거 후 대문자."""
+    if v is None:
+        return ""
+    return re.sub(r"[\s\-\.]+", "", str(v).strip()).upper()
+
+
+def _find_cip_col(ws, label):
+    """헤더 행들 중 어느 셀이든 label과 일치하면 그 열 번호(1-based)를 반환."""
+    target = _h(label)
+    if not target:
+        return None
+    for r in range(1, _CIP_HEADER_SCAN_ROWS + 1):
+        for c in range(1, _CIP_MAX_COL + 1):
+            if _h(ws.cell(row=r, column=c).value) == target:
+                return c
+    return None
+
+
+def _find_cip_subheader_col(ws, section_label, sub_label):
+    """병합된 섹션 헤더(예: 'AS-IS') 아래에 있는 서브헤더(예: 'FSC') 열을 찾는다.
+
+    read_only 모드로 열면 병합 셀 정보를 읽을 수 없어(맨 왼쪽 셀에만 값이
+    있고 나머지는 None) merged_cells를 쓸 수 없다. 대신 한 행을 왼쪽에서
+    가장 가까운 값으로 채워 넣어(엑셀 화면에 보이는 대로) 각 열이 어느
+    섹션에 속하는지 판단한다.
+    """
+    section_target = _h(section_label)
+    sub_target = _h(sub_label)
+    for r in range(1, _CIP_HEADER_SCAN_ROWS + 1):
+        filled, last = [], ""
+        for c in range(1, _CIP_MAX_COL + 1):
+            v = _h(ws.cell(row=r, column=c).value)
+            if v:
+                last = v
+            filled.append(last)
+        if section_target not in filled:
+            continue
+        for r2 in range(r + 1, min(r + 3, _CIP_HEADER_SCAN_ROWS) + 1):
+            for c in range(1, _CIP_MAX_COL + 1):
+                if (filled[c - 1] == section_target
+                        and _h(ws.cell(row=r2, column=c).value) == sub_target):
+                    return c
+    return None
+
+
+# ---------------------------------------------------------------- CIP 매치(AS-IS FSC 알람)
+# "ALL"(사업장) / "-"(대공정·설비사·세부공정)은 CIP 시트에서 "해당 항목 전체에
+# 적용됨"을 뜻하는 값이라 와일드카드로 취급한다. 옵션 칸이 아직 비어 있는
+# 경우는(아직 입력 안 함) 와일드카드로 보지 않는다 — 그래야 세부공정만 빈
+# 상태에서도 "세부공정 제외 동일"(orange)로 자연스럽게 떨어진다.
+_CIP_WILDCARDS = {"ALL", "-"}
+
+
+def _norm_plain(v):
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip().upper()
+
+
+def _norm_subproc(v):
+    """세부공정 정규화: 영문/숫자/한글이 아닌 문자는 전부 '-'로 통일하고
+    (연속되면 하나로 합침) 대소문자를 구분하지 않는다."""
+    raw = _norm_plain(v)
+    if raw in _CIP_WILDCARDS or raw == "":
+        return raw
+    return re.sub(r"[^0-9A-Z가-힣]+", "-", raw).strip("-")
+
+
+def _cip_field_eq(cip_val, opt_val, normalize=_norm_plain):
+    a, b = normalize(cip_val), normalize(opt_val)
+    if not a or not b:
+        return False
+    return a == b or a in _CIP_WILDCARDS or b in _CIP_WILDCARDS
+
+
+def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
+    """옵션(사업장/DEVICE/대공정/설비사/세부공정) + 자재코드(fsc)를 CIP AS-IS
+    데이터와 비교한다.
+
+    반환: "red"  — 옵션 5개 필드 + 자재코드가 CIP 한 행과 완전히 일치
+                    (해당 조건에서 이 자재코드는 AS-IS로 등록돼 있음 = 검토 필요)
+          "orange" — 세부공정을 제외한 나머지(사업장/DEVICE/대공정/설비사)와
+                    자재코드가 일치하는 CIP 행이 있지만 세부공정만 다름
+          None  — 해당 사항 없음
+    """
+    fsc_n = _norm_plain(fsc)
+    if not fsc_n or not cip_rows:
+        return None
+    found_orange = False
+    for r in cip_rows:
+        if _norm_plain(r.get("fsc")) != fsc_n:
+            continue
+        if not _cip_field_eq(r.get("site"), site):
+            continue
+        if not _cip_field_eq(r.get("device"), device):
+            continue
+        if not _cip_field_eq(r.get("process"), process):
+            continue
+        if not _cip_field_eq(r.get("vendor"), vendor):
+            continue
+        if _cip_field_eq(r.get("subproc"), subproc, normalize=_norm_subproc):
+            return "red"
+        found_orange = True
+    return "orange" if found_orange else None
+
+
 # ---------------------------------------------------------------- 마스터 데이터
 class MasterData:
     """통합양식 파일의 코드 시트 / FSC 시트를 읽어들인다."""
@@ -114,7 +236,13 @@ class MasterData:
         self.comm_types = []
         self.fsc = []              # [(FSC, VER, FSC NM, 설명, 상태)]
         self.fsc_filter_note = ""  # 필터가 완화/생략된 경우의 안내 문구
-        self.cip_fsc = set()       # CIP 시트 J열(AS-IS FSC)에 등장하는 값들
+        # CIP 시트: AS-IS FSC 알람용 옵션 드롭다운 + 매치 데이터
+        self.cip_rows = []         # [{"site","device","process","vendor","subproc","fsc"}, ...]
+        self.cip_sites = []
+        self.cip_devices = []
+        self.cip_processes = []
+        self.cip_vendors = []
+        self.cip_subprocs = []     # 정규화(특수문자→'-', 대소문자 무시)된 고유값
         self._load()
 
     @staticmethod
@@ -208,17 +336,47 @@ class MasterData:
 
             if "CIP" in wb.sheetnames:
                 ws = wb["CIP"]
-                cip_fsc = set()
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    # CIP 시트는 머리글이 여러 줄이라 고정 행번호로 자르는 대신
-                    # No. 열(B, 데이터행에서만 숫자)로 실제 데이터행을 가려낸다.
-                    no = row[1] if len(row) > 1 else None
-                    if not isinstance(no, (int, float)):
-                        continue
-                    j_val = self._s(row[9]) if len(row) > 9 else ""   # J열 : AS-IS FSC
-                    if j_val:
-                        cip_fsc.add(j_val)
-                self.cip_fsc = cip_fsc
+                # 열 위치를 하드코딩하지 않고 헤더 텍스트로 찾는다 — 열 순서가
+                # 바뀌어도, 열이 추가/삭제돼도 그대로 동작한다.
+                col_no      = _find_cip_col(ws, "No.") or _find_cip_col(ws, "No")
+                col_site    = _find_cip_col(ws, "사업장")
+                col_device  = _find_cip_col(ws, "DEVICE")
+                col_process = _find_cip_col(ws, "대공정")
+                col_vendor  = _find_cip_col(ws, "설비사")
+                col_subproc = _find_cip_col(ws, "세부공정")
+                col_fsc     = _find_cip_subheader_col(ws, "AS-IS", "FSC")
+
+                cip_rows = []
+                sites, devices, processes, vendors, subprocs = set(), set(), set(), set(), set()
+                if col_no and col_fsc:
+                    for row in ws.iter_rows(min_row=1, values_only=False):
+                        # CIP 시트는 머리글이 여러 줄이라 고정 행번호로 자르는
+                        # 대신 No.열이 숫자인 행만 실제 데이터 행으로 본다.
+                        no = row[col_no - 1].value if len(row) >= col_no else None
+                        if not isinstance(no, (int, float)):
+                            continue
+
+                        def _cell(col):
+                            return self._s(row[col - 1].value) if col and len(row) >= col else ""
+
+                        site, device = _cell(col_site), _cell(col_device)
+                        process, vendor = _cell(col_process), _cell(col_vendor)
+                        subproc, fsc = _cell(col_subproc), _cell(col_fsc)
+                        cip_rows.append({"site": site, "device": device,
+                                         "process": process, "vendor": vendor,
+                                         "subproc": subproc, "fsc": fsc})
+                        if site: sites.add(site)
+                        if device: devices.add(device)
+                        if process: processes.add(process)
+                        if vendor: vendors.add(vendor)
+                        if subproc: subprocs.add(_norm_subproc(subproc))
+
+                self.cip_rows = cip_rows
+                self.cip_sites = sorted(sites)
+                self.cip_devices = sorted(devices)
+                self.cip_processes = sorted(processes)
+                self.cip_vendors = sorted(vendors)
+                self.cip_subprocs = sorted(subprocs)
         finally:
             wb.close()
 
@@ -321,16 +479,6 @@ REQUEST_COLS = {
     "due": "AA",        # 희망 납품일 -> 납품요청일
 }
 REQUEST_COL_IDX = {k: column_index_from_string(v) - 1 for k, v in REQUEST_COLS.items()}
-
-
-def extract_after_lot(text):
-    """'DRY_PUMP;EQ,LOT,HD4500PW' -> 'HD4500PW' (LOT, 뒤 값을 뽑아낸다)"""
-    text = str(text or "")
-    marker = "LOT,"
-    idx = text.find(marker)
-    if idx == -1:
-        return ""
-    return text[idx + len(marker):].strip()
 
 
 def extract_after_underscore(text):
@@ -602,12 +750,15 @@ class PickerDialog(tk.Toplevel):
     """검색 + 목록 선택 공용 팝업."""
 
     def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
-                 highlight_keys=None):
+                 highlight_keys=None, warn_levels=None):
         """
-        highlight_keys : 강조 표시할 키 값들의 집합. 지정하면
-          1) 해당 값이 key_index 열과 일치하는 행을 목록 맨 위로 올리고
-          2) 그 행들을 색으로 강조 표시한다.
-        (예: 전체 로그에 이미 등장한 자재코드를 FSC 선택창에서 강조)
+        highlight_keys : 강조 표시할 키 값들의 집합(초록 배경 + 목록 상위 정렬).
+          (예: 전체 로그에 이미 등장한 적 있는 자재코드)
+        warn_levels    : {키 값: "red"/"orange"}. CIP AS-IS FSC 알람 —
+          표시 텍스트 앞에 마커를 붙이고(색이 아니라 텍스트라 강조 배경색과
+          충돌하지 않는다) highlight_keys보다 우선해 목록 맨 위로 올린다.
+          마커는 화면 표시용일 뿐 실제 반환값(self.result)에는 섞이지
+          않도록 원본 행을 iid로 따로 기억해둔다.
         """
         super().__init__(parent)
         self.title(title)
@@ -616,11 +767,25 @@ class PickerDialog(tk.Toplevel):
         self.result = None
         self._key_index = key_index
         self._highlight_keys = {str(k) for k in highlight_keys} if highlight_keys else set()
+        self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
+        self._iid_to_row = {}
 
         rows = list(rows)
-        if self._highlight_keys:
-            # 안정 정렬이므로 강조 그룹/비강조 그룹 각각의 원래 순서는 유지된다.
-            rows.sort(key=lambda r: str(r[key_index]) not in self._highlight_keys)
+
+        def _priority(r):
+            key = str(r[key_index])
+            level = self._warn_levels.get(key)
+            if level == "red":
+                return 0
+            if level == "orange":
+                return 1
+            if key in self._highlight_keys:
+                return 2
+            return 3
+
+        if self._highlight_keys or self._warn_levels:
+            # 안정 정렬이므로 각 우선순위 그룹 내 원래 순서는 유지된다.
+            rows.sort(key=_priority)
         self._rows = rows
 
         top = ttk.Frame(self, padding=8)
@@ -636,6 +801,9 @@ class PickerDialog(tk.Toplevel):
         if self._highlight_keys:
             ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
                       foreground="#2e7d32").pack(side="left", padx=(10, 0))
+        if self._warn_levels:
+            ttk.Label(top, text="(🔴 검토 필요 / 🟠 검토 필요·세부공정 제외)",
+                      foreground="#c00").pack(side="left", padx=(10, 0))
 
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
@@ -666,12 +834,23 @@ class PickerDialog(tk.Toplevel):
     def _refresh(self):
         kw = self.var.get().strip().lower()
         self.tree.delete(*self.tree.get_children())
+        self._iid_to_row = {}
         shown = 0
-        for row in self._rows:
+        for i, row in enumerate(self._rows):
             if kw and not any(kw in str(v).lower() for v in row):
                 continue
-            used = str(row[self._key_index]) in self._highlight_keys
-            self.tree.insert("", "end", values=row, tags=("used",) if used else ())
+            key = str(row[self._key_index])
+            level = self._warn_levels.get(key)
+            display = list(row)
+            if level == "red":
+                display[self._key_index] = "🔴검토필요 " + display[self._key_index]
+            elif level == "orange":
+                display[self._key_index] = "🟠검토필요(세부공정↓) " + display[self._key_index]
+            used = key in self._highlight_keys
+            iid = str(i)
+            self._iid_to_row[iid] = row
+            self.tree.insert("", "end", iid=iid, values=display,
+                             tags=("used",) if used else ())
             shown += 1
             if shown >= 500:
                 break
@@ -688,7 +867,11 @@ class PickerDialog(tk.Toplevel):
         sel = self.tree.selection()
         if not sel:
             return
-        self.result = self.tree.item(sel[0], "values")[self._key_index]
+        row = self._iid_to_row.get(sel[0])
+        if row is not None:
+            self.result = row[self._key_index]
+        else:
+            self.result = self.tree.item(sel[0], "values")[self._key_index]
         self.destroy()
 
 
@@ -708,7 +891,12 @@ class App(tk.Tk):
         self.md = None
         self.common_vars = {}
         self.line_vars = {}
-        self.lines = []          # [{열키: 원시 문자열}]
+        # CIP AS-IS FSC 알람용 옵션(사업장/DEVICE/대공정/설비사/세부공정).
+        # 품목 라인과 달리 여러 행을 추가하는 동안 값이 유지된다.
+        self.option_vars = {}
+        self.cip_cbo = {}         # {"site"/"device"/"process"/"vendor": Combobox}
+        self._subproc_all_values = []
+        self.lines = []          # [{열키: 원시 문자열, "_opt": 추가 당시 옵션 스냅샷}]
         self.price_map = load_price_map()   # 자재코드 -> 최근 단가 (모든 로그 파일 취합)
         self.request_path = tk.StringVar()
         self.request_rows = []    # 의뢰파일에서 읽은 dict 리스트
@@ -755,6 +943,7 @@ class App(tk.Tk):
             self._set_form_locked(self.md is None)
             return
         self._fill_combos()
+        self._fill_cip_combos()
         text = ("양식 로드 완료 · 판매처 %d · 인도처 %d · FSC %d건"
                 % (len(self.md.sold_to), len(self.md.ship_to), len(self.md.fsc)))
         if self.md.fsc_filter_note:
@@ -778,13 +967,28 @@ class App(tk.Tk):
             if values and not self.common_vars[key].get().strip():
                 self.common_vars[key].set(values[0])
 
+    def _fill_cip_combos(self):
+        """CIP 시트에서 뽑아낸 고유값으로 옵션 콤보박스 목록을 채운다.
+        (공통값 콤보와 달리 기본값을 자동 선택하지 않는다 — '이 조건에 맞는
+        값을 직접 고르거나 입력'하는 용도라 임의의 첫 값을 넣으면 오히려
+        혼란을 준다.)"""
+        self.cip_cbo["site"]["values"] = self.md.cip_sites
+        self.cip_cbo["device"]["values"] = self.md.cip_devices
+        self.cip_cbo["process"]["values"] = self.md.cip_processes
+        self.cip_cbo["vendor"]["values"] = self.md.cip_vendors
+        self._subproc_all_values = list(self.md.cip_subprocs)
+        self._subproc_cbo["values"] = self._subproc_all_values
+
     def _on_locked_click(self, event):
         """양식을 불러오기 전에 입력 영역을 클릭하면 안내 문구를 띄운다."""
         if self.md is not None:
             return
         w = event.widget
+        locked_boxes = (getattr(self, "_common_box", None),
+                       getattr(self, "_option_box", None),
+                       getattr(self, "_line_box", None))
         while w is not None:
-            if w in (getattr(self, "_common_box", None), getattr(self, "_line_box", None)):
+            if w in locked_boxes:
                 messagebox.showinfo("안내", "먼저 통합양식을 업로드 하세요.")
                 return
             w = w.master
@@ -807,9 +1011,11 @@ class App(tk.Tk):
             self._set_state_recursive(child, disabled)
 
     def _set_form_locked(self, locked):
-        """양식을 불러오기 전에는 공통값/품목 라인 입력 영역을 모두 비활성화한다."""
+        """양식을 불러오기 전에는 공통값/옵션/품목 라인 입력 영역을 모두 비활성화한다."""
         if hasattr(self, "_common_box"):
             self._set_state_recursive(self._common_box, locked)
+        if hasattr(self, "_option_box"):
+            self._set_state_recursive(self._option_box, locked)
         if hasattr(self, "_line_box"):
             self._set_state_recursive(self._line_box, locked)
 
@@ -845,6 +1051,13 @@ class App(tk.Tk):
                               padding=8)
         rbox.pack(fill="x", pady=(8, 0))
         self._request_box(rbox)
+
+        # 옵션 (자재코드 + CIP AS-IS FSC 알람용 조건)
+        obox = ttk.LabelFrame(
+            root, text=" 옵션 (자재코드 · CIP AS-IS FSC 검토 필요 알람 조건) ", padding=8)
+        obox.pack(fill="x", pady=(8, 0))
+        self._option_box = obox
+        self._build_options_box(obox)
 
         # 품목 라인 입력
         lbox = ttk.LabelFrame(root, text=" 품목 라인 (행마다 달라지는 값) ", padding=8)
@@ -1013,11 +1226,15 @@ class App(tk.Tk):
         self.line_qty.set(str(qty) if qty and qty >= 1 else "1")
 
         if r.get("line") is not None:
-            self.line_vars["M"].set(extract_after_underscore(r["line"]))
+            proc = extract_after_underscore(r["line"])
+            self.line_vars["M"].set(proc)
+            self.option_vars["process"].set(proc)   # 옵션의 대공정도 동일하게
         if r.get("subprocess") is not None:
             self.line_vars["O"].set(str(r["subprocess"]).strip())
         if r.get("maker") is not None:
-            self.line_vars["N"].set(str(r["maker"]).strip())
+            maker = str(r["maker"]).strip()
+            self.line_vars["N"].set(maker)
+            self.option_vars["vendor"].set(maker)   # 옵션의 설비사도 동일하게
         if r.get("equip_no") is not None:
             self.line_vars["P"].set(str(r["equip_no"]).strip())
 
@@ -1027,17 +1244,100 @@ class App(tk.Tk):
         elif due:
             self.line_vars["T"].set(format_date_mask(str(due)))
 
-        keyword = extract_after_lot(r.get("desc"))
-        self._pick_fsc(initial_search=keyword)
+    # ---------- 옵션 (자재코드 + CIP AS-IS FSC 알람 조건)
+    def _build_options_box(self, parent):
+        row1 = ttk.Frame(parent)
+        row1.pack(fill="x")
+        ttk.Label(row1, text="자재코드(Q)", width=16).pack(side="left")
+        var_q = tk.StringVar()
+        self.line_vars["Q"] = var_q
+        self.entry_Q = ttk.Entry(row1, textvariable=var_q, width=18)
+        self.entry_Q.pack(side="left")
+        _colored_button(row1, "찾기", width=5, bg="#E8EAF6",
+                        command=self._pick_fsc).pack(side="left", padx=2)
+        self.lbl_cip_status = ttk.Label(row1, text="", foreground="#c00")
+        self.lbl_cip_status.pack(side="left", padx=(10, 0))
+
+        row2 = ttk.Frame(parent)
+        row2.pack(fill="x", pady=(8, 0))
+
+        def _combo_cell(label, key):
+            cell = ttk.Frame(row2)
+            cell.pack(side="left", padx=(0, 14))
+            ttk.Label(cell, text=label).pack(anchor="w")
+            var = tk.StringVar()
+            self.option_vars[key] = var
+            cbo = ttk.Combobox(cell, textvariable=var, width=14)
+            cbo.pack()
+            self.cip_cbo[key] = cbo
+            var.trace_add("write", lambda *_: self._update_cip_status())
+
+        _combo_cell("사업장", "site")
+        _combo_cell("DEVICE", "device")
+        _combo_cell("대공정", "process")
+        _combo_cell("설비사", "vendor")
+
+        # 세부공정: 특수문자를 '-'로 통일해 스펠링만 인식하고, 입력하는
+        # 대로 드롭다운 목록을 실시간으로 좁혀 보여준다.
+        cell = ttk.Frame(row2)
+        cell.pack(side="left")
+        ttk.Label(cell, text="세부공정").pack(anchor="w")
+        var_sub = tk.StringVar()
+        self.option_vars["subproc"] = var_sub
+        self._subproc_cbo = ttk.Combobox(cell, textvariable=var_sub, width=14)
+        self._subproc_cbo.pack()
+        var_sub.trace_add("write", lambda *_: self._on_subproc_input())
+
+        # 자재코드(Q) 입력시 로그상 최근 단가 자동입력 (없으면 그대로, 수정 가능)
+        var_q.trace_add("write", lambda *_: self._auto_price())
+        # 자재코드(Q)가 CIP AS-IS와 (옵션 조건까지 포함해) 일치하면 알람 표시
+        var_q.trace_add("write", lambda *_: self._update_cip_status())
+
+    def _on_subproc_input(self):
+        self._filter_subproc_combo()
+        self._update_cip_status()
+
+    def _filter_subproc_combo(self):
+        """세부공정 입력값과 스펠링이 일치하는(특수문자·대소문자 무시) 항목만
+        드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_subproc(self.option_vars["subproc"].get())
+        all_values = self._subproc_all_values
+        if not typed:
+            self._subproc_cbo["values"] = all_values
+        else:
+            self._subproc_cbo["values"] = [v for v in all_values if typed in v]
+
+    def _current_option_fields(self):
+        return {k: self.option_vars[k].get() for k in
+                ("site", "device", "process", "vendor", "subproc")}
+
+    def _update_cip_status(self):
+        """옵션 5개 필드 + 자재코드를 CIP AS-IS와 비교해 상태 라벨을 갱신한다."""
+        if not self.md:
+            self.lbl_cip_status.config(text="")
+            return
+        opt = self._current_option_fields()
+        level = cip_match_level(self.md.cip_rows, opt["site"], opt["device"],
+                                opt["process"], opt["vendor"], opt["subproc"],
+                                self.line_vars["Q"].get())
+        if level == "red":
+            self.lbl_cip_status.config(
+                text="🔴 검토 필요 (현재 조건 AS-IS와 완전히 일치)", foreground="#c00")
+        elif level == "orange":
+            self.lbl_cip_status.config(
+                text="🟠 검토 필요 (세부공정 제외 동일)", foreground="#e65100")
+        else:
+            self.lbl_cip_status.config(text="")
 
     def _line_form(self, parent):
         form = ttk.Frame(parent)
         form.pack(fill="x")
         # 고객PO번호는 숫자만 입력되도록 키 입력 단계에서 걸러낸다.
         vcmd_digits = (self.register(lambda p: p == "" or p.isdigit()), "%P")
+        # 자재코드(Q)는 옵션 박스로 이동했다 — 이 폼에는 만들지 않는다.
         specs = [("C", 12), ("F", 12), ("I", 8), ("L", 8),
                  ("M", 10), ("N", 12), ("O", 14), ("P", 10),
-                 ("Q", 14), ("T", 12), ("W", 10), ("X", 10)]
+                 ("T", 12), ("W", 10), ("X", 10)]
         for i, (key, width) in enumerate(specs):
             cell = ttk.Frame(form)
             cell.grid(row=0, column=i, padx=4, sticky="nw")
@@ -1057,16 +1357,11 @@ class App(tk.Tk):
             entry.pack(side="left")
             if key == "T":
                 self.entry_T = entry
-            elif key == "Q":
-                self.entry_Q = entry
             if key == "C":
                 _colored_button(row, "찾기", width=5, bg="#E8EAF6",
                                 command=self._pick_line_ship).pack(side="left", padx=2)
                 self._name_C = ttk.Label(cell, text="", foreground="#0a6")
                 self._name_C.pack(anchor="w")
-            elif key == "Q":
-                _colored_button(row, "찾기", width=5, bg="#E8EAF6",
-                                command=self._pick_fsc).pack(side="left", padx=2)
 
         # 금액(X) 옆 : 이 값으로 몇 행을 한번에 만들지 지정 (기본 1)
         qty_cell = ttk.Frame(form)
@@ -1080,10 +1375,7 @@ class App(tk.Tk):
 
         # 인도처코드(C) 선택시 이름 표시 + 인도장소/고객라인 자동입력
         self.line_vars["C"].trace_add("write", lambda *_: self._on_line_ship_change())
-        # 자재코드(Q) 입력시 로그상 최근 단가 자동입력 (없으면 그대로, 수정 가능)
-        self.line_vars["Q"].trace_add("write", lambda *_: self._auto_price())
-        # 자재코드(Q)가 CIP 시트의 AS-IS FSC와 일치하면 빨간 글씨로 경고
-        self.line_vars["Q"].trace_add("write", lambda *_: self._check_cip_warning())
+        # 자재코드(Q)/CIP 매치 관련 트레이스는 옵션 박스(_build_options_box)에서 건다.
         # 단가 -> 금액 자동
         self.line_vars["W"].trace_add("write", lambda *_: self._auto_amount())
         # 납품요청일 입력 형식을 yyyy-mm-dd 로 고정
@@ -1117,7 +1409,7 @@ class App(tk.Tk):
         self.tree.heading("No", text="No")
         self.tree.column("No", width=40, anchor="center")
         widths = {"C": 110, "F": 100, "I": 80, "L": 80, "M": 90, "N": 110,
-                  "O": 120, "P": 100, "Q": 120, "T": 100, "W": 100, "X": 100}
+                  "O": 120, "P": 100, "Q": 210, "T": 100, "W": 100, "X": 100}
         for k in LINE_KEYS:
             self.tree.heading(k, text=HEADER_BY_KEY[k])
             self.tree.column(k, width=widths[k], anchor="w")
@@ -1125,10 +1417,9 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=vs.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="left", fill="y")
-        # cip_warn은 배경색, due_* 는 글자색을 쓴다 — 서로 다른 속성이라
-        # 한 행에 둘 다 적용돼도 충돌 없이 동시에 표시된다(ttk.Treeview는
-        # 같은 속성(예: 글자색)을 여러 태그가 지정하면 하나만 적용된다).
-        self.tree.tag_configure("cip_warn", background="#FFCDD2")
+        # CIP AS-IS 알람(빨강/주황)은 자재코드 앞 마커 텍스트로 표시하므로
+        # (색이 아니라 텍스트라 아래 글자색 태그와 절대 충돌하지 않는다)
+        # 여기서는 납품임박색만 태그로 관리한다.
         self.tree.tag_configure("due_red", foreground="red")
         self.tree.tag_configure("due_orange", foreground="#E65100")
         self.tree.tag_configure("due_blue", foreground="blue")
@@ -1211,11 +1502,22 @@ class App(tk.Tk):
             return
         # 전체 로그(price_map)에 등장한 적 있는 자재코드는 강조 표시하고
         # 목록 맨 위로 올려서, 이전에 실제로 주문했던 FSC를 빠르게 찾을 수 있게 한다.
+        # 현재 옵션(사업장/DEVICE/대공정/설비사/세부공정) 조건에서 CIP AS-IS와
+        # 일치하는 후보는 그보다 더 우선해 빨강/주황으로 표시한다.
+        opt = self._current_option_fields()
+        warn_levels = {}
+        for f in self.md.fsc:
+            code = f[0]
+            level = cip_match_level(self.md.cip_rows, opt["site"], opt["device"],
+                                    opt["process"], opt["vendor"], opt["subproc"], code)
+            if level:
+                warn_levels[code] = level
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
                            ("FSC", "VER", "모델명", "설명", "상태"),
                            (120, 45, 110, 300, 90), self.md.fsc,
                            initial=initial_search,
-                           highlight_keys=set(self.price_map.keys()))
+                           highlight_keys=set(self.price_map.keys()),
+                           warn_levels=warn_levels)
         self.wait_window(dlg)
         if dlg.result:
             self.line_vars["Q"].set(dlg.result)
@@ -1232,14 +1534,6 @@ class App(tk.Tk):
         price = self.price_map.get(code)
         if price is not None and not self.line_vars["W"].get().strip():
             self.line_vars["W"].set(str(price))
-
-    def _check_cip_warning(self):
-        """자재코드가 CIP 시트의 AS-IS FSC(J열)와 완전히 같으면 빨간 글씨로 표시."""
-        code = self.line_vars["Q"].get().strip()
-        is_cip = bool(self.md and code and code in self.md.cip_fsc)
-        entry = getattr(self, "entry_Q", None)
-        if entry is not None:
-            entry.configure(foreground="red" if is_cip else "black")
 
     def _on_date_input(self):
         if self._t_guard:
@@ -1315,8 +1609,15 @@ class App(tk.Tk):
         qty = parse_int(self.line_qty.get())
         if qty is None or qty < 1:
             qty = 1
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정)은 여러 행을 추가하는 동안
+        # 계속 바뀔 수 있으므로, 나중에 CIP 알람을 다시 계산할 때 "지금
+        # 옵션이 뭔지"가 아니라 "이 행을 추가할 당시 옵션이 뭐였는지"를 써야
+        # 한다. 행마다 그 시점의 옵션 값을 그대로 저장해둔다.
+        opt_snapshot = self._current_option_fields()
         for _ in range(qty):
-            self.lines.append(dict(data))
+            row = dict(data)
+            row["_opt"] = dict(opt_snapshot)
+            self.lines.append(row)
         self._refresh_tree()
         # 다음 행 입력 편의를 위해 유지 (자재코드/단가/금액만 새로 입력)
         # 생성수량도 여기서 "1"로 되돌리지 않는다 — 의뢰파일 더블클릭으로
@@ -1379,8 +1680,11 @@ class App(tk.Tk):
         if errs:
             messagebox.showwarning("확인 필요", "\n".join(errs))
             return
+        opt_snapshot = self._current_option_fields()
         for i in idxs:
-            self.lines[i] = dict(data)
+            row = dict(data)
+            row["_opt"] = dict(opt_snapshot)
+            self.lines[i] = row
         self._refresh_tree()
         kids = self.tree.get_children()
         self.tree.selection_set([kids[i] for i in idxs])
@@ -1412,12 +1716,12 @@ class App(tk.Tk):
             self._refresh_tree()
 
     def _reset_all(self):
-        """공통값·의뢰파일·품목 라인을 전부 초기 상태로 되돌린다.
+        """공통값·의뢰파일·옵션·품목 라인을 전부 초기 상태로 되돌린다.
         통합양식(마스터) 파일 선택은 그대로 둔다 — 다시 읽을 필요가
         없고, 매번 파일을 다시 고르게 하면 오히려 불편하다."""
         if not messagebox.askyesno(
                 "초기화 확인",
-                "공통값·의뢰파일·품목 라인이 모두 초기화됩니다. 계속할까요?"):
+                "공통값·의뢰파일·옵션·품목 라인이 모두 초기화됩니다. 계속할까요?"):
             return
 
         defaults = self._common_defaults()
@@ -1433,26 +1737,46 @@ class App(tk.Tk):
         self._refresh_request_tree()
         self.request_status.config(text="")
 
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정)은 여러 행 추가 동안
+        # 일부러 유지시키는 값이라 [행 추가]/[입력칸 비우기]로는 안 지워진다
+        # — 완전 초기화는 여기서만 비운다.
+        for var in self.option_vars.values():
+            var.set("")
+        self._filter_subproc_combo()
+
         self.lines = []
         self._clear_line_form()
         self._refresh_tree()
+        self._update_cip_status()
 
         self.status.config(text="초기화했습니다.")
 
     def _refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
-        cip = self.md.cip_fsc if self.md else set()
+        cip_rows = self.md.cip_rows if self.md else []
+        q_idx = LINE_KEYS.index("Q")
         for n, d in enumerate(self.lines, start=1):
-            # 자재코드 경고(cip_warn, 배경색)와 납품요청일 임박색(due_*, 글자색)은
-            # 서로 다른 속성이라 우선순위 없이 둘 다 동시에 붙일 수 있다.
+            # CIP AS-IS 알람은 배경색이 아니라 자재코드 앞 마커 텍스트로
+            # 표시한다 — 납품임박색(due_*, 글자색)과 같은 채널을 쓰지
+            # 않으므로 우선순위 없이 항상 둘 다 눈에 보인다. 이 행을
+            # 추가할 당시의 옵션 값(_opt)을 써야 나중에 옵션을 바꿔도
+            # 예전 행이 엉뚱하게 다시 칠해지지 않는다.
+            opt = d.get("_opt", {})
+            level = cip_match_level(
+                cip_rows, opt.get("site", ""), opt.get("device", ""),
+                opt.get("process", ""), opt.get("vendor", ""),
+                opt.get("subproc", ""), d["Q"])
+            values = ["☐", n] + [d[k] for k in LINE_KEYS]
+            if level == "red":
+                values[2 + q_idx] = "🔴검토필요 " + d["Q"]
+            elif level == "orange":
+                values[2 + q_idx] = "🟠검토필요(세부공정↓) " + d["Q"]
+
             tags = []
-            if d["Q"].strip() in cip:
-                tags.append("cip_warn")
             color = due_date_color(parse_date(d["T"]))
             if color:
                 tags.append("due_%s" % color)
-            self.tree.insert("", "end", values=["☐", n] + [d[k] for k in LINE_KEYS],
-                             tags=tuple(tags))
+            self.tree.insert("", "end", values=values, tags=tuple(tags))
         self.line_count.config(text="%d 행" % len(self.lines))
 
     # ---------- 출력

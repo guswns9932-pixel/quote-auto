@@ -439,10 +439,13 @@ class MasterData:
                 fsc_map = {}
                 qcodes = set()
                 if col_site and col_device and col_process and col_vendor and col_qcode and col_fsc:
-                    max_col = max(ws.max_column, col_fsc + 20)
-                    for r in range(2, ws.max_row + 1):
+                    # read_only 모드에서는 ws.cell(row, col) 랜덤 접근이 매우
+                    # 느려(행마다 스트림을 다시 훑음) 대량 행에서는 사실상
+                    # 멈춘 것처럼 보인다 — CIP 파싱과 같이 iter_rows로 한 번만
+                    # 순차로 훑는다.
+                    for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                         def _cell(col):
-                            return self._s(ws.cell(row=r, column=col).value) if col else ""
+                            return self._s(row[col - 1]) if col and len(row) >= col else ""
                         site, device = _cell(col_site), _cell(col_device)
                         process, vendor = _cell(col_process), _cell(col_vendor)
                         subproc = _cell(col_subproc) if col_subproc else ""
@@ -454,8 +457,8 @@ class MasterData:
                         # (이력 중간에 빈 칸이 나오면 그 뒤는 아직 안 쓴 것으로 본다)
                         history = []
                         c = col_fsc
-                        while c <= max_col:
-                            v = _hist_val(ws.cell(row=r, column=c).value)
+                        while c <= len(row):
+                            v = _hist_val(row[c - 1])
                             if not v:
                                 break
                             history.append(v)
@@ -466,7 +469,7 @@ class MasterData:
                         key = (_norm_plain(site), _norm_plain(device), _norm_plain(process),
                                _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
                         qcodes.add(qcode)
-                        fsc_map[key] = {"row": r, "history": history}
+                        fsc_map[key] = {"row": r_idx, "history": history}
 
                 self.fsc_map = fsc_map
                 self.fsc_map_qcodes = sorted(qcodes)

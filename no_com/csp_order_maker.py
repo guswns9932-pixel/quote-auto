@@ -248,14 +248,31 @@ def _fsc_map_key(site, device, process, vendor, subproc, qcode):
             _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
 
 
-def fsc_recommend(fsc_map, site, device, process, vendor, subproc, qcode):
+def _fsc_map_key5(site, device, process, vendor, qcode):
+    return (_norm_plain(site), _norm_plain(device), _norm_plain(process),
+            _norm_plain(vendor), _norm_plain(qcode))
+
+
+def fsc_recommend(fsc_map, fsc_map_5key, site, device, process, vendor, subproc, qcode):
     """옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code) 조합으로 FSC매핑
-    시트를 조회해 현재 추천 자재코드(이력 중 가장 오른쪽 = 가장 최근 값)를
-    반환한다. 일치하는 조합이 없으면 None."""
-    entry = fsc_map.get(_fsc_map_key(site, device, process, vendor, subproc, qcode))
-    if not entry or not entry.get("history"):
-        return None
-    return entry["history"][-1]
+    시트를 조회해 추천 자재코드를 찾는다.
+
+    세부공정 표기가 워낙 다양해서(오타/약어 등) 6개 조건을 다 요구하면
+    추천이 거의 안 뜬다 — 그래서 세부공정을 제외한 5개 조건(사업장/
+    DEVICE/대공정/설비사/Q-code)이 일치하면 "후보" 추천을 먼저 주고,
+    세부공정까지 정확히 일치하면 "확정" 추천으로 격상한다.
+
+    반환: {"fsc": 추천 자재코드, "confirmed": bool} 또는 일치하는 조합이
+    전혀 없으면 None. confirmed=True는 6개 조건 전부 일치, False는
+    세부공정만 다른 5개 조건 일치.
+    """
+    entry6 = fsc_map.get(_fsc_map_key(site, device, process, vendor, subproc, qcode))
+    if entry6 and entry6.get("history"):
+        return {"fsc": entry6["history"][-1], "confirmed": True}
+    entry5 = fsc_map_5key.get(_fsc_map_key5(site, device, process, vendor, qcode))
+    if entry5:
+        return {"fsc": entry5["fsc"], "confirmed": False}
+    return None
 
 
 # ---------------------------------------------------------------- 마스터 데이터
@@ -281,6 +298,10 @@ class MasterData:
         # FSC매핑 시트: 옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code)
         # 조합별 추천 자재코드 + 이력, 그리고 옵션 드롭다운 목록.
         self.fsc_map = {}          # {정규화된 6키 튜플: {"row": 엑셀행번호, "history": [FSC, ...]}}
+        # 세부공정을 제외한 5키(사업장/DEVICE/대공정/설비사/Q-code) 기준
+        # 후보 추천용 — 같은 5키에 여러 세부공정 변형이 있으면 엑셀 행번호가
+        # 가장 큰(가장 나중에 추가된) 것을 대표값으로 쓴다.
+        self.fsc_map_5key = {}     # {정규화된 5키 튜플: {"row": 엑셀행번호, "fsc": 최근 FSC}}
         self.fsc_map_qcodes = []   # 옵션 Q-code 콤보박스용 고유값
         self.fsc_map_fsc_col = 0  # FSC(첫 이력) 열 번호 — 새 이력을 쓸 때 기준
         self.opt_sites = []
@@ -429,6 +450,7 @@ class MasterData:
                     return s if s and s != "0" else ""
 
                 fsc_map = {}
+                fsc_map_5key = {}
                 qcodes = set()
                 sites, devices, processes, vendors, subprocs = set(), set(), set(), set(), set()
                 if col_site and col_device and col_process and col_vendor and col_qcode and col_fsc:
@@ -469,8 +491,13 @@ class MasterData:
                         key = (_norm_plain(site), _norm_plain(device), _norm_plain(process),
                                _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
                         fsc_map[key] = {"row": r_idx, "history": history}
+                        # 세부공정을 뺀 5키는 행번호 순으로 훑으므로 마지막에
+                        # 덮어쓴 값이 자연히 "가장 나중 행"이 된다.
+                        key5 = _fsc_map_key5(site, device, process, vendor, qcode)
+                        fsc_map_5key[key5] = {"row": r_idx, "fsc": history[-1]}
 
                 self.fsc_map = fsc_map
+                self.fsc_map_5key = fsc_map_5key
                 self.fsc_map_qcodes = sorted(qcodes)
                 self.fsc_map_fsc_col = col_fsc or 0
                 self.opt_sites = sorted(sites)
@@ -870,7 +897,7 @@ class PickerDialog(tk.Toplevel):
 
     def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
                  highlight_keys=None, warn_levels=None, recommended_fsc=None,
-                 show_recommend_col=False):
+                 recommend_confirmed=True, show_recommend_col=False):
         """
         highlight_keys : 강조 표시할 키 값들의 집합(초록 배경 + 목록 상위 정렬).
           (예: 전체 로그에 이미 등장한 적 있는 자재코드)
@@ -884,6 +911,9 @@ class PickerDialog(tk.Toplevel):
           None(일치하는 조합 없음). "검토"/"이전 이력"과는 완전히 다른
           채널(별도 "추천" 열)이라 셋 다 동시에 표시될 수 있다. 무엇보다
           우선해 목록 맨 위로 올린다.
+        recommend_confirmed : recommended_fsc가 세부공정까지 포함한 조건과
+          정확히 일치해 나온 값이면 True(확정 ⭐), 세부공정을 제외한
+          나머지 조건만 일치해 나온 후보값이면 False(후보 ☆).
         show_recommend_col : "추천" 열 자체를 보여줄지. 지정하지 않으면
           recommended_fsc가 있을 때만 보여준다(호출부가 항상 이 열을
           띄우고 싶으면 True로 명시한다).
@@ -898,6 +928,7 @@ class PickerDialog(tk.Toplevel):
         self._show_review_col = warn_levels is not None
         self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
         self._recommended = str(recommended_fsc) if recommended_fsc else None
+        self._recommend_confirmed = recommend_confirmed
         self._show_recommend_col = show_recommend_col or self._recommended is not None
         self._iid_to_row = {}
 
@@ -906,15 +937,15 @@ class PickerDialog(tk.Toplevel):
         def _priority(r):
             key = str(r[key_index])
             if key == self._recommended:
-                return 0
+                return 0 if self._recommend_confirmed else 1
             level = self._warn_levels.get(key)
             if level == "red":
-                return 1
-            if level == "orange":
                 return 2
-            if key in self._highlight_keys:
+            if level == "orange":
                 return 3
-            return 4
+            if key in self._highlight_keys:
+                return 4
+            return 5
 
         if self._highlight_keys or self._warn_levels or self._recommended:
             # 안정 정렬이므로 각 우선순위 그룹 내 원래 순서는 유지된다.
@@ -932,7 +963,7 @@ class PickerDialog(tk.Toplevel):
         self.count = ttk.Label(top, text="")
         self.count.pack(side="left", padx=6)
         if self._show_recommend_col:
-            ttk.Label(top, text="(⭐ = 같은 조건 최근 추천 자재코드)",
+            ttk.Label(top, text="(⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치)",
                       foreground="#1565C0").pack(side="left", padx=(10, 0))
         if self._highlight_keys:
             ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
@@ -947,7 +978,7 @@ class PickerDialog(tk.Toplevel):
         # 추천 열 -> 검토 열 순으로 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
         extra_cols, extra_widths = [], []
         if self._show_recommend_col:
-            extra_cols.append("추천"); extra_widths.append(60)
+            extra_cols.append("추천"); extra_widths.append(80)
         if self._show_review_col:
             extra_cols.append("검토"); extra_widths.append(150)
         self._extra_col_pos = key_index
@@ -992,7 +1023,10 @@ class PickerDialog(tk.Toplevel):
 
             extra_vals = []
             if self._show_recommend_col:
-                extra_vals.append("⭐" if self._recommended and key == self._recommended else "")
+                if self._recommended and key == self._recommended:
+                    extra_vals.append("⭐ 확정" if self._recommend_confirmed else "☆ 후보")
+                else:
+                    extra_vals.append("")
             if self._show_review_col:
                 if level == "red":
                     extra_vals.append("🔴 검토 필요")
@@ -1514,14 +1548,22 @@ class App(tk.Tk):
             self._qcode_cbo["values"] = [v for v in all_values if typed in _norm_plain(v)]
 
     def _update_fsc_recommend_status(self):
-        """옵션 6개 필드로 FSC매핑을 조회해 추천 자재코드를 라벨에 표시한다."""
+        """옵션 필드로 FSC매핑을 조회해 추천 자재코드를 라벨에 표시한다.
+        세부공정까지 일치하면 확정(⭐), 나머지 5개 조건만 일치하면
+        후보(☆)로 구분해서 보여준다."""
         if not self.md:
             self.lbl_fsc_recommend.config(text="")
             return
         opt = self._current_option_fields()
-        rec = fsc_recommend(self.md.fsc_map, opt["site"], opt["device"], opt["process"],
-                            opt["vendor"], opt["subproc"], opt["qcode"])
-        self.lbl_fsc_recommend.config(text=f"⭐ 추천: {rec}" if rec else "")
+        rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],
+                            opt["process"], opt["vendor"], opt["subproc"], opt["qcode"])
+        if not rec:
+            text = ""
+        elif rec["confirmed"]:
+            text = "⭐ 확정 추천: %s" % rec["fsc"]
+        else:
+            text = "☆ 추천(세부공정 다름): %s" % rec["fsc"]
+        self.lbl_fsc_recommend.config(text=text)
 
     def _filter_subproc_combo(self):
         """세부공정 입력값과 스펠링이 일치하는(특수문자·대소문자 무시) 항목만
@@ -1750,11 +1792,10 @@ class App(tk.Tk):
                                     opt["process"], opt["vendor"], opt["subproc"], code)
             if level:
                 warn_levels[code] = level
-        # 옵션 6개 필드(Q-code 포함)로 FSC매핑에서 추천 자재코드를 찾는다 —
-        # 있으면 목록 맨 위에 별도로 표시한다.
-        recommended_fsc = fsc_recommend(self.md.fsc_map, opt["site"], opt["device"],
-                                        opt["process"], opt["vendor"], opt["subproc"],
-                                        opt["qcode"])
+        # FSC매핑에서 추천 자재코드를 찾는다 — 세부공정까지 일치하면 확정,
+        # 나머지 5개 조건(Q-code 포함)만 일치해도 후보로 목록 맨 위에 표시한다.
+        rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],
+                            opt["process"], opt["vendor"], opt["subproc"], opt["qcode"])
         # "추천"/"검토" 열이 왼쪽에 따로 추가되는 만큼 나머지 열 너비를
         # 조금씩 줄여 창이 과하게 넓어지지 않게 균형을 맞췄다.
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
@@ -1763,7 +1804,9 @@ class App(tk.Tk):
                            initial=self._last_model_keyword,
                            highlight_keys=set(self.price_map.keys()),
                            warn_levels=warn_levels,
-                           recommended_fsc=recommended_fsc)
+                           recommended_fsc=rec["fsc"] if rec else None,
+                           recommend_confirmed=rec["confirmed"] if rec else True,
+                           show_recommend_col=True)
         self.wait_window(dlg)
         if dlg.result:
             self.line_vars["Q"].set(dlg.result)

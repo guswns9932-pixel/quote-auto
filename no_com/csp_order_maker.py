@@ -1184,6 +1184,7 @@ class App(tk.Tk):
         self._last_model_keyword = ""
         self._qcode_all_values = []
         self._des_all_values = []
+        self._opt_all_values = {}  # {"site"/"device"/"process"/"vendor": [값, ...]}
         # 규격<->Q-code 콤보박스가 서로를 자동으로 채워줄 때, 그 자동입력이
         # 다시 상대쪽을 건드려 무한 반복되는 것을 막는 재진입 방지 플래그.
         self._des_qcode_sync = False
@@ -1261,10 +1262,14 @@ class App(tk.Tk):
         (공통값 콤보와 달리 기본값을 자동 선택하지 않는다 — '이 조건에 맞는
         값을 직접 고르거나 입력'하는 용도라 임의의 첫 값을 넣으면 오히려
         혼란을 준다.)"""
-        self.cip_cbo["site"]["values"] = self.md.opt_sites
-        self.cip_cbo["device"]["values"] = self.md.opt_devices
-        self.cip_cbo["process"]["values"] = self.md.opt_processes
-        self.cip_cbo["vendor"]["values"] = self.md.opt_vendors
+        self._opt_all_values = {
+            "site": list(self.md.opt_sites),
+            "device": list(self.md.opt_devices),
+            "process": list(self.md.opt_processes),
+            "vendor": list(self.md.opt_vendors),
+        }
+        for key, values in self._opt_all_values.items():
+            self.cip_cbo[key]["values"] = values
         self._subproc_all_values = list(self.md.opt_subprocs)
         self._subproc_cbo["values"] = self._subproc_all_values
         self._qcode_all_values = list(self.md.fsc_map_qcodes)
@@ -1568,7 +1573,8 @@ class App(tk.Tk):
             cbo = ttk.Combobox(cell, textvariable=var, width=14)
             cbo.pack()
             self.cip_cbo[key] = cbo
-            var.trace_add("write", lambda *_: self._on_option_field_changed())
+            self._bind_autocomplete(cbo)
+            var.trace_add("write", lambda *_, k=key: self._on_option_combo_input(k))
 
         _combo_cell("사업장", "site")
         _combo_cell("DEVICE", "device")
@@ -1584,6 +1590,7 @@ class App(tk.Tk):
         self.option_vars["subproc"] = var_sub
         self._subproc_cbo = ttk.Combobox(cell, textvariable=var_sub, width=14)
         self._subproc_cbo.pack()
+        self._bind_autocomplete(self._subproc_cbo)
         var_sub.trace_add("write", lambda *_: self._on_subproc_input())
 
         # Q-code: FSC매핑 시트에서 추천 자재코드를 찾는 6번째 조건.
@@ -1595,6 +1602,7 @@ class App(tk.Tk):
         self.option_vars["qcode"] = var_qcode
         self._qcode_cbo = ttk.Combobox(cell, textvariable=var_qcode, width=16)
         self._qcode_cbo.pack()
+        self._bind_autocomplete(self._qcode_cbo)
         var_qcode.trace_add("write", lambda *_: self._on_qcode_input())
 
         # 규격(DES, FSC매핑 H열): Q-code와 거의 1:1로 대응돼서, 규격을
@@ -1606,6 +1614,7 @@ class App(tk.Tk):
         self.option_vars["des"] = var_des
         self._des_cbo = ttk.Combobox(cell, textvariable=var_des, width=26)
         self._des_cbo.pack()
+        self._bind_autocomplete(self._des_cbo)
         var_des.trace_add("write", lambda *_: self._on_des_input())
 
         row2 = ttk.Frame(parent)
@@ -1626,6 +1635,37 @@ class App(tk.Tk):
         var_q.trace_add("write", lambda *_: self._auto_price())
         # 자재코드(Q)가 CIP AS-IS와 (옵션 조건까지 포함해) 일치하면 알람 표시
         var_q.trace_add("write", lambda *_: self._update_cip_status())
+
+    def _bind_autocomplete(self, cbo):
+        """옵션 콤보박스에 입력하는 동안, 화살표를 눌러 수동으로 펼치지
+        않아도 드롭다운이 자동으로 열리게 한다(값 목록은 각 필드의 실시간
+        필터링 로직이 이미 좁혀 놓은 상태)."""
+        nav_keys = {"Up", "Down", "Return", "KP_Enter", "Escape", "Tab", "ISO_Left_Tab"}
+
+        def _on_key(event):
+            if event.keysym in nav_keys:
+                return
+            if cbo.get().strip() and cbo["values"]:
+                try:
+                    cbo.event_generate("<Down>")
+                except tk.TclError:
+                    pass
+
+        cbo.bind("<KeyRelease>", _on_key)
+
+    def _on_option_combo_input(self, key):
+        self._filter_option_combo(key)
+        self._on_option_field_changed()
+
+    def _filter_option_combo(self, key):
+        """사업장/DEVICE/대공정/설비사 입력값과 부분 일치하는 항목만
+        드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_plain(self.option_vars[key].get())
+        all_values = self._opt_all_values.get(key, [])
+        if not typed:
+            self.cip_cbo[key]["values"] = all_values
+        else:
+            self.cip_cbo[key]["values"] = [v for v in all_values if typed in _norm_plain(v)]
 
     def _on_subproc_input(self):
         self._filter_subproc_combo()

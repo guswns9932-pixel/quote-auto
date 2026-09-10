@@ -969,18 +969,18 @@ class PickerDialog(tk.Toplevel):
             ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
                       foreground="#2e7d32").pack(side="left", padx=(10, 0))
         if self._show_review_col:
-            ttk.Label(top, text="(검토 열: 🔴 완전 일치 / 🟠 세부공정만 다름)",
+            ttk.Label(top, text="(검토필요 열: 🔴 완전 일치 / 🟠 세부공정만 다름)",
                       foreground="#c00").pack(side="left", padx=(10, 0))
 
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
 
-        # 추천 열 -> 검토 열 순으로 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
+        # 추천 열 -> 검토필요 열 순으로 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
         extra_cols, extra_widths = [], []
         if self._show_recommend_col:
-            extra_cols.append("추천"); extra_widths.append(80)
+            extra_cols.append("추천"); extra_widths.append(70)
         if self._show_review_col:
-            extra_cols.append("검토"); extra_widths.append(150)
+            extra_cols.append("검토필요"); extra_widths.append(130)
         self._extra_col_pos = key_index
         display_columns = list(columns[:key_index]) + extra_cols + list(columns[key_index:])
         display_widths = list(widths[:key_index]) + extra_widths + list(widths[key_index:])
@@ -989,7 +989,10 @@ class PickerDialog(tk.Toplevel):
                                  height=18, selectmode="browse")
         for c, w in zip(display_columns, display_widths):
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=w, anchor="w")
+            # stretch=False: 창을 넓혀도 열 너비가 비례로 늘어나지 않는다
+            # (그대로 두면 빈 열이 필요 이상으로 넓어져 보였다). 폭 조절도
+            # 막아서(아래 바인딩) 항상 지정한 너비 그대로 유지된다.
+            self.tree.column(c, width=w, anchor="w", stretch=False)
         self.tree.tag_configure("used", background="#C8E6C9")
         vs = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vs.set)
@@ -997,6 +1000,15 @@ class PickerDialog(tk.Toplevel):
         vs.pack(side="left", fill="y")
         self.tree.bind("<Double-1>", lambda e: self._ok())
         self.tree.bind("<Return>", lambda e: self._ok())
+        # 열 경계를 드래그해 너비를 바꾸지 못하게 막는다 (구분선 위 클릭만
+        # 무시하면 되므로 셀 선택 등 다른 동작에는 영향이 없다).
+        self.tree.bind("<Button-1>", self._block_column_resize, add="+")
+        # 셀 위에 마우스를 올리면 잘린 칸(특히 설명)도 전체 내용을 툴팁으로
+        # 보여준다.
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", lambda e: self._hide_tooltip())
+        self._tooltip_win = None
+        self._tooltip_cell = None
         ent.bind("<Return>", lambda e: self._focus_first())
         ent.bind("<Down>", lambda e: self._focus_first())
 
@@ -1060,6 +1072,48 @@ class PickerDialog(tk.Toplevel):
             self.tree.selection_set(kids[0])
             self.tree.focus(kids[0])
             self.tree.focus_set()
+
+    def _block_column_resize(self, event):
+        """열 구분선을 드래그해 너비를 바꾸는 것만 막는다 — 그 외 클릭
+        (행 선택 등)은 그대로 통과시킨다."""
+        if self.tree.identify_region(event.x, event.y) == "separator":
+            return "break"
+
+    def _on_tree_motion(self, event):
+        row = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        if not row or not col:
+            self._hide_tooltip()
+            return
+        cell = (row, col)
+        if cell == self._tooltip_cell:
+            return
+        col_idx = int(col.replace("#", "")) - 1
+        values = self.tree.item(row, "values")
+        text = str(values[col_idx]) if 0 <= col_idx < len(values) else ""
+        self._hide_tooltip()
+        if text:
+            self._show_tooltip(event.x_root, event.y_root, text)
+        self._tooltip_cell = cell
+
+    def _show_tooltip(self, x, y, text):
+        tw = tk.Toplevel(self)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry("+%d+%d" % (x + 14, y + 12))
+        ttk.Label(tw, text=text, background="#ffffe0", relief="solid",
+                  borderwidth=1, padding=(4, 2), wraplength=480,
+                  justify="left").pack()
+        self._tooltip_win = tw
+
+    def _hide_tooltip(self):
+        if self._tooltip_win is not None:
+            self._tooltip_win.destroy()
+            self._tooltip_win = None
+        self._tooltip_cell = None
+
+    def destroy(self):
+        self._hide_tooltip()
+        super().destroy()
 
     def _ok(self):
         sel = self.tree.selection()
@@ -1796,11 +1850,13 @@ class App(tk.Tk):
         # 나머지 5개 조건(Q-code 포함)만 일치해도 후보로 목록 맨 위에 표시한다.
         rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],
                             opt["process"], opt["vendor"], opt["subproc"], opt["qcode"])
-        # "추천"/"검토" 열이 왼쪽에 따로 추가되는 만큼 나머지 열 너비를
-        # 조금씩 줄여 창이 과하게 넓어지지 않게 균형을 맞췄다.
+        # "추천"/"검토필요" 열이 왼쪽에 따로 추가되는 만큼, 열 너비는 각
+        # 내용 길이에 맞춰 고정폭으로 최적화했다(사용자가 드래그로 조절할
+        # 수 없으니 초기값이 곧 최종값이다). 설명은 잘려도 마우스오버 시
+        # 툴팁으로 전체 내용을 볼 수 있다.
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
                            ("FSC", "VER", "모델명", "설명", "상태"),
-                           (130, 45, 100, 260, 80), self.md.fsc,
+                           (110, 45, 110, 280, 75), self.md.fsc,
                            initial=self._last_model_keyword,
                            highlight_keys=set(self.price_map.keys()),
                            warn_levels=warn_levels,

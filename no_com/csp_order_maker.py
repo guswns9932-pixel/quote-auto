@@ -212,6 +212,21 @@ def _cip_field_eq(cip_val, opt_val, normalize=_norm_plain):
     return a == b or a in _CIP_WILDCARDS or b in _CIP_WILDCARDS
 
 
+def _split_fsc_codes(v):
+    """CIP AS-IS/TO-BE 칸의 '코드1 + 코드2'처럼 묶인 복합 자재코드를
+    개별 코드 리스트로 나눈다(양쪽 공백 트림, 빈 조각은 버림)."""
+    return [p.strip() for p in str(v or "").split("+") if p.strip()]
+
+
+def _cip_fsc_match_index(row_fsc, fsc_n):
+    """CIP 행의 AS-IS FSC(단일 또는 '+'로 묶인 복합값) 중 fsc_n과 일치하는
+    조각의 인덱스를 반환한다. 일치하는 조각이 없으면 -1."""
+    for i, p in enumerate(_split_fsc_codes(row_fsc)):
+        if _norm_plain(p) == fsc_n:
+            return i
+    return -1
+
+
 def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
     """옵션(사업장/DEVICE/대공정/설비사/세부공정) + 자재코드(fsc)를 CIP AS-IS
     데이터와 비교한다.
@@ -227,7 +242,7 @@ def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
         return None
     found_orange = False
     for r in cip_rows:
-        if _norm_plain(r.get("fsc")) != fsc_n:
+        if _cip_fsc_match_index(r.get("fsc"), fsc_n) < 0:
             continue
         if not _cip_field_eq(r.get("site"), site):
             continue
@@ -241,6 +256,46 @@ def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
             return "red"
         found_orange = True
     return "orange" if found_orange else None
+
+
+def cip_tobe_recommend(cip_rows, site, device, process, vendor, subproc, fsc):
+    """AS-IS로 감지된 자재코드(fsc)에 대해 CIP TO-BE(L열) 교체 추천 코드를
+    찾는다. AS-IS가 "코드1 + 코드2"처럼 여러 코드가 묶인 세트면, 일치한
+    코드와 같은 위치의 TO-BE 코드만 짚어서 추천한다(세트 전체가 아니라
+    실제로 바꿔야 할 그 코드 하나).
+
+    반환: {"level": "red"/"orange", "tobe": "<코드>"} 또는 일치/추천할
+    TO-BE 값이 없으면 None. level은 cip_match_level과 같은 기준
+    (세부공정까지 일치=red, 나머지만 일치=orange)이며, red가 하나라도
+    있으면 그걸 우선한다.
+    """
+    fsc_n = _norm_plain(fsc)
+    if not fsc_n or not cip_rows:
+        return None
+    best = None
+    for r in cip_rows:
+        idx = _cip_fsc_match_index(r.get("fsc"), fsc_n)
+        if idx < 0:
+            continue
+        if not _cip_field_eq(r.get("site"), site):
+            continue
+        if not _cip_field_eq(r.get("device"), device):
+            continue
+        if not _cip_field_eq(r.get("process"), process):
+            continue
+        if not _cip_field_eq(r.get("vendor"), vendor):
+            continue
+
+        tobe_parts = _split_fsc_codes(r.get("tobe"))
+        if not tobe_parts:
+            continue
+        tobe = tobe_parts[idx] if idx < len(tobe_parts) else tobe_parts[0]
+
+        if _cip_field_eq(r.get("subproc"), subproc, normalize=_norm_subproc):
+            return {"level": "red", "tobe": tobe}
+        if best is None:
+            best = {"level": "orange", "tobe": tobe}
+    return best
 
 
 def _fsc_map_key(site, device, process, vendor, subproc, qcode):
@@ -416,6 +471,7 @@ class MasterData:
                 col_vendor  = _find_cip_col(ws, "설비사")
                 col_subproc = _find_cip_col(ws, "세부공정")
                 col_fsc     = _find_cip_subheader_col(ws, "AS-IS", "FSC")
+                col_tobe    = _find_cip_subheader_col(ws, "TO-BE", "FSC")
 
                 cip_rows = []
                 if col_no and col_fsc:
@@ -432,9 +488,10 @@ class MasterData:
                         site, device = _cell(col_site), _cell(col_device)
                         process, vendor = _cell(col_process), _cell(col_vendor)
                         subproc, fsc = _cell(col_subproc), _cell(col_fsc)
+                        tobe = _cell(col_tobe) if col_tobe else ""
                         cip_rows.append({"site": site, "device": device,
                                          "process": process, "vendor": vendor,
-                                         "subproc": subproc, "fsc": fsc})
+                                         "subproc": subproc, "fsc": fsc, "tobe": tobe})
 
                 self.cip_rows = cip_rows
 
@@ -958,7 +1015,7 @@ class PickerDialog(tk.Toplevel):
             key = str(r[key_index])
             if key == self._recommended:
                 return 0 if self._recommend_confirmed else 1
-            level = self._warn_levels.get(key)
+            level = self._level_of(self._warn_levels.get(key))
             if level == "red":
                 return 2
             if level == "orange":
@@ -996,7 +1053,8 @@ class PickerDialog(tk.Toplevel):
                 ttk.Label(hints, text="초록색 = 이전 주문 이력 있음",
                           foreground="#2e7d32").pack(anchor="w")
             if self._show_review_col:
-                ttk.Label(hints, text="검토필요 열: 🔴 완전 일치 / 🟠 세부공정만 다름",
+                ttk.Label(hints, text="검토필요 열: 🔴 완전 일치 / 🟠 세부공정만 다름"
+                          " (→ TO-BE는 CIP 교체 추천 코드)",
                           foreground="#c00").pack(anchor="w")
 
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
@@ -1007,7 +1065,7 @@ class PickerDialog(tk.Toplevel):
         if self._show_recommend_col:
             extra_cols.append("추천"); extra_widths.append(70)
         if self._show_review_col:
-            extra_cols.append("검토필요"); extra_widths.append(130)
+            extra_cols.append("검토필요"); extra_widths.append(190)
         self._extra_col_pos = key_index
         display_columns = list(columns[:key_index]) + extra_cols + list(columns[key_index:])
         display_widths = list(widths[:key_index]) + extra_widths + list(widths[key_index:])
@@ -1048,6 +1106,13 @@ class PickerDialog(tk.Toplevel):
         self._refresh()
         self.geometry("+%d+%d" % (parent.winfo_rootx() + 60, parent.winfo_rooty() + 60))
 
+    @staticmethod
+    def _level_of(v):
+        """warn_levels 값에서 등급 문자열("red"/"orange")만 뽑아낸다.
+        v가 {"level":.., "tobe":..} 형태(TO-BE 추천 포함)든 예전처럼
+        단순 문자열이든 둘 다 받는다."""
+        return v.get("level") if isinstance(v, dict) else v
+
     def _refresh(self):
         kw = self.var.get().strip().lower()
         self.tree.delete(*self.tree.get_children())
@@ -1057,7 +1122,9 @@ class PickerDialog(tk.Toplevel):
             if kw and not any(kw in str(v).lower() for v in row):
                 continue
             key = str(row[self._key_index])
-            level = self._warn_levels.get(key)
+            level_info = self._warn_levels.get(key)
+            level = self._level_of(level_info)
+            tobe = level_info.get("tobe") if isinstance(level_info, dict) else None
             used = key in self._highlight_keys
 
             extra_vals = []
@@ -1068,11 +1135,14 @@ class PickerDialog(tk.Toplevel):
                     extra_vals.append("")
             if self._show_review_col:
                 if level == "red":
-                    extra_vals.append("🔴 검토 필요")
+                    review_text = "🔴 검토 필요"
                 elif level == "orange":
-                    extra_vals.append("🟠 세부공정만 다름")
+                    review_text = "🟠 세부공정만 다름"
                 else:
-                    extra_vals.append("")
+                    review_text = ""
+                if review_text and tobe:
+                    review_text += " → TO-BE %s" % tobe
+                extra_vals.append(review_text)
 
             if extra_vals:
                 pos = self._extra_col_pos
@@ -1837,17 +1907,26 @@ class App(tk.Tk):
             self.lbl_cip_status.config(text="")
             return
         opt = self._current_option_fields()
+        fsc = self.line_vars["Q"].get()
         level = cip_match_level(self.md.cip_rows, opt["site"], opt["device"],
-                                opt["process"], opt["vendor"], opt["subproc"],
-                                self.line_vars["Q"].get())
+                                opt["process"], opt["vendor"], opt["subproc"], fsc)
+        if not level:
+            self.lbl_cip_status.config(text="")
+            return
+        # TO-BE 추천은 level 판정과 별개로 계산한다 — CIP TO-BE 칸이
+        # 비어 있는 것 같은 예외적인 경우에도 기존처럼 검토 알람 자체는
+        # 그대로 보여주기 위함이다.
+        rec = cip_tobe_recommend(self.md.cip_rows, opt["site"], opt["device"],
+                                 opt["process"], opt["vendor"], opt["subproc"], fsc)
+        tobe_suffix = " → TO-BE 추천: %s" % rec["tobe"] if rec and rec["tobe"] else ""
         if level == "red":
             self.lbl_cip_status.config(
-                text="🔴 검토 필요 (현재 조건 AS-IS와 완전히 일치)", foreground="#c00")
-        elif level == "orange":
-            self.lbl_cip_status.config(
-                text="🟠 검토 필요 (세부공정 제외 동일)", foreground="#e65100")
+                text="🔴 검토 필요 (현재 조건 AS-IS와 완전히 일치)" + tobe_suffix,
+                foreground="#c00")
         else:
-            self.lbl_cip_status.config(text="")
+            self.lbl_cip_status.config(
+                text="🟠 검토 필요 (세부공정 제외 동일)" + tobe_suffix,
+                foreground="#e65100")
 
     def _line_form(self, parent):
         form = ttk.Frame(parent)
@@ -2037,7 +2116,12 @@ class App(tk.Tk):
             level = cip_match_level(self.md.cip_rows, opt["site"], opt["device"],
                                     opt["process"], opt["vendor"], opt["subproc"], code)
             if level:
-                warn_levels[code] = level
+                # TO-BE 추천은 level 판정과 별개로 계산해서, TO-BE 칸이
+                # 비어 있는 예외적인 경우에도 검토 표시 자체는 유지한다.
+                tobe_rec = cip_tobe_recommend(self.md.cip_rows, opt["site"], opt["device"],
+                                              opt["process"], opt["vendor"], opt["subproc"], code)
+                warn_levels[code] = {"level": level,
+                                     "tobe": tobe_rec["tobe"] if tobe_rec else None}
         # FSC매핑에서 추천 자재코드를 찾는다 — 세부공정까지 일치하면 확정,
         # 나머지 5개 조건(Q-code 포함)만 일치해도 후보로 목록 맨 위에 표시한다.
         rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],

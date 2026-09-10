@@ -1568,10 +1568,13 @@ class App(tk.Tk):
             cell = ttk.Frame(row1)
             cell.pack(side="left", padx=(0, 14))
             ttk.Label(cell, text=label).pack(anchor="w")
+            inner = ttk.Frame(cell)
+            inner.pack()
             var = tk.StringVar()
             self.option_vars[key] = var
-            cbo = ttk.Combobox(cell, textvariable=var, width=14)
-            cbo.pack()
+            self._make_clear_button(inner, key).pack(side="left")
+            cbo = ttk.Combobox(inner, textvariable=var, width=14)
+            cbo.pack(side="left")
             self.cip_cbo[key] = cbo
             self._bind_autocomplete(cbo)
             var.trace_add("write", lambda *_, k=key: self._on_option_combo_input(k))
@@ -1586,10 +1589,13 @@ class App(tk.Tk):
         cell = ttk.Frame(row1)
         cell.pack(side="left", padx=(0, 14))
         ttk.Label(cell, text="세부공정").pack(anchor="w")
+        inner = ttk.Frame(cell)
+        inner.pack()
         var_sub = tk.StringVar()
         self.option_vars["subproc"] = var_sub
-        self._subproc_cbo = ttk.Combobox(cell, textvariable=var_sub, width=14)
-        self._subproc_cbo.pack()
+        self._make_clear_button(inner, "subproc").pack(side="left")
+        self._subproc_cbo = ttk.Combobox(inner, textvariable=var_sub, width=14)
+        self._subproc_cbo.pack(side="left")
         self._bind_autocomplete(self._subproc_cbo)
         var_sub.trace_add("write", lambda *_: self._on_subproc_input())
 
@@ -1598,10 +1604,13 @@ class App(tk.Tk):
         cell = ttk.Frame(row1)
         cell.pack(side="left", padx=(0, 14))
         ttk.Label(cell, text="Q-code").pack(anchor="w")
+        inner = ttk.Frame(cell)
+        inner.pack()
         var_qcode = tk.StringVar()
         self.option_vars["qcode"] = var_qcode
-        self._qcode_cbo = ttk.Combobox(cell, textvariable=var_qcode, width=16)
-        self._qcode_cbo.pack()
+        self._make_clear_button(inner, "qcode").pack(side="left")
+        self._qcode_cbo = ttk.Combobox(inner, textvariable=var_qcode, width=16)
+        self._qcode_cbo.pack(side="left")
         self._bind_autocomplete(self._qcode_cbo)
         var_qcode.trace_add("write", lambda *_: self._on_qcode_input())
 
@@ -1610,10 +1619,13 @@ class App(tk.Tk):
         cell = ttk.Frame(row1)
         cell.pack(side="left")
         ttk.Label(cell, text="규격").pack(anchor="w")
+        inner = ttk.Frame(cell)
+        inner.pack()
         var_des = tk.StringVar()
         self.option_vars["des"] = var_des
-        self._des_cbo = ttk.Combobox(cell, textvariable=var_des, width=26)
-        self._des_cbo.pack()
+        self._make_clear_button(inner, "des").pack(side="left")
+        self._des_cbo = ttk.Combobox(inner, textvariable=var_des, width=26)
+        self._des_cbo.pack(side="left")
         self._bind_autocomplete(self._des_cbo)
         var_des.trace_add("write", lambda *_: self._on_des_input())
 
@@ -1635,6 +1647,17 @@ class App(tk.Tk):
         var_q.trace_add("write", lambda *_: self._auto_price())
         # 자재코드(Q)가 CIP AS-IS와 (옵션 조건까지 포함해) 일치하면 알람 표시
         var_q.trace_add("write", lambda *_: self._update_cip_status())
+
+    def _make_clear_button(self, parent, key):
+        """옵션 입력창 하나만 바로 비우는 작은 × 버튼 (전체 초기화 버튼과
+        달리 이 필드 하나만 지운다). ttk 콤보박스는 드롭다운 화살표가
+        위젯에 내장돼 있어 그 안쪽(화살표 바로 왼쪽)에 끼워 넣을 수는
+        없어서, 콤보박스 전체 바로 왼쪽에 둔다."""
+        return tk.Button(
+            parent, text="×", command=lambda: self.option_vars[key].set(""),
+            relief="flat", bd=1, padx=3, pady=0, font=("맑은 고딕", 9),
+            fg="#888888", activeforeground="#c00", cursor="hand2",
+        )
 
     def _bind_autocomplete(self, cbo):
         """옵션 콤보박스에 입력하는 동안, 화살표를 눌러 수동으로 펼치지

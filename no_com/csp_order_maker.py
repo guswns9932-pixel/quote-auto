@@ -962,15 +962,22 @@ class PickerDialog(tk.Toplevel):
         self.var.trace_add("write", lambda *_: self._refresh())
         self.count = ttk.Label(top, text="")
         self.count.pack(side="left", padx=6)
-        if self._show_recommend_col:
-            ttk.Label(top, text="(⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치)",
-                      foreground="#1565C0").pack(side="left", padx=(10, 0))
-        if self._highlight_keys:
-            ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
-                      foreground="#2e7d32").pack(side="left", padx=(10, 0))
-        if self._show_review_col:
-            ttk.Label(top, text="(검토필요 열: 🔴 완전 일치 / 🟠 세부공정만 다름)",
-                      foreground="#c00").pack(side="left", padx=(10, 0))
+
+        # 안내 문구들은 검색 줄에 나란히 붙이면 (내용에 맞춰 고정폭으로
+        # 정한) 목록 너비보다 창이 더 넓어져 버린다 — 검색 줄 아래에 세로로
+        # 쌓아서 창 너비를 목록 기준으로 맞춘다.
+        if self._show_recommend_col or self._highlight_keys or self._show_review_col:
+            hints = ttk.Frame(self, padding=(8, 0, 8, 4))
+            hints.pack(fill="x")
+            if self._show_recommend_col:
+                ttk.Label(hints, text="⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치",
+                          foreground="#1565C0").pack(anchor="w")
+            if self._highlight_keys:
+                ttk.Label(hints, text="초록색 = 이전 주문 이력 있음",
+                          foreground="#2e7d32").pack(anchor="w")
+            if self._show_review_col:
+                ttk.Label(hints, text="검토필요 열: 🔴 완전 일치 / 🟠 세부공정만 다름",
+                          foreground="#c00").pack(anchor="w")
 
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)

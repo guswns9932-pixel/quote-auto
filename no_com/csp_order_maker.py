@@ -1638,28 +1638,74 @@ class App(tk.Tk):
 
     def _bind_autocomplete(self, cbo):
         """옵션 콤보박스에 입력하는 동안, 화살표를 눌러 수동으로 펼치지
-        않아도 드롭다운이 자동으로 열리게 한다(값 목록은 각 필드의 실시간
-        필터링 로직이 이미 좁혀 놓은 상태).
+        않아도 후보 목록이 자동으로 보이게 한다(값 목록은 각 필드의
+        실시간 필터링 로직이 이미 좁혀 놓은 상태).
 
-        event_generate("<Down>")로 열면 실제 방향키 입력과 똑같이 취급돼
-        ttk 내부 바인딩이 펼쳐진 목록 쪽으로 포커스를 옮겨버려서, 그
-        다음 글자를 입력칸이 아니라 목록이 받아버리는 문제가 있었다.
-        ttk::combobox::Post를 직접 호출하면 포커스 이동 없이 목록만
-        펼쳐지므로, 입력칸에 계속 타이핑할 수 있다."""
-        nav_keys = {"Up", "Down", "Return", "KP_Enter", "Escape", "Tab", "ISO_Left_Tab"}
+        ttk 콤보박스의 기본 드롭다운(Post/<Down> 방식 둘 다)은 열리는
+        순간 자체적으로 키보드 포커스/그랩을 목록 쪽으로 가져가버려서,
+        그 다음 글자를 입력칸이 아니라 목록이 받아버리는 문제가 있었다
+        — 이건 ttk 콤보박스 팝다운의 근본적인 동작이라 여는 방식을
+        바꾸는 걸로는 해결이 안 된다. 그래서 ttk의 기본 드롭다운은 아예
+        쓰지 않고, 입력칸 바로 아래에 후보를 보여주는 작은 목록 창을
+        직접 그린다 — 이 창은 포커스를 가져가지 않으므로 타이핑은
+        입력칸에서 계속된다. 목록 항목은 마우스 클릭으로 선택한다."""
+        state = {"win": None, "listbox": None}
+
+        def _close():
+            win = state["win"]
+            if win is not None:
+                win.destroy()
+                state["win"] = None
+                state["listbox"] = None
+
+        def _select(value):
+            cbo.set(value)
+            _close()
+            cbo.focus_set()
+            cbo.icursor("end")
+
+        def _open(values):
+            _close()
+            win = tk.Toplevel(cbo)
+            win.wm_overrideredirect(True)
+            try:
+                win.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            x = cbo.winfo_rootx()
+            y = cbo.winfo_rooty() + cbo.winfo_height()
+            win.wm_geometry("+%d+%d" % (x, y))
+            try:
+                combo_w = int(cbo.cget("width"))
+            except (tk.TclError, ValueError):
+                combo_w = 20
+            lb = tk.Listbox(win, height=min(len(values), 8), width=combo_w,
+                             exportselection=False)
+            for v in values:
+                lb.insert("end", v)
+            lb.pack()
+            lb.bind("<ButtonRelease-1>",
+                    lambda e: _select(lb.get(lb.nearest(e.y))))
+            state["win"] = win
+            state["listbox"] = lb
 
         def _on_key(event):
-            if event.keysym in nav_keys:
+            if event.keysym == "Escape":
+                _close()
                 return
-            if cbo.get().strip() and cbo["values"]:
-                try:
-                    cbo.tk.call("ttk::combobox::Post", cbo)
-                    cbo.focus_set()
-                    cbo.icursor("end")
-                except tk.TclError:
-                    pass
+            if event.keysym in ("Return", "KP_Enter", "Up", "Down", "Tab", "ISO_Left_Tab"):
+                return
+            text = cbo.get().strip()
+            values = list(cbo["values"])
+            if text and values:
+                _open(values[:20])
+            else:
+                _close()
 
+        # 클릭으로 항목을 고르는 중에 입력칸이 먼저 포커스를 잃어도
+        # 클릭 처리가 끝날 시간을 준 다음에 닫는다.
         cbo.bind("<KeyRelease>", _on_key)
+        cbo.bind("<FocusOut>", lambda e: cbo.after(150, _close))
 
     def _on_option_combo_input(self, key):
         self._filter_option_combo(key)

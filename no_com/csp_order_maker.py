@@ -9,9 +9,10 @@ CSP 주문접수 업로드 파일 생성기  (알파 v0.2)
      -> [엑셀 파일 생성]
 
 v0.2: CIP AS-IS FSC 알람 고도화 — 옵션(사업장/DEVICE/대공정/설비사/
-      세부공정)을 CIP 시트 기준으로 입력받아, 자재코드 선택/추가 시
-      옵션 조건까지 완전히 일치하면 빨강("검토 필요"), 세부공정만
-      다르면 주황으로 표시한다.
+      세부공정)을 FSC매핑 시트 기준으로 입력받아, 자재코드 선택/추가 시
+      CIP 시트와 옵션 조건까지 완전히 일치하면 빨강("검토 필요"),
+      세부공정만 다르면 주황으로 표시한다. 같은 조건에 Q-code까지
+      맞으면 FSC매핑 이력에서 추천 자재코드도 함께 보여준다.
 
 필요 패키지 : openpyxl
 """
@@ -272,19 +273,21 @@ class MasterData:
         self.comm_types = []
         self.fsc = []              # [(FSC, VER, FSC NM, 설명, 상태)]
         self.fsc_filter_note = ""  # 필터가 완화/생략된 경우의 안내 문구
-        # CIP 시트: AS-IS FSC 알람용 옵션 드롭다운 + 매치 데이터
+        # CIP 시트: AS-IS FSC 알람 매치 데이터 (옵션 드롭다운 목록은 FSC매핑
+        # 시트에서 뽑는다 — 그래야 같은 조건으로 FSC 추천과 CIP 알람을
+        # 함께 확인할 수 있다).
         self.cip_rows = []         # [{"site","device","process","vendor","subproc","fsc"}, ...]
-        self.cip_sites = []
-        self.cip_devices = []
-        self.cip_processes = []
-        self.cip_vendors = []
-        self.cip_subprocs = []     # 정규화(특수문자→'-', 대소문자 무시)된 고유값
 
         # FSC매핑 시트: 옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code)
-        # 조합별 추천 자재코드 + 이력.
+        # 조합별 추천 자재코드 + 이력, 그리고 옵션 드롭다운 목록.
         self.fsc_map = {}          # {정규화된 6키 튜플: {"row": 엑셀행번호, "history": [FSC, ...]}}
         self.fsc_map_qcodes = []   # 옵션 Q-code 콤보박스용 고유값
         self.fsc_map_fsc_col = 0  # FSC(첫 이력) 열 번호 — 새 이력을 쓸 때 기준
+        self.opt_sites = []
+        self.opt_devices = []
+        self.opt_processes = []
+        self.opt_vendors = []
+        self.opt_subprocs = []     # 정규화(특수문자→'-', 대소문자 무시)된 고유값
         self._load()
 
     @staticmethod
@@ -389,7 +392,6 @@ class MasterData:
                 col_fsc     = _find_cip_subheader_col(ws, "AS-IS", "FSC")
 
                 cip_rows = []
-                sites, devices, processes, vendors, subprocs = set(), set(), set(), set(), set()
                 if col_no and col_fsc:
                     for row in ws.iter_rows(min_row=1, values_only=False):
                         # CIP 시트는 머리글이 여러 줄이라 고정 행번호로 자르는
@@ -407,18 +409,8 @@ class MasterData:
                         cip_rows.append({"site": site, "device": device,
                                          "process": process, "vendor": vendor,
                                          "subproc": subproc, "fsc": fsc})
-                        if site: sites.add(site)
-                        if device: devices.add(device)
-                        if process: processes.add(process)
-                        if vendor: vendors.add(vendor)
-                        if subproc: subprocs.add(_norm_subproc(subproc))
 
                 self.cip_rows = cip_rows
-                self.cip_sites = sorted(sites)
-                self.cip_devices = sorted(devices)
-                self.cip_processes = sorted(processes)
-                self.cip_vendors = sorted(vendors)
-                self.cip_subprocs = sorted(subprocs)
 
             if "FSC매핑" in wb.sheetnames:
                 ws = wb["FSC매핑"]
@@ -438,6 +430,7 @@ class MasterData:
 
                 fsc_map = {}
                 qcodes = set()
+                sites, devices, processes, vendors, subprocs = set(), set(), set(), set(), set()
                 if col_site and col_device and col_process and col_vendor and col_qcode and col_fsc:
                     # read_only 모드에서는 ws.cell(row, col) 랜덤 접근이 매우
                     # 느려(행마다 스트림을 다시 훑음) 대량 행에서는 사실상
@@ -452,6 +445,13 @@ class MasterData:
                         qcode = _cell(col_qcode)
                         if not (site and device and process and vendor and qcode):
                             continue
+
+                        # 옵션 드롭다운 목록: FSC 이력 유무와 상관없이 FSC매핑에
+                        # 있는 조합이면 선택 가능한 값으로 취급한다.
+                        sites.add(site); devices.add(device)
+                        processes.add(process); vendors.add(vendor)
+                        if subproc: subprocs.add(_norm_subproc(subproc))
+                        qcodes.add(qcode)
 
                         # FSC(첫 이력 칸)부터 오른쪽으로 값이 있는 동안만 이력에 담는다.
                         # (이력 중간에 빈 칸이 나오면 그 뒤는 아직 안 쓴 것으로 본다)
@@ -468,12 +468,16 @@ class MasterData:
 
                         key = (_norm_plain(site), _norm_plain(device), _norm_plain(process),
                                _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
-                        qcodes.add(qcode)
                         fsc_map[key] = {"row": r_idx, "history": history}
 
                 self.fsc_map = fsc_map
                 self.fsc_map_qcodes = sorted(qcodes)
                 self.fsc_map_fsc_col = col_fsc or 0
+                self.opt_sites = sorted(sites)
+                self.opt_devices = sorted(devices)
+                self.opt_processes = sorted(processes)
+                self.opt_vendors = sorted(vendors)
+                self.opt_subprocs = sorted(subprocs)
         finally:
             wb.close()
 
@@ -566,11 +570,11 @@ def ship_to_suffix(code):
 # 의뢰파일(견적/발주 의뢰 엑셀)에서 가져올 열 (사용자가 지정한 열 문자 기준)
 REQUEST_COLS = {
     "po": "D",          # Purchase Requisition -> 고객PO번호
-    "material": "F",    # Material (참고용, 자동입력 없음)
+    "material": "F",    # Material -> 옵션 Q-code
     "desc": "G",        # Material Description -> 'LOT,' 뒤 값으로 자재코드 검색
     "qty": "H",         # 수량 -> 생성수량
     "line": "K",        # 라인 -> '_' 뒤 값으로 대공정
-    "subprocess": "N",  # 세부공정 -> 고객세부공정
+    "subprocess": "N",  # 세부공정 -> 고객세부공정 + 옵션 세부공정
     "maker": "X",       # 설비Maker -> 설비MAKER
     "equip_no": "Z",    # 설비호기 -> 고객설비호기
     "due": "AA",        # 희망 납품일 -> 납품요청일
@@ -1107,7 +1111,7 @@ class App(tk.Tk):
             self._set_form_locked(self.md is None)
             return
         self._fill_combos()
-        self._fill_cip_combos()
+        self._fill_option_combos()
         text = ("양식 로드 완료 · 판매처 %d · 인도처 %d · FSC %d건"
                 % (len(self.md.sold_to), len(self.md.ship_to), len(self.md.fsc)))
         if self.md.fsc_filter_note:
@@ -1131,19 +1135,19 @@ class App(tk.Tk):
             if values and not self.common_vars[key].get().strip():
                 self.common_vars[key].set(values[0])
 
-    def _fill_cip_combos(self):
-        """CIP 시트에서 뽑아낸 고유값으로 옵션 콤보박스 목록을 채운다.
+    def _fill_option_combos(self):
+        """FSC매핑 시트에서 뽑아낸 고유값으로 옵션 콤보박스 목록을 채운다.
+        (CIP가 아니라 FSC매핑을 기준으로 삼아야, 여기서 고른 조건 그대로
+        FSC 추천과 CIP AS-IS 검토필요 알람을 함께 확인할 수 있다.)
         (공통값 콤보와 달리 기본값을 자동 선택하지 않는다 — '이 조건에 맞는
         값을 직접 고르거나 입력'하는 용도라 임의의 첫 값을 넣으면 오히려
         혼란을 준다.)"""
-        self.cip_cbo["site"]["values"] = self.md.cip_sites
-        self.cip_cbo["device"]["values"] = self.md.cip_devices
-        self.cip_cbo["process"]["values"] = self.md.cip_processes
-        self.cip_cbo["vendor"]["values"] = self.md.cip_vendors
-        self._subproc_all_values = list(self.md.cip_subprocs)
+        self.cip_cbo["site"]["values"] = self.md.opt_sites
+        self.cip_cbo["device"]["values"] = self.md.opt_devices
+        self.cip_cbo["process"]["values"] = self.md.opt_processes
+        self.cip_cbo["vendor"]["values"] = self.md.opt_vendors
+        self._subproc_all_values = list(self.md.opt_subprocs)
         self._subproc_cbo["values"] = self._subproc_all_values
-        # Q-code는 CIP가 아니라 FSC매핑 시트에서 뽑아낸 값이지만, 옵션
-        # 콤보박스 채우기는 한 곳(여기)에서 같이 관리한다.
         self._qcode_all_values = list(self.md.fsc_map_qcodes)
         self._qcode_cbo["values"] = self._qcode_all_values
 
@@ -1403,7 +1407,11 @@ class App(tk.Tk):
             self.line_vars["M"].set(proc)
             self.option_vars["process"].set(proc)   # 옵션의 대공정도 동일하게
         if r.get("subprocess") is not None:
-            self.line_vars["O"].set(str(r["subprocess"]).strip())
+            subproc = str(r["subprocess"]).strip()
+            self.line_vars["O"].set(subproc)
+            self.option_vars["subproc"].set(subproc)   # 옵션의 세부공정도 동일하게
+        if r.get("material") is not None:
+            self.option_vars["qcode"].set(str(r["material"]).strip())   # 옵션의 Q-code
         if r.get("maker") is not None:
             maker = str(r["maker"]).strip()
             self.line_vars["N"].set(maker)

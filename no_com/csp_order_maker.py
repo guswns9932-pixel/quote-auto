@@ -113,10 +113,25 @@ _CIP_MAX_COL = 40
 
 
 def _h(v):
-    """헤더 텍스트 비교용 정규화: 공백/하이픈/마침표 제거 후 대문자."""
+    """헤더 텍스트 비교용 정규화: 공백/하이픈/마침표/별표 제거 후 대문자.
+    (별표는 FSC매핑 시트가 필수 열 표시로 "*사업장"처럼 쓰기 때문에 포함)"""
     if v is None:
         return ""
-    return re.sub(r"[\s\-\.]+", "", str(v).strip()).upper()
+    return re.sub(r"[\s\-\.\*]+", "", str(v).strip()).upper()
+
+
+def _find_header_col(ws, header_row, label, max_col=30):
+    """단일 헤더 행에서 label과 일치하는 열 번호(1-based)를 찾는다.
+    (FSC매핑 시트처럼 헤더가 한 줄뿐인 단순한 표에 쓴다 — CIP 시트처럼
+    병합된 여러 줄 헤더가 필요하면 _find_cip_col/_find_cip_subheader_col
+    을 쓴다.)"""
+    target = _h(label)
+    if not target:
+        return None
+    for c in range(1, max_col + 1):
+        if _h(ws.cell(row=header_row, column=c).value) == target:
+            return c
+    return None
 
 
 def _find_cip_col(ws, label):
@@ -227,6 +242,21 @@ def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
     return "orange" if found_orange else None
 
 
+def _fsc_map_key(site, device, process, vendor, subproc, qcode):
+    return (_norm_plain(site), _norm_plain(device), _norm_plain(process),
+            _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
+
+
+def fsc_recommend(fsc_map, site, device, process, vendor, subproc, qcode):
+    """옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code) 조합으로 FSC매핑
+    시트를 조회해 현재 추천 자재코드(이력 중 가장 오른쪽 = 가장 최근 값)를
+    반환한다. 일치하는 조합이 없으면 None."""
+    entry = fsc_map.get(_fsc_map_key(site, device, process, vendor, subproc, qcode))
+    if not entry or not entry.get("history"):
+        return None
+    return entry["history"][-1]
+
+
 # ---------------------------------------------------------------- 마스터 데이터
 class MasterData:
     """통합양식 파일의 코드 시트 / FSC 시트를 읽어들인다."""
@@ -249,6 +279,12 @@ class MasterData:
         self.cip_processes = []
         self.cip_vendors = []
         self.cip_subprocs = []     # 정규화(특수문자→'-', 대소문자 무시)된 고유값
+
+        # FSC매핑 시트: 옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code)
+        # 조합별 추천 자재코드 + 이력.
+        self.fsc_map = {}          # {정규화된 6키 튜플: {"row": 엑셀행번호, "history": [FSC, ...]}}
+        self.fsc_map_qcodes = []   # 옵션 Q-code 콤보박스용 고유값
+        self.fsc_map_fsc_col = 0  # FSC(첫 이력) 열 번호 — 새 이력을 쓸 때 기준
         self._load()
 
     @staticmethod
@@ -383,6 +419,58 @@ class MasterData:
                 self.cip_processes = sorted(processes)
                 self.cip_vendors = sorted(vendors)
                 self.cip_subprocs = sorted(subprocs)
+
+            if "FSC매핑" in wb.sheetnames:
+                ws = wb["FSC매핑"]
+                col_site    = _find_header_col(ws, 1, "사업장")
+                col_device  = _find_header_col(ws, 1, "DEVICE")
+                col_process = _find_header_col(ws, 1, "대공정")
+                col_vendor  = _find_header_col(ws, 1, "설비사")
+                col_subproc = _find_header_col(ws, 1, "세부공정")
+                col_qcode   = _find_header_col(ws, 1, "Q-code") or _find_header_col(ws, 1, "Qcode")
+                col_fsc     = _find_header_col(ws, 1, "FSC")
+
+                def _hist_val(v):
+                    """FSC 이력 칸이 '진짜' 값인지 판단한다. 일부 행에 남아있는
+                    잔여 숫자 0을 실제 FSC로 착각하지 않기 위함."""
+                    s = self._s(v)
+                    return s if s and s != "0" else ""
+
+                fsc_map = {}
+                qcodes = set()
+                if col_site and col_device and col_process and col_vendor and col_qcode and col_fsc:
+                    max_col = max(ws.max_column, col_fsc + 20)
+                    for r in range(2, ws.max_row + 1):
+                        def _cell(col):
+                            return self._s(ws.cell(row=r, column=col).value) if col else ""
+                        site, device = _cell(col_site), _cell(col_device)
+                        process, vendor = _cell(col_process), _cell(col_vendor)
+                        subproc = _cell(col_subproc) if col_subproc else ""
+                        qcode = _cell(col_qcode)
+                        if not (site and device and process and vendor and qcode):
+                            continue
+
+                        # FSC(첫 이력 칸)부터 오른쪽으로 값이 있는 동안만 이력에 담는다.
+                        # (이력 중간에 빈 칸이 나오면 그 뒤는 아직 안 쓴 것으로 본다)
+                        history = []
+                        c = col_fsc
+                        while c <= max_col:
+                            v = _hist_val(ws.cell(row=r, column=c).value)
+                            if not v:
+                                break
+                            history.append(v)
+                            c += 1
+                        if not history:
+                            continue
+
+                        key = (_norm_plain(site), _norm_plain(device), _norm_plain(process),
+                               _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
+                        qcodes.add(qcode)
+                        fsc_map[key] = {"row": r, "history": history}
+
+                self.fsc_map = fsc_map
+                self.fsc_map_qcodes = sorted(qcodes)
+                self.fsc_map_fsc_col = col_fsc or 0
         finally:
             wb.close()
 
@@ -774,7 +862,8 @@ class PickerDialog(tk.Toplevel):
     """검색 + 목록 선택 공용 팝업."""
 
     def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
-                 highlight_keys=None, warn_levels=None):
+                 highlight_keys=None, warn_levels=None, recommended_fsc=None,
+                 show_recommend_col=False):
         """
         highlight_keys : 강조 표시할 키 값들의 집합(초록 배경 + 목록 상위 정렬).
           (예: 전체 로그에 이미 등장한 적 있는 자재코드)
@@ -784,6 +873,13 @@ class PickerDialog(tk.Toplevel):
           자체가 가려지는 문제가 있어 열을 분리했다. highlight_keys보다
           우선해 목록 맨 위로 올린다. 실제 반환값(self.result)에는
           섞이지 않도록 원본 행을 iid로 따로 기억해둔다.
+        recommended_fsc : FSC매핑에서 찾은 추천 자재코드(문자열) 또는
+          None(일치하는 조합 없음). "검토"/"이전 이력"과는 완전히 다른
+          채널(별도 "추천" 열)이라 셋 다 동시에 표시될 수 있다. 무엇보다
+          우선해 목록 맨 위로 올린다.
+        show_recommend_col : "추천" 열 자체를 보여줄지. 지정하지 않으면
+          recommended_fsc가 있을 때만 보여준다(호출부가 항상 이 열을
+          띄우고 싶으면 True로 명시한다).
         """
         super().__init__(parent)
         self.title(title)
@@ -794,22 +890,26 @@ class PickerDialog(tk.Toplevel):
         self._highlight_keys = {str(k) for k in highlight_keys} if highlight_keys else set()
         self._show_review_col = warn_levels is not None
         self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
+        self._recommended = str(recommended_fsc) if recommended_fsc else None
+        self._show_recommend_col = show_recommend_col or self._recommended is not None
         self._iid_to_row = {}
 
         rows = list(rows)
 
         def _priority(r):
             key = str(r[key_index])
+            if key == self._recommended:
+                return 0
             level = self._warn_levels.get(key)
             if level == "red":
-                return 0
-            if level == "orange":
                 return 1
-            if key in self._highlight_keys:
+            if level == "orange":
                 return 2
-            return 3
+            if key in self._highlight_keys:
+                return 3
+            return 4
 
-        if self._highlight_keys or self._warn_levels:
+        if self._highlight_keys or self._warn_levels or self._recommended:
             # 안정 정렬이므로 각 우선순위 그룹 내 원래 순서는 유지된다.
             rows.sort(key=_priority)
         self._rows = rows
@@ -824,6 +924,9 @@ class PickerDialog(tk.Toplevel):
         self.var.trace_add("write", lambda *_: self._refresh())
         self.count = ttk.Label(top, text="")
         self.count.pack(side="left", padx=6)
+        if self._show_recommend_col:
+            ttk.Label(top, text="(⭐ = 같은 조건 최근 추천 자재코드)",
+                      foreground="#1565C0").pack(side="left", padx=(10, 0))
         if self._highlight_keys:
             ttk.Label(top, text="(초록색 = 이전 주문 이력 있음)",
                       foreground="#2e7d32").pack(side="left", padx=(10, 0))
@@ -834,15 +937,15 @@ class PickerDialog(tk.Toplevel):
         body = ttk.Frame(self, padding=(8, 0, 8, 8))
         body.pack(fill="both", expand=True)
 
+        # 추천 열 -> 검토 열 순으로 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
+        extra_cols, extra_widths = [], []
+        if self._show_recommend_col:
+            extra_cols.append("추천"); extra_widths.append(60)
         if self._show_review_col:
-            # 알람 전용 열을 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
-            self._review_col_pos = key_index
-            display_columns = list(columns[:key_index]) + ["검토"] + list(columns[key_index:])
-            display_widths = list(widths[:key_index]) + [150] + list(widths[key_index:])
-        else:
-            self._review_col_pos = None
-            display_columns = list(columns)
-            display_widths = list(widths)
+            extra_cols.append("검토"); extra_widths.append(150)
+        self._extra_col_pos = key_index
+        display_columns = list(columns[:key_index]) + extra_cols + list(columns[key_index:])
+        display_widths = list(widths[:key_index]) + extra_widths + list(widths[key_index:])
 
         self.tree = ttk.Treeview(body, columns=display_columns, show="headings",
                                  height=18, selectmode="browse")
@@ -880,15 +983,20 @@ class PickerDialog(tk.Toplevel):
             level = self._warn_levels.get(key)
             used = key in self._highlight_keys
 
+            extra_vals = []
+            if self._show_recommend_col:
+                extra_vals.append("⭐" if self._recommended and key == self._recommended else "")
             if self._show_review_col:
                 if level == "red":
-                    review_text = "🔴 검토 필요"
+                    extra_vals.append("🔴 검토 필요")
                 elif level == "orange":
-                    review_text = "🟠 세부공정만 다름"
+                    extra_vals.append("🟠 세부공정만 다름")
                 else:
-                    review_text = ""
-                pos = self._review_col_pos
-                display = list(row[:pos]) + [review_text] + list(row[pos:])
+                    extra_vals.append("")
+
+            if extra_vals:
+                pos = self._extra_col_pos
+                display = list(row[:pos]) + extra_vals + list(row[pos:])
             else:
                 display = list(row)
 
@@ -952,6 +1060,7 @@ class App(tk.Tk):
         # 의뢰파일 더블클릭 시 규격(desc)에서 뽑아낸 모델 키워드. "찾기"
         # 버튼을 누르면 이 값으로 자재코드 찾기 창의 검색창을 채운다.
         self._last_model_keyword = ""
+        self._qcode_all_values = []
 
         self._build_ui()
         self._load_master(initial=True)
@@ -1030,6 +1139,10 @@ class App(tk.Tk):
         self.cip_cbo["vendor"]["values"] = self.md.cip_vendors
         self._subproc_all_values = list(self.md.cip_subprocs)
         self._subproc_cbo["values"] = self._subproc_all_values
+        # Q-code는 CIP가 아니라 FSC매핑 시트에서 뽑아낸 값이지만, 옵션
+        # 콤보박스 채우기는 한 곳(여기)에서 같이 관리한다.
+        self._qcode_all_values = list(self.md.fsc_map_qcodes)
+        self._qcode_cbo["values"] = self._qcode_all_values
 
     def _on_locked_click(self, event):
         """양식을 불러오기 전에 입력 영역을 클릭하면 안내 문구를 띄운다."""
@@ -1323,7 +1436,7 @@ class App(tk.Tk):
             cbo = ttk.Combobox(cell, textvariable=var, width=14)
             cbo.pack()
             self.cip_cbo[key] = cbo
-            var.trace_add("write", lambda *_: self._update_cip_status())
+            var.trace_add("write", lambda *_: self._on_option_field_changed())
 
         _combo_cell("사업장", "site")
         _combo_cell("DEVICE", "device")
@@ -1333,13 +1446,24 @@ class App(tk.Tk):
         # 세부공정: 특수문자를 '-'로 통일해 스펠링만 인식하고, 입력하는
         # 대로 드롭다운 목록을 실시간으로 좁혀 보여준다.
         cell = ttk.Frame(row1)
-        cell.pack(side="left")
+        cell.pack(side="left", padx=(0, 14))
         ttk.Label(cell, text="세부공정").pack(anchor="w")
         var_sub = tk.StringVar()
         self.option_vars["subproc"] = var_sub
         self._subproc_cbo = ttk.Combobox(cell, textvariable=var_sub, width=14)
         self._subproc_cbo.pack()
         var_sub.trace_add("write", lambda *_: self._on_subproc_input())
+
+        # Q-code: FSC매핑 시트에서 추천 자재코드를 찾는 6번째 조건.
+        # 값이 많아(수백 개) 세부공정처럼 입력하는 대로 목록을 좁혀 보여준다.
+        cell = ttk.Frame(row1)
+        cell.pack(side="left")
+        ttk.Label(cell, text="Q-code").pack(anchor="w")
+        var_qcode = tk.StringVar()
+        self.option_vars["qcode"] = var_qcode
+        self._qcode_cbo = ttk.Combobox(cell, textvariable=var_qcode, width=16)
+        self._qcode_cbo.pack()
+        var_qcode.trace_add("write", lambda *_: self._on_qcode_input())
 
         row2 = ttk.Frame(parent)
         row2.pack(fill="x", pady=(8, 0))
@@ -1350,6 +1474,8 @@ class App(tk.Tk):
         self.entry_Q.pack(side="left")
         _colored_button(row2, "찾기", width=5, bg="#E8EAF6",
                         command=self._pick_fsc).pack(side="left", padx=2)
+        self.lbl_fsc_recommend = ttk.Label(row2, text="", foreground="#1565C0")
+        self.lbl_fsc_recommend.pack(side="left", padx=(10, 0))
         self.lbl_cip_status = ttk.Label(row2, text="", foreground="#c00")
         self.lbl_cip_status.pack(side="left", padx=(10, 0))
 
@@ -1361,6 +1487,30 @@ class App(tk.Tk):
     def _on_subproc_input(self):
         self._filter_subproc_combo()
         self._update_cip_status()
+        self._update_fsc_recommend_status()
+
+    def _on_qcode_input(self):
+        self._filter_qcode_combo()
+        self._update_fsc_recommend_status()
+
+    def _filter_qcode_combo(self):
+        """Q-code 입력값과 부분 일치하는 항목만 드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_plain(self.option_vars["qcode"].get())
+        all_values = getattr(self, "_qcode_all_values", [])
+        if not typed:
+            self._qcode_cbo["values"] = all_values
+        else:
+            self._qcode_cbo["values"] = [v for v in all_values if typed in _norm_plain(v)]
+
+    def _update_fsc_recommend_status(self):
+        """옵션 6개 필드로 FSC매핑을 조회해 추천 자재코드를 라벨에 표시한다."""
+        if not self.md:
+            self.lbl_fsc_recommend.config(text="")
+            return
+        opt = self._current_option_fields()
+        rec = fsc_recommend(self.md.fsc_map, opt["site"], opt["device"], opt["process"],
+                            opt["vendor"], opt["subproc"], opt["qcode"])
+        self.lbl_fsc_recommend.config(text=f"⭐ 추천: {rec}" if rec else "")
 
     def _filter_subproc_combo(self):
         """세부공정 입력값과 스펠링이 일치하는(특수문자·대소문자 무시) 항목만
@@ -1374,7 +1524,13 @@ class App(tk.Tk):
 
     def _current_option_fields(self):
         return {k: self.option_vars[k].get() for k in
-                ("site", "device", "process", "vendor", "subproc")}
+                ("site", "device", "process", "vendor", "subproc", "qcode")}
+
+    def _on_option_field_changed(self):
+        """사업장/DEVICE/대공정/설비사 콤보박스 값이 바뀔 때마다 CIP 알람과
+        FSC매핑 추천 상태를 함께 갱신한다."""
+        self._update_cip_status()
+        self._update_fsc_recommend_status()
 
     def _update_cip_status(self):
         """옵션 5개 필드 + 자재코드를 CIP AS-IS와 비교해 상태 라벨을 갱신한다."""
@@ -1583,14 +1739,20 @@ class App(tk.Tk):
                                     opt["process"], opt["vendor"], opt["subproc"], code)
             if level:
                 warn_levels[code] = level
-        # "검토" 열이 왼쪽에 따로 추가되는 만큼 나머지 열 너비를 조금씩
-        # 줄여 창이 과하게 넓어지지 않게 균형을 맞췄다.
+        # 옵션 6개 필드(Q-code 포함)로 FSC매핑에서 추천 자재코드를 찾는다 —
+        # 있으면 목록 맨 위에 별도로 표시한다.
+        recommended_fsc = fsc_recommend(self.md.fsc_map, opt["site"], opt["device"],
+                                        opt["process"], opt["vendor"], opt["subproc"],
+                                        opt["qcode"])
+        # "추천"/"검토" 열이 왼쪽에 따로 추가되는 만큼 나머지 열 너비를
+        # 조금씩 줄여 창이 과하게 넓어지지 않게 균형을 맞췄다.
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
                            ("FSC", "VER", "모델명", "설명", "상태"),
                            (130, 45, 100, 260, 80), self.md.fsc,
                            initial=self._last_model_keyword,
                            highlight_keys=set(self.price_map.keys()),
-                           warn_levels=warn_levels)
+                           warn_levels=warn_levels,
+                           recommended_fsc=recommended_fsc)
         self.wait_window(dlg)
         if dlg.result:
             self.line_vars["Q"].set(dlg.result)
@@ -1811,17 +1973,19 @@ class App(tk.Tk):
         self._refresh_request_tree()
         self.request_status.config(text="")
 
-        # 옵션(사업장/DEVICE/대공정/설비사/세부공정)은 여러 행 추가 동안
-        # 일부러 유지시키는 값이라 [행 추가]/[입력칸 비우기]로는 안 지워진다
-        # — 완전 초기화는 여기서만 비운다.
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code)은 여러 행 추가
+        # 동안 일부러 유지시키는 값이라 [행 추가]/[입력칸 비우기]로는 안
+        # 지워진다 — 완전 초기화는 여기서만 비운다.
         for var in self.option_vars.values():
             var.set("")
         self._filter_subproc_combo()
+        self._filter_qcode_combo()
 
         self.lines = []
         self._clear_line_form()
         self._refresh_tree()
         self._update_cip_status()
+        self._update_fsc_recommend_status()
 
         self.status.config(text="초기화했습니다.")
 

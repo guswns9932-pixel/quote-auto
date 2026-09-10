@@ -974,8 +974,10 @@ class PickerDialog(tk.Toplevel):
 
     def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
                  highlight_keys=None, warn_levels=None, recommended_fsc=None,
-                 recommend_confirmed=True, show_recommend_col=False):
+                 recommend_confirmed=True, show_recommend_col=False, note=None):
         """
+        note : 검색줄 아래에 한 줄로 보여줄 안내 문구(예: 목록이 이미
+          어떤 조건으로 걸러져 있는지). 지정하지 않으면 표시하지 않는다.
         highlight_keys : 강조 표시할 키 값들의 집합(초록 배경 + 목록 상위 정렬).
           (예: 전체 로그에 이미 등장한 적 있는 자재코드)
         warn_levels    : {키 값: "red"/"orange"}. CIP AS-IS FSC 알람.
@@ -1001,6 +1003,7 @@ class PickerDialog(tk.Toplevel):
         self.grab_set()
         self.result = None
         self._key_index = key_index
+        self._note = note
         self._highlight_keys = {str(k) for k in highlight_keys} if highlight_keys else set()
         self._show_review_col = warn_levels is not None
         self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
@@ -1043,9 +1046,11 @@ class PickerDialog(tk.Toplevel):
         # 안내 문구들은 검색 줄에 나란히 붙이면 (내용에 맞춰 고정폭으로
         # 정한) 목록 너비보다 창이 더 넓어져 버린다 — 검색 줄 아래에 세로로
         # 쌓아서 창 너비를 목록 기준으로 맞춘다.
-        if self._show_recommend_col or self._highlight_keys or self._show_review_col:
+        if self._show_recommend_col or self._highlight_keys or self._show_review_col or self._note:
             hints = ttk.Frame(self, padding=(8, 0, 8, 4))
             hints.pack(fill="x")
+            if self._note:
+                ttk.Label(hints, text=self._note, foreground="#555555").pack(anchor="w")
             if self._show_recommend_col:
                 ttk.Label(hints, text="⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치",
                           foreground="#1565C0").pack(anchor="w")
@@ -1065,7 +1070,7 @@ class PickerDialog(tk.Toplevel):
         if self._show_recommend_col:
             extra_cols.append("추천"); extra_widths.append(70)
         if self._show_review_col:
-            extra_cols.append("검토필요"); extra_widths.append(190)
+            extra_cols.append("검토필요"); extra_widths.append(230)
         self._extra_col_pos = key_index
         display_columns = list(columns[:key_index]) + extra_cols + list(columns[key_index:])
         display_widths = list(widths[:key_index]) + extra_widths + list(widths[key_index:])
@@ -2126,19 +2131,23 @@ class App(tk.Tk):
         # 나머지 5개 조건(Q-code 포함)만 일치해도 후보로 목록 맨 위에 표시한다.
         rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],
                             opt["process"], opt["vendor"], opt["subproc"], opt["qcode"])
-        # "추천"/"검토필요" 열이 왼쪽에 따로 추가되는 만큼, 열 너비는 각
-        # 내용 길이에 맞춰 고정폭으로 최적화했다(사용자가 드래그로 조절할
-        # 수 없으니 초기값이 곧 최종값이다). 설명은 잘려도 마우스오버 시
+        # VER/상태는 모든 행이 사실상 같은 값이라(상태는 애초에 'BOM활성화'로
+        # 걸러서 이 목록에 올라온 것) 열로 보여줄 실익이 없어 뺐다 — 그 대신
+        # 안내 문구 한 줄로 설명한다. 뺀 만큼 다른 열(특히 TO-BE 추천까지
+        # 붙는 검토필요 열)에 너비를 더 준다. 설명은 잘려도 마우스오버 시
         # 툴팁으로 전체 내용을 볼 수 있다.
+        fsc_rows = [(f[0], f[2], f[3]) for f in self.md.fsc]
+        note = (self.md.fsc_filter_note or
+                "자재코드 목록은 상태값이 'BOM활성화'인 FSC만 조회합니다.")
         dlg = PickerDialog(self, "자재코드(FSC) 선택",
-                           ("FSC", "VER", "모델명", "설명", "상태"),
-                           (110, 45, 110, 280, 75), self.md.fsc,
+                           ("FSC", "모델명", "설명"),
+                           (115, 130, 320), fsc_rows,
                            initial=self._last_model_keyword,
                            highlight_keys=set(self.price_map.keys()),
                            warn_levels=warn_levels,
                            recommended_fsc=rec["fsc"] if rec else None,
                            recommend_confirmed=rec["confirmed"] if rec else True,
-                           show_recommend_col=True)
+                           show_recommend_col=True, note=note)
         self.wait_window(dlg)
         if dlg.result:
             self.line_vars["Q"].set(dlg.result)

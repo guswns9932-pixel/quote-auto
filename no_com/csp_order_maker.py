@@ -1639,7 +1639,13 @@ class App(tk.Tk):
     def _bind_autocomplete(self, cbo):
         """옵션 콤보박스에 입력하는 동안, 화살표를 눌러 수동으로 펼치지
         않아도 드롭다운이 자동으로 열리게 한다(값 목록은 각 필드의 실시간
-        필터링 로직이 이미 좁혀 놓은 상태)."""
+        필터링 로직이 이미 좁혀 놓은 상태).
+
+        event_generate("<Down>")로 열면 실제 방향키 입력과 똑같이 취급돼
+        ttk 내부 바인딩이 펼쳐진 목록 쪽으로 포커스를 옮겨버려서, 그
+        다음 글자를 입력칸이 아니라 목록이 받아버리는 문제가 있었다.
+        ttk::combobox::Post를 직접 호출하면 포커스 이동 없이 목록만
+        펼쳐지므로, 입력칸에 계속 타이핑할 수 있다."""
         nav_keys = {"Up", "Down", "Return", "KP_Enter", "Escape", "Tab", "ISO_Left_Tab"}
 
         def _on_key(event):
@@ -1647,7 +1653,9 @@ class App(tk.Tk):
                 return
             if cbo.get().strip() and cbo["values"]:
                 try:
-                    cbo.event_generate("<Down>")
+                    cbo.tk.call("ttk::combobox::Post", cbo)
+                    cbo.focus_set()
+                    cbo.icursor("end")
                 except tk.TclError:
                     pass
 

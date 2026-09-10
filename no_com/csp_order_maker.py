@@ -304,6 +304,11 @@ class MasterData:
         self.fsc_map_5key = {}     # {정규화된 5키 튜플: {"row": 엑셀행번호, "fsc": 최근 FSC}}
         self.fsc_map_qcodes = []   # 옵션 Q-code 콤보박스용 고유값
         self.fsc_map_fsc_col = 0  # FSC(첫 이력) 열 번호 — 새 이력을 쓸 때 기준
+        # DES(H열, 규격) <-> Q-code — 거의 1:1 대응이라, 규격을 검색해
+        # 고르면 Q-code를 자동으로 채워줄 수 있다(그 반대도 마찬가지).
+        self.opt_des_values = []          # 옵션 규격 콤보박스용 고유값(원문 그대로)
+        self.fsc_map_des_to_qcode = {}    # {정규화된 DES: Q-code}
+        self.fsc_map_qcode_to_des = {}    # {정규화된 Q-code: DES(원문)}
         self.opt_sites = []
         self.opt_devices = []
         self.opt_processes = []
@@ -441,6 +446,7 @@ class MasterData:
                 col_vendor  = _find_header_col(ws, 1, "설비사")
                 col_subproc = _find_header_col(ws, 1, "세부공정")
                 col_qcode   = _find_header_col(ws, 1, "Q-code") or _find_header_col(ws, 1, "Qcode")
+                col_des     = _find_header_col(ws, 1, "DES")
                 col_fsc     = _find_header_col(ws, 1, "FSC")
 
                 def _hist_val(v):
@@ -451,7 +457,10 @@ class MasterData:
 
                 fsc_map = {}
                 fsc_map_5key = {}
+                fsc_map_des_to_qcode = {}
+                fsc_map_qcode_to_des = {}
                 qcodes = set()
+                des_values = set()
                 sites, devices, processes, vendors, subprocs = set(), set(), set(), set(), set()
                 if col_site and col_device and col_process and col_vendor and col_qcode and col_fsc:
                     # read_only 모드에서는 ws.cell(row, col) 랜덤 접근이 매우
@@ -474,6 +483,14 @@ class MasterData:
                         processes.add(process); vendors.add(vendor)
                         if subproc: subprocs.add(_norm_subproc(subproc))
                         qcodes.add(qcode)
+
+                        # 규격(DES) <-> Q-code: 처음 나온 값을 대표값으로 쓴다
+                        # (실제 데이터는 대소문자 차이 정도만 있고 사실상 1:1).
+                        des = _cell(col_des) if col_des else ""
+                        if des:
+                            des_values.add(des)
+                            fsc_map_des_to_qcode.setdefault(_norm_plain(des), qcode)
+                            fsc_map_qcode_to_des.setdefault(_norm_plain(qcode), des)
 
                         # FSC(첫 이력 칸)부터 오른쪽으로 값이 있는 동안만 이력에 담는다.
                         # (이력 중간에 빈 칸이 나오면 그 뒤는 아직 안 쓴 것으로 본다)
@@ -500,6 +517,9 @@ class MasterData:
                 self.fsc_map_5key = fsc_map_5key
                 self.fsc_map_qcodes = sorted(qcodes)
                 self.fsc_map_fsc_col = col_fsc or 0
+                self.opt_des_values = sorted(des_values)
+                self.fsc_map_des_to_qcode = fsc_map_des_to_qcode
+                self.fsc_map_qcode_to_des = fsc_map_qcode_to_des
                 self.opt_sites = sorted(sites)
                 self.opt_devices = sorted(devices)
                 self.opt_processes = sorted(processes)
@@ -1163,6 +1183,10 @@ class App(tk.Tk):
         # 버튼을 누르면 이 값으로 자재코드 찾기 창의 검색창을 채운다.
         self._last_model_keyword = ""
         self._qcode_all_values = []
+        self._des_all_values = []
+        # 규격<->Q-code 콤보박스가 서로를 자동으로 채워줄 때, 그 자동입력이
+        # 다시 상대쪽을 건드려 무한 반복되는 것을 막는 재진입 방지 플래그.
+        self._des_qcode_sync = False
 
         self._build_ui()
         self._load_master(initial=True)
@@ -1245,6 +1269,8 @@ class App(tk.Tk):
         self._subproc_cbo["values"] = self._subproc_all_values
         self._qcode_all_values = list(self.md.fsc_map_qcodes)
         self._qcode_cbo["values"] = self._qcode_all_values
+        self._des_all_values = list(self.md.opt_des_values)
+        self._des_cbo["values"] = self._des_all_values
 
     def _on_locked_click(self, event):
         """양식을 불러오기 전에 입력 영역을 클릭하면 안내 문구를 띄운다."""
@@ -1563,13 +1589,24 @@ class App(tk.Tk):
         # Q-code: FSC매핑 시트에서 추천 자재코드를 찾는 6번째 조건.
         # 값이 많아(수백 개) 세부공정처럼 입력하는 대로 목록을 좁혀 보여준다.
         cell = ttk.Frame(row1)
-        cell.pack(side="left")
+        cell.pack(side="left", padx=(0, 14))
         ttk.Label(cell, text="Q-code").pack(anchor="w")
         var_qcode = tk.StringVar()
         self.option_vars["qcode"] = var_qcode
         self._qcode_cbo = ttk.Combobox(cell, textvariable=var_qcode, width=16)
         self._qcode_cbo.pack()
         var_qcode.trace_add("write", lambda *_: self._on_qcode_input())
+
+        # 규격(DES, FSC매핑 H열): Q-code와 거의 1:1로 대응돼서, 규격을
+        # 검색해 고르면 Q-code가 자동으로 채워진다(그 반대도 마찬가지).
+        cell = ttk.Frame(row1)
+        cell.pack(side="left")
+        ttk.Label(cell, text="규격").pack(anchor="w")
+        var_des = tk.StringVar()
+        self.option_vars["des"] = var_des
+        self._des_cbo = ttk.Combobox(cell, textvariable=var_des, width=26)
+        self._des_cbo.pack()
+        var_des.trace_add("write", lambda *_: self._on_des_input())
 
         row2 = ttk.Frame(parent)
         row2.pack(fill="x", pady=(8, 0))
@@ -1597,6 +1634,15 @@ class App(tk.Tk):
 
     def _on_qcode_input(self):
         self._filter_qcode_combo()
+        if not self._des_qcode_sync and self.md:
+            qcode = self.option_vars["qcode"].get().strip()
+            des = self.md.fsc_map_qcode_to_des.get(_norm_plain(qcode))
+            if des and self.option_vars["des"].get().strip() != des:
+                self._des_qcode_sync = True
+                try:
+                    self.option_vars["des"].set(des)
+                finally:
+                    self._des_qcode_sync = False
         self._update_fsc_recommend_status()
 
     def _filter_qcode_combo(self):
@@ -1607,6 +1653,28 @@ class App(tk.Tk):
             self._qcode_cbo["values"] = all_values
         else:
             self._qcode_cbo["values"] = [v for v in all_values if typed in _norm_plain(v)]
+
+    def _on_des_input(self):
+        self._filter_des_combo()
+        if not self._des_qcode_sync and self.md:
+            des = self.option_vars["des"].get().strip()
+            qcode = self.md.fsc_map_des_to_qcode.get(_norm_plain(des))
+            if qcode and self.option_vars["qcode"].get().strip() != qcode:
+                self._des_qcode_sync = True
+                try:
+                    self.option_vars["qcode"].set(qcode)
+                finally:
+                    self._des_qcode_sync = False
+        self._update_fsc_recommend_status()
+
+    def _filter_des_combo(self):
+        """규격 입력값과 부분 일치하는 항목만 드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_plain(self.option_vars["des"].get())
+        all_values = getattr(self, "_des_all_values", [])
+        if not typed:
+            self._des_cbo["values"] = all_values
+        else:
+            self._des_cbo["values"] = [v for v in all_values if typed in _norm_plain(v)]
 
     def _update_fsc_recommend_status(self):
         """옵션 필드로 FSC매핑을 조회해 추천 자재코드를 라벨에 표시한다.
@@ -2097,6 +2165,7 @@ class App(tk.Tk):
             var.set("")
         self._filter_subproc_combo()
         self._filter_qcode_combo()
+        self._filter_des_combo()
 
         self.lines = []
         self._clear_line_form()

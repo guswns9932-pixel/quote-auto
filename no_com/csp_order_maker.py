@@ -1,0 +1,2877 @@
+# -*- coding: utf-8 -*-
+"""
+CSP 주문접수 업로드 파일 생성기  (알파 v0.2)
+
+사용법
+  1) 이 파일과 'CSP_주문접수_업로드_통합양식.xlsx' 를 같은 폴더에 둔다
+  2) python csp_order_maker.py
+  3) 공통값을 채우고 -> 옵션(자재코드/CIP 조건) 입력 -> 품목 라인을 추가
+     -> [엑셀 파일 생성]
+
+v0.2: CIP AS-IS FSC 알람 고도화 — 옵션(사업장/DEVICE/대공정/설비사/
+      세부공정)을 FSC매핑 시트 기준으로 입력받아, 자재코드 선택/추가 시
+      CIP 시트와 옵션 조건까지 완전히 일치하면 빨강("검토 필요"),
+      세부공정만 다르면 주황으로 표시한다. 같은 조건에 Q-code까지
+      맞으면 FSC매핑 이력에서 추천 자재코드도 함께 보여준다.
+
+필요 패키지 : openpyxl
+"""
+
+import os
+import re
+import sys
+import json
+import shutil
+import zipfile
+import subprocess
+import datetime as dt
+import xml.etree.ElementTree as ET
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Alignment
+from openpyxl.utils import get_column_letter, column_index_from_string
+
+APP_TITLE = "CSP 주문접수 업로드 파일 생성기  (alpha v0.2)"
+TEMPLATE_NAME = "CSP_주문접수_업로드_통합양식.xlsx"
+SETTINGS_NAME = "csp_order_maker_settings.json"
+LOG_NAME = "CSP_주문접수_전체로그.xlsx"
+UPLOAD_DIR_NAME = "CSP 주문접수 UPLOAD"
+
+# ---------------------------------------------------------------- 양식 정의
+# (엑셀열, 헤더명, 필수여부)
+COLUMNS = [
+    ("A", "판매오더유형", True),
+    ("B", "판매처코드", True),
+    ("C", "인도처코드", True),
+    ("D", "유통경로", True),
+    ("E", "제품군", False),
+    ("F", "고객PO번호", True),
+    ("G", "고객PO일자", False),
+    ("H", "인도조건", True),
+    ("I", "인도장소", False),
+    ("J", "가격결정일", True),
+    ("K", "통화", True),
+    ("L", "고객라인", False),
+    ("M", "대공정", False),
+    ("N", "설비MAKER", False),
+    ("O", "고객세부공정", False),
+    ("P", "고객설비호기", True),
+    ("Q", "자재코드", True),
+    ("R", "오더수량", True),
+    ("S", "단위", False),
+    ("T", "납품요청일", True),
+    ("U", "출하지점", False),
+    ("V", "조건유형", False),
+    ("W", "단가", False),
+    ("X", "금액", True),
+    ("Y", "통신유형", True),
+]
+
+# 모든 행이 같은 값을 갖는 항목 (화면 위쪽에서 한 번만 입력)
+COMMON_KEYS = ["A", "B", "D", "E", "G", "H", "J", "K",
+               "R", "S", "U", "V", "Y"]
+# 행마다 달라지는 항목 (아래 표에서 행별 입력)
+LINE_KEYS = ["C", "F", "I", "L", "M", "N", "O", "P", "Q", "T", "W", "X"]
+
+HEADER_BY_KEY = {k: h for k, h, _ in COLUMNS}
+REQUIRED_KEYS = {k for k, _, r in COLUMNS if r}
+COL_INDEX = {k: i for i, (k, _, _) in enumerate(COLUMNS)}
+
+
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def upload_dir():
+    """생성된 주문접수 파일과 로그를 모아두는 폴더 (실행파일 위치 기준),
+    없으면 새로 만든다."""
+    path = os.path.join(app_dir(), UPLOAD_DIR_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def open_folder(path):
+    """탐색기(또는 각 OS의 파일관리자)로 폴더를 연다."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=False)
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- CIP 헤더 탐색
+# CIP 시트의 열 위치를 코드에 고정(하드코딩)하지 않고, 헤더 텍스트를 찾아서
+# 그 아래 실제 데이터가 있는 열을 알아낸다 — 열 순서가 바뀌어도 그대로 동작한다.
+_CIP_HEADER_SCAN_ROWS = 6   # 헤더 관련 텍스트는 이 안에 있다고 보고 그 안에서만 찾는다
+_CIP_MAX_COL = 40
+
+
+def _h(v):
+    """헤더 텍스트 비교용 정규화: 공백/하이픈/마침표/별표 제거 후 대문자.
+    (별표는 FSC매핑 시트가 필수 열 표시로 "*사업장"처럼 쓰기 때문에 포함)"""
+    if v is None:
+        return ""
+    return re.sub(r"[\s\-\.\*]+", "", str(v).strip()).upper()
+
+
+def _find_header_col(ws, header_row, label, max_col=30):
+    """단일 헤더 행에서 label과 일치하는 열 번호(1-based)를 찾는다.
+    (FSC매핑 시트처럼 헤더가 한 줄뿐인 단순한 표에 쓴다 — CIP 시트처럼
+    병합된 여러 줄 헤더가 필요하면 _find_cip_col/_find_cip_subheader_col
+    을 쓴다.)"""
+    target = _h(label)
+    if not target:
+        return None
+    for c in range(1, max_col + 1):
+        if _h(ws.cell(row=header_row, column=c).value) == target:
+            return c
+    return None
+
+
+def _find_cip_col(ws, label):
+    """헤더 행들 중 어느 셀이든 label과 일치하면 그 열 번호(1-based)를 반환."""
+    target = _h(label)
+    if not target:
+        return None
+    for r in range(1, _CIP_HEADER_SCAN_ROWS + 1):
+        for c in range(1, _CIP_MAX_COL + 1):
+            if _h(ws.cell(row=r, column=c).value) == target:
+                return c
+    return None
+
+
+def _find_cip_subheader_col(ws, section_label, sub_label):
+    """병합된 섹션 헤더(예: 'AS-IS') 아래에 있는 서브헤더(예: 'FSC') 열을 찾는다.
+
+    read_only 모드로 열면 병합 셀 정보를 읽을 수 없어(맨 왼쪽 셀에만 값이
+    있고 나머지는 None) merged_cells를 쓸 수 없다. 대신 한 행을 왼쪽에서
+    가장 가까운 값으로 채워 넣어(엑셀 화면에 보이는 대로) 각 열이 어느
+    섹션에 속하는지 판단한다.
+    """
+    section_target = _h(section_label)
+    sub_target = _h(sub_label)
+    for r in range(1, _CIP_HEADER_SCAN_ROWS + 1):
+        filled, last = [], ""
+        for c in range(1, _CIP_MAX_COL + 1):
+            v = _h(ws.cell(row=r, column=c).value)
+            if v:
+                last = v
+            filled.append(last)
+        if section_target not in filled:
+            continue
+        for r2 in range(r + 1, min(r + 3, _CIP_HEADER_SCAN_ROWS) + 1):
+            for c in range(1, _CIP_MAX_COL + 1):
+                if (filled[c - 1] == section_target
+                        and _h(ws.cell(row=r2, column=c).value) == sub_target):
+                    return c
+    return None
+
+
+# ---------------------------------------------------------------- CIP 매치(AS-IS FSC 알람)
+# "-"(대공정·설비사·세부공정)은 CIP 시트에서 "해당 항목 전체에 적용됨"을
+# 뜻하는 값이라 와일드카드로 취급한다. 옵션 칸이 아직 비어 있는 경우는
+# (아직 입력 안 함) 와일드카드로 보지 않는다 — 그래야 세부공정만 빈
+# 상태에서도 "세부공정 제외 동일"(orange)로 자연스럽게 떨어진다.
+#
+# 사업장의 "ALL"은 와일드카드로 두지 않는다 — 실사용자 확인 결과 "ALL"은
+# 다른 사업장(SCS/TAYLOR 등)을 포괄하는 개념이 아니라 그 자체로 하나의
+# 개별 사업장이다. 그래서 사업장은 다른 필드와 똑같이 정확히 일치할
+# 때만 매치되고("ALL"을 직접 선택했을 때만 CIP의 "ALL" 행과 매치),
+# 별도 취급이 필요 없다.
+_CIP_WILDCARDS = {"-"}
+
+
+def _norm_plain(v):
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip().upper()
+
+
+def _norm_subproc(v):
+    """세부공정 정규화: 영문/숫자/한글이 아닌 문자는 전부 '-'로 통일하고
+    (연속되면 하나로 합침) 대소문자를 구분하지 않는다."""
+    raw = _norm_plain(v)
+    if raw in _CIP_WILDCARDS or raw == "":
+        return raw
+    return re.sub(r"[^0-9A-Z가-힣]+", "-", raw).strip("-")
+
+
+def _cip_field_eq(cip_val, opt_val, normalize=_norm_plain):
+    a, b = normalize(cip_val), normalize(opt_val)
+    if not a or not b:
+        return False
+    return a == b or a in _CIP_WILDCARDS or b in _CIP_WILDCARDS
+
+
+def _split_fsc_codes(v):
+    """CIP AS-IS/TO-BE 칸의 '코드1 + 코드2'처럼 묶인 복합 자재코드를
+    개별 코드 리스트로 나눈다(양쪽 공백 트림, 빈 조각은 버림)."""
+    return [p.strip() for p in str(v or "").split("+") if p.strip()]
+
+
+def _cip_fsc_match_index(row_fsc, fsc_n):
+    """CIP 행의 AS-IS FSC(단일 또는 '+'로 묶인 복합값) 중 fsc_n과 일치하는
+    조각의 인덱스를 반환한다. 일치하는 조각이 없으면 -1."""
+    for i, p in enumerate(_split_fsc_codes(row_fsc)):
+        if _norm_plain(p) == fsc_n:
+            return i
+    return -1
+
+
+def cip_match_level(cip_rows, site, device, process, vendor, subproc, fsc):
+    """옵션(사업장/DEVICE/대공정/설비사/세부공정) + 자재코드(fsc)를 CIP AS-IS
+    데이터와 비교한다.
+
+    반환: "red"  — 옵션 5개 필드 + 자재코드가 CIP 한 행과 완전히 일치
+                    (해당 조건에서 이 자재코드는 AS-IS로 등록돼 있음 = 검토 필요)
+          "orange" — 세부공정을 제외한 나머지(사업장/DEVICE/대공정/설비사)와
+                    자재코드가 일치하는 CIP 행이 있지만 세부공정만 다름
+          None  — 해당 사항 없음
+    """
+    fsc_n = _norm_plain(fsc)
+    if not fsc_n or not cip_rows:
+        return None
+    found_orange = False
+    for r in cip_rows:
+        if _cip_fsc_match_index(r.get("fsc"), fsc_n) < 0:
+            continue
+        if not _cip_field_eq(r.get("site"), site):
+            continue
+        if not _cip_field_eq(r.get("device"), device):
+            continue
+        if not _cip_field_eq(r.get("process"), process):
+            continue
+        if not _cip_field_eq(r.get("vendor"), vendor):
+            continue
+        if _cip_field_eq(r.get("subproc"), subproc, normalize=_norm_subproc):
+            return "red"
+        found_orange = True
+    return "orange" if found_orange else None
+
+
+def cip_tobe_recommend(cip_rows, site, device, process, vendor, subproc, fsc):
+    """AS-IS로 감지된 자재코드(fsc)에 대해 CIP TO-BE(L열) 교체 추천 코드를
+    찾는다. AS-IS가 "코드1 + 코드2"처럼 여러 코드가 묶인 세트면, 일치한
+    코드와 같은 위치의 TO-BE 코드만 짚어서 추천한다(세트 전체가 아니라
+    실제로 바꿔야 할 그 코드 하나).
+
+    반환: {"level": "red"/"orange", "tobe": "<코드>"} 또는 일치/추천할
+    TO-BE 값이 없으면 None. level은 cip_match_level과 같은 기준
+    (세부공정까지 일치=red, 나머지만 일치=orange)이며, red가 하나라도
+    있으면 그걸 우선한다.
+    """
+    fsc_n = _norm_plain(fsc)
+    if not fsc_n or not cip_rows:
+        return None
+    best = None
+    for r in cip_rows:
+        idx = _cip_fsc_match_index(r.get("fsc"), fsc_n)
+        if idx < 0:
+            continue
+        if not _cip_field_eq(r.get("site"), site):
+            continue
+        if not _cip_field_eq(r.get("device"), device):
+            continue
+        if not _cip_field_eq(r.get("process"), process):
+            continue
+        if not _cip_field_eq(r.get("vendor"), vendor):
+            continue
+
+        tobe_parts = _split_fsc_codes(r.get("tobe"))
+        if not tobe_parts:
+            continue
+        tobe = tobe_parts[idx] if idx < len(tobe_parts) else tobe_parts[0]
+
+        if _cip_field_eq(r.get("subproc"), subproc, normalize=_norm_subproc):
+            return {"level": "red", "tobe": tobe}
+        if best is None:
+            best = {"level": "orange", "tobe": tobe}
+    return best
+
+
+def _fsc_map_key(site, device, process, vendor, subproc, qcode):
+    return (_norm_plain(site), _norm_plain(device), _norm_plain(process),
+            _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
+
+
+def _fsc_map_key5(site, device, process, vendor, qcode):
+    return (_norm_plain(site), _norm_plain(device), _norm_plain(process),
+            _norm_plain(vendor), _norm_plain(qcode))
+
+
+def fsc_recommend(fsc_map, fsc_map_5key, site, device, process, vendor, subproc, qcode):
+    """옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code) 조합으로 FSC매핑
+    시트를 조회해 추천 자재코드를 찾는다.
+
+    세부공정 표기가 워낙 다양해서(오타/약어 등) 6개 조건을 다 요구하면
+    추천이 거의 안 뜬다 — 그래서 세부공정을 제외한 5개 조건(사업장/
+    DEVICE/대공정/설비사/Q-code)이 일치하면 "후보" 추천을 먼저 주고,
+    세부공정까지 정확히 일치하면 "확정" 추천으로 격상한다.
+
+    반환: {"fsc": 추천 자재코드, "confirmed": bool, "prev": 이전 추천 코드
+    또는 None} 또는 일치하는 조합이 전혀 없으면 None. confirmed=True는
+    6개 조건 전부 일치, False는 세부공정만 다른 5개 조건 일치. prev는
+    같은 조합(6키)의 이력에서 현재 추천 바로 앞에 있던 값 — 동일조건에
+    새 FSC가 등록되면서 추천이 바뀐 경우, 방금까지 추천되던 코드를
+    가리킨다(6키가 정확히 일치할 때만 의미가 있다).
+    """
+    entry6 = fsc_map.get(_fsc_map_key(site, device, process, vendor, subproc, qcode))
+    if entry6 and entry6.get("history"):
+        history = entry6["history"]
+        prev = history[-2] if len(history) >= 2 else None
+        return {"fsc": history[-1], "confirmed": True, "prev": prev}
+    entry5 = fsc_map_5key.get(_fsc_map_key5(site, device, process, vendor, qcode))
+    if entry5:
+        return {"fsc": entry5["fsc"], "confirmed": False, "prev": None}
+    return None
+
+
+_NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _xlsx_sheet_part(path, sheet_name):
+    """워크북 안에서 시트 이름에 해당하는 실제 zip 내부 경로
+    (예: xl/worksheets/sheet11.xml)를 workbook.xml + 관계 파일로 찾는다.
+    시트를 못 찾으면 None."""
+    with zipfile.ZipFile(path, "r") as z:
+        wb_root = ET.fromstring(z.read("xl/workbook.xml"))
+        rels_root = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+    rid = None
+    for sheet_el in wb_root.iter(f"{{{_NS_MAIN}}}sheet"):
+        if sheet_el.get("name") == sheet_name:
+            rid = sheet_el.get(f"{{{_NS_R}}}id")
+            break
+    if not rid:
+        return None
+    for rel_el in rels_root:
+        if rel_el.get("Id") == rid:
+            target = rel_el.get("Target", "")
+            return target if target.startswith("xl/") else "xl/" + target
+    return None
+
+
+def _sync_fsc_map_file(template_path, new_rows, history_updates):
+    """FSC매핑 시트를 갱신한다 — 둘 다 한 번의 백업/저장으로 함께 적용한다.
+
+    new_rows        : 새로 추가할 조합 행. {"site","device","process",
+                       "vendor","subproc","qcode","des","fsc"} 키를 가진
+                       dict 목록 — 이미 FSC매핑에 있는 조합인지는 호출부
+                       에서 걸러서 보낸다(여기서는 그냥 추가만 한다).
+    history_updates  : 이미 있는 행에 새 FSC 이력을 추가할 목록.
+                       [{"row": 엑셀 행번호, "col": 열 번호, "fsc": 값}, ...]
+
+    ★ openpyxl로 전체를 다시 읽고 저장하지 않는다 ★ — 실제 FSC매핑
+    시트의 사업장/DEVICE 열은 외부(현재 연결 안 된) 워크북을 참조하는
+    VLOOKUP 수식이고, 그 계산된 값이 수식과 함께 셀 XML에 캐시돼 있다.
+    openpyxl은 수식을 계산하지 않으므로, 이 시트를 openpyxl로 열었다가
+    그대로 다시 저장하기만 해도 그 캐시된 값이 사라져(수식은 남지만
+    "결과 없음" 상태가 됨) 기존 행들의 사업장/DEVICE가 전부 빈 칸이
+    되는 것을 실제로 재현해서 확인했다. 그래서 zip 안의 해당 시트 XML
+    텍스트만 직접 파싱해 필요한 <row>/<c>만 추가·수정하고, 그 외의
+    모든 내용(다른 시트, 이 시트의 기존 셀·수식 캐시값, 스타일 등)은
+    완전히 그대로 둔다.
+
+    template_path는 여러 사용자가 공유하는 마스터 파일이라 직접
+    덮어쓴다. 저장 전 같은 폴더의 Backup/ 밑에 타임스탬프를 붙여
+    원본을 복사해두고, 저장 자체가 실패하면(다른 프로그램에서 파일을
+    열어둔 경우 등) 방금 만든 백업을 지우고 예외를 그대로 올린다
+    (원본이 그대로 남아 있으니 백업이 따로 필요 없다).
+
+    반환: (추가한 새 행 수, 갱신한 이력 칸 수).
+    """
+    if not new_rows and not history_updates:
+        return 0, 0
+
+    # 열 위치는 안전한 read_only 모드로만 확인한다(저장하지 않으므로
+    # 기존 내용에 전혀 영향이 없다).
+    wb_ro = load_workbook(template_path, read_only=True, data_only=True)
+    try:
+        if "FSC매핑" not in wb_ro.sheetnames:
+            return 0, 0
+        ws_ro = wb_ro["FSC매핑"]
+        col_map = {
+            "site": _find_header_col(ws_ro, 1, "사업장"),
+            "device": _find_header_col(ws_ro, 1, "DEVICE"),
+            "process": _find_header_col(ws_ro, 1, "대공정"),
+            "vendor": _find_header_col(ws_ro, 1, "설비사"),
+            "subproc": _find_header_col(ws_ro, 1, "세부공정"),
+            "qcode": (_find_header_col(ws_ro, 1, "Q-code")
+                     or _find_header_col(ws_ro, 1, "Qcode")),
+            "des": _find_header_col(ws_ro, 1, "DES"),
+            "fsc": _find_header_col(ws_ro, 1, "FSC"),
+        }
+        max_row = ws_ro.max_row
+        max_col = max(ws_ro.max_column, max(c for c in col_map.values() if c) or 0,
+                      max((u["col"] for u in history_updates), default=0))
+    finally:
+        wb_ro.close()
+
+    required = ("site", "device", "process", "vendor", "qcode", "fsc")
+    if new_rows and not all(col_map.get(k) for k in required):
+        new_rows = []
+    if not new_rows and not history_updates:
+        return 0, 0
+
+    sheet_part = _xlsx_sheet_part(template_path, "FSC매핑")
+    if not sheet_part:
+        return 0, 0
+
+    backup_dir = os.path.join(os.path.dirname(template_path) or ".", "Backup")
+    os.makedirs(backup_dir, exist_ok=True)
+    base, ext = os.path.splitext(os.path.basename(template_path))
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(backup_dir, "%s.backup_%s%s" % (base, stamp, ext))
+    n = 1
+    while os.path.exists(backup_path):
+        n += 1
+        backup_path = os.path.join(backup_dir, "%s.backup_%s_%d%s" % (base, stamp, n, ext))
+    shutil.copy2(template_path, backup_path)
+
+    try:
+        _xlsx_update_fsc_map_xml(template_path, sheet_part, max_row, max_col,
+                                 new_rows, col_map, history_updates)
+    except Exception:
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
+        raise
+    return len(new_rows), len(history_updates)
+
+
+def _xml_escape_text(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _inline_str_cell_xml(col, row_num, text):
+    ref = "%s%d" % (get_column_letter(col), row_num)
+    space_attr = ' xml:space="preserve"' if text != text.strip() else ""
+    return '<c r="%s" t="inlineStr"><is><t%s>%s</t></is></c>' % (
+        ref, space_attr, _xml_escape_text(text))
+
+
+def _xlsx_set_cell_text(xml, row_num, col, text):
+    """시트 XML 텍스트(문자열) 안에서 특정 행(row_num)의 특정 열(col)
+    칸을 텍스트 값으로 설정한다. 이미 그 칸에 <c>가 있으면(예: 이력이
+    없음을 나타내는 잔여 0 값) 그 <c> 하나만 통째로 교체하고, 없으면
+    열 순서를 지켜 새로 끼워 넣는다. 그 행/그 칸 밖의 XML은 문자 하나
+    바뀌지 않는다."""
+    row_pat = re.compile(r'(<row r="%d"[^>]*>)(.*?)(</row>)' % row_num, re.DOTALL)
+    m = row_pat.search(xml)
+    if not m:
+        return xml
+    open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
+
+    ref = "%s%d" % (get_column_letter(col), row_num)
+    new_cell = _inline_str_cell_xml(col, row_num, text)
+    cell_pat = re.compile(r'<c r="%s"(?:[^>]*/>|[^>]*>.*?</c>)' % re.escape(ref), re.DOTALL)
+    cm = cell_pat.search(inner)
+    if cm:
+        new_inner = inner[:cm.start()] + new_cell + inner[cm.end():]
+    else:
+        insert_pos = len(inner)
+        for pm in re.finditer(r'<c r="([A-Z]+)%d"' % row_num, inner):
+            if column_index_from_string(pm.group(1)) > col:
+                insert_pos = pm.start()
+                break
+        new_inner = inner[:insert_pos] + new_cell + inner[insert_pos:]
+
+    return xml[:m.start()] + open_tag + new_inner + close_tag + xml[m.end():]
+
+
+def _xlsx_update_fsc_map_xml(path, sheet_part, start_row, max_col, new_rows, col_map,
+                             history_updates):
+    """xlsx zip 안의 시트 XML에 새 <row>를 추가하고/또는 기존 <row>의
+    이력 칸을 갱신한다. col_map은 {필드명: 열 번호(1-based) 또는 None}
+    — 값이 없는 필드는 그 칸을 아예 비워 둔다.
+
+    ★ ElementTree로 전체 문서를 파싱해 다시 직렬화하지 않는다 ★ —
+    실제로 그렇게 했다가 파일이 열리지 않는 문제를 겪었다: 이 시트의
+    루트 태그에는 mc:Ignorable="x14ac xr xr2 xr3" 처럼 접두어 이름을
+    "문자열 값"으로 나열하는 속성이 있는데, x14ac/xr2/xr3 네임스페이스는
+    실제 태그·속성에는 전혀 쓰이지 않고 그 문자열 안에서만 언급된다.
+    ElementTree는 이런 문자열까지 이해하지 못해서, 다시 저장할 때 실제로
+    "쓰인" 네임스페이스만 남기고 나머지 선언을 통째로 지워버리며(mc→ns1,
+    xr→ns2처럼 이름도 바뀜), 그 결과 mc:Ignorable 값이 가리키는 접두어와
+    실제 선언이 어긋나 엑셀이 파일을 손상된 것으로 인식했다(첨부해주신
+    파일로 재현·확인함). 그래서 시트 XML을 순수 텍스트로만 다루고, 건드
+    리는 셀/행 밖의 내용은 글자 하나도 바꾸지 않는다.
+    """
+    with zipfile.ZipFile(path, "r") as zin:
+        data = {name: zin.read(name) for name in zin.namelist()}
+
+    xml = data[sheet_part].decode("utf-8")
+
+    # 1) 이미 있는 행에 새 FSC 이력 칸을 채운다.
+    for upd in history_updates:
+        xml = _xlsx_set_cell_text(xml, upd["row"], upd["col"], str(upd["fsc"]))
+
+    # 2) 새로운 조합을 새 행으로 추가한다.
+    row_num = start_row
+    cells_order = sorted(((c, f) for f, c in col_map.items() if c), key=lambda x: x[0])
+    new_row_chunks = []
+    for values in new_rows:
+        row_num += 1
+        cell_xml = []
+        for col, field in cells_order:
+            text = str(values.get(field, "") or "")
+            if not text:
+                continue
+            cell_xml.append(_inline_str_cell_xml(col, row_num, text))
+        new_row_chunks.append('<row r="%d" spans="1:%d">%s</row>' %
+                              (row_num, max_col, "".join(cell_xml)))
+
+    if new_row_chunks:
+        marker = "</sheetData>"
+        idx = xml.rindex(marker)
+        xml = xml[:idx] + "".join(new_row_chunks) + xml[idx:]
+
+    xml = re.sub(
+        r'<dimension ref="([^":]+):[^"]+"\s*/>',
+        lambda dm: '<dimension ref="%s:%s%d"/>' % (
+            dm.group(1), get_column_letter(max_col), max(row_num, start_row)),
+        xml, count=1)
+
+    data[sheet_part] = xml.encode("utf-8")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, content in data.items():
+            zout.writestr(name, content)
+
+
+# ---------------------------------------------------------------- 마스터 데이터
+class MasterData:
+    """통합양식 파일의 코드 시트 / FSC 시트를 읽어들인다."""
+
+    def __init__(self, path):
+        self.path = path
+        self.order_types = []      # [(코드, 내역)]
+        self.sold_to = []          # [(코드, 명, 주소)]
+        self.ship_to = []
+        self.channels = []
+        self.inco_terms = []
+        self.currencies = []
+        self.comm_types = []
+        self.fsc = []              # [(FSC, VER, FSC NM, 설명, 상태)]
+        self.fsc_filter_note = ""  # 필터가 완화/생략된 경우의 안내 문구
+        # CIP 시트: AS-IS FSC 알람 매치 데이터 (옵션 드롭다운 목록은 FSC매핑
+        # 시트에서 뽑는다 — 그래야 같은 조건으로 FSC 추천과 CIP 알람을
+        # 함께 확인할 수 있다).
+        self.cip_rows = []         # [{"site","device","process","vendor","subproc","fsc"}, ...]
+
+        # FSC매핑 시트: 옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code)
+        # 조합별 추천 자재코드 + 이력, 그리고 옵션 드롭다운 목록.
+        self.fsc_map = {}          # {정규화된 6키 튜플: {"row": 엑셀행번호, "history": [FSC, ...]}}
+        # 세부공정을 제외한 5키(사업장/DEVICE/대공정/설비사/Q-code) 기준
+        # 후보 추천용 — 같은 5키에 여러 세부공정 변형이 있으면 엑셀 행번호가
+        # 가장 큰(가장 나중에 추가된) 것을 대표값으로 쓴다.
+        self.fsc_map_5key = {}     # {정규화된 5키 튜플: {"row": 엑셀행번호, "fsc": 최근 FSC}}
+        self.fsc_map_qcodes = []   # 옵션 Q-code 콤보박스용 고유값
+        self.fsc_map_fsc_col = 0  # FSC(첫 이력) 열 번호 — 새 이력을 쓸 때 기준
+        # DES(H열, 규격) <-> Q-code — 거의 1:1 대응이라, 규격을 검색해
+        # 고르면 Q-code를 자동으로 채워줄 수 있다(그 반대도 마찬가지).
+        self.opt_des_values = []          # 옵션 규격 콤보박스용 고유값(원문 그대로)
+        self.fsc_map_des_to_qcode = {}    # {정규화된 DES: Q-code}
+        self.fsc_map_qcode_to_des = {}    # {정규화된 Q-code: DES(원문)}
+        self.opt_sites = []
+        self.opt_devices = []
+        self.opt_processes = []
+        self.opt_vendors = []
+        self.opt_subprocs = []     # 정규화(특수문자→'-', 대소문자 무시)된 고유값
+        self._load()
+
+    @staticmethod
+    def _s(v):
+        if v is None:
+            return ""
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))          # 1000000.0 -> "1000000" (코드값 왜곡 방지)
+        return str(v).strip()
+
+    def _code_sheet(self, wb, name, header_rows=2):
+        """A=코드, B=내역 형태의 시트를 읽는다."""
+        out = []
+        if name not in wb.sheetnames:
+            return out
+        ws = wb[name]
+        for row in ws.iter_rows(min_row=header_rows + 1, max_col=2, values_only=True):
+            code = self._s(row[0])
+            if not code:
+                continue
+            out.append((code, self._s(row[1] if len(row) > 1 else "")))
+        return out
+
+    def _partner_sheet(self, wb, name):
+        out = []
+        if name not in wb.sheetnames:
+            return out
+        ws = wb[name]
+        for row in ws.iter_rows(min_row=2, max_col=3, values_only=True):
+            code = self._s(row[0])
+            if not code:
+                continue
+            out.append((code, self._s(row[1]), self._s(row[2])))
+        return out
+
+    def _load(self):
+        wb = load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            self.order_types = self._code_sheet(wb, "판매오더유형")
+            self.channels = self._code_sheet(wb, "유통경로")
+            self.inco_terms = self._code_sheet(wb, "인도조건")
+            self.currencies = self._code_sheet(wb, "통화")
+            self.comm_types = self._code_sheet(wb, "통신유형")
+            self.sold_to = self._partner_sheet(wb, "판매처코드")
+            self.ship_to = self._partner_sheet(wb, "인도처코드")
+
+            if "FSC" in wb.sheetnames:
+                ws = wb["FSC"]
+                seen = set()
+                candidates = []
+                for row in ws.iter_rows(min_row=2, max_col=11, values_only=True):
+                    code = self._s(row[1])          # B열 : FSC
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+                    candidates.append((
+                        code,
+                        self._s(row[2]),            # C열 : VER
+                        self._s(row[5]),            # F열 : FSC NM
+                        self._s(row[7]).replace("\n", " "),   # H열 : 설명
+                        self._s(row[10]),           # K열 : 상태
+                    ))
+
+                def is_bom_active(status):
+                    # 공백/대소문자 차이를 흡수해서 'BOM활성화', 'BOM 활성화' 등을
+                    # 모두 활성으로 인식한다.
+                    norm = re.sub(r"\s+", "", status).upper()
+                    return norm == "BOM활성화".upper()
+
+                not_d = [f for f in candidates if not f[0].upper().startswith("D")]
+                both = [f for f in not_d if is_bom_active(f[4])]
+
+                # 필터를 다 적용했을 때 결과가 하나도 없으면, 실제 파일의 '상태'
+                # 표기가 예상('BOM활성화')과 달라서 전부 걸러졌을 가능성이 높다.
+                # 검색창이 완전히 비어버리는 것을 막기 위해 단계적으로 필터를
+                # 완화해서라도 목록을 보여준다.
+                if both:
+                    self.fsc, self.fsc_filter_note = both, ""
+                elif not_d:
+                    self.fsc = not_d
+                    self.fsc_filter_note = (
+                        "FSC 상태값이 'BOM활성화'와 일치하는 항목이 없어 "
+                        "상태 필터 없이 %d건을 표시합니다." % len(not_d))
+                elif candidates:
+                    self.fsc = candidates
+                    self.fsc_filter_note = (
+                        "필터 조건과 일치하는 FSC가 없어 전체 %d건을 표시합니다."
+                        % len(candidates))
+                else:
+                    self.fsc, self.fsc_filter_note = [], ""
+
+            if "CIP" in wb.sheetnames:
+                ws = wb["CIP"]
+                # 열 위치를 하드코딩하지 않고 헤더 텍스트로 찾는다 — 열 순서가
+                # 바뀌어도, 열이 추가/삭제돼도 그대로 동작한다.
+                col_no      = _find_cip_col(ws, "No.") or _find_cip_col(ws, "No")
+                col_site    = _find_cip_col(ws, "사업장")
+                col_device  = _find_cip_col(ws, "DEVICE")
+                col_process = _find_cip_col(ws, "대공정")
+                col_vendor  = _find_cip_col(ws, "설비사")
+                col_subproc = _find_cip_col(ws, "세부공정")
+                col_fsc     = _find_cip_subheader_col(ws, "AS-IS", "FSC")
+                col_tobe    = _find_cip_subheader_col(ws, "TO-BE", "FSC")
+
+                cip_rows = []
+                if col_no and col_fsc:
+                    for row in ws.iter_rows(min_row=1, values_only=False):
+                        # CIP 시트는 머리글이 여러 줄이라 고정 행번호로 자르는
+                        # 대신 No.열이 숫자인 행만 실제 데이터 행으로 본다.
+                        no = row[col_no - 1].value if len(row) >= col_no else None
+                        if not isinstance(no, (int, float)):
+                            continue
+
+                        def _cell(col):
+                            return self._s(row[col - 1].value) if col and len(row) >= col else ""
+
+                        site, device = _cell(col_site), _cell(col_device)
+                        process, vendor = _cell(col_process), _cell(col_vendor)
+                        subproc, fsc = _cell(col_subproc), _cell(col_fsc)
+                        tobe = _cell(col_tobe) if col_tobe else ""
+                        cip_rows.append({"site": site, "device": device,
+                                         "process": process, "vendor": vendor,
+                                         "subproc": subproc, "fsc": fsc, "tobe": tobe})
+
+                self.cip_rows = cip_rows
+
+            if "FSC매핑" in wb.sheetnames:
+                ws = wb["FSC매핑"]
+                col_site    = _find_header_col(ws, 1, "사업장")
+                col_device  = _find_header_col(ws, 1, "DEVICE")
+                col_process = _find_header_col(ws, 1, "대공정")
+                col_vendor  = _find_header_col(ws, 1, "설비사")
+                col_subproc = _find_header_col(ws, 1, "세부공정")
+                col_qcode   = _find_header_col(ws, 1, "Q-code") or _find_header_col(ws, 1, "Qcode")
+                col_des     = _find_header_col(ws, 1, "DES")
+                col_fsc     = _find_header_col(ws, 1, "FSC")
+
+                def _hist_val(v):
+                    """FSC 이력 칸이 '진짜' 값인지 판단한다. 일부 행에 남아있는
+                    잔여 숫자 0을 실제 FSC로 착각하지 않기 위함."""
+                    s = self._s(v)
+                    return s if s and s != "0" else ""
+
+                fsc_map = {}
+                fsc_map_5key = {}
+                fsc_map_des_to_qcode = {}
+                fsc_map_qcode_to_des = {}
+                qcodes = set()
+                des_values = set()
+                sites, devices, processes, vendors, subprocs = set(), set(), set(), set(), set()
+                if col_site and col_device and col_process and col_vendor and col_qcode and col_fsc:
+                    # read_only 모드에서는 ws.cell(row, col) 랜덤 접근이 매우
+                    # 느려(행마다 스트림을 다시 훑음) 대량 행에서는 사실상
+                    # 멈춘 것처럼 보인다 — CIP 파싱과 같이 iter_rows로 한 번만
+                    # 순차로 훑는다.
+                    for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                        def _cell(col):
+                            return self._s(row[col - 1]) if col and len(row) >= col else ""
+                        site, device = _cell(col_site), _cell(col_device)
+                        process, vendor = _cell(col_process), _cell(col_vendor)
+                        subproc = _cell(col_subproc) if col_subproc else ""
+                        qcode = _cell(col_qcode)
+                        if not (site and device and process and vendor and qcode):
+                            continue
+
+                        # 옵션 드롭다운 목록: FSC 이력 유무와 상관없이 FSC매핑에
+                        # 있는 조합이면 선택 가능한 값으로 취급한다.
+                        sites.add(site); devices.add(device)
+                        processes.add(process); vendors.add(vendor)
+                        if subproc: subprocs.add(_norm_subproc(subproc))
+                        qcodes.add(qcode)
+
+                        # 규격(DES) <-> Q-code: 처음 나온 값을 대표값으로 쓴다
+                        # (실제 데이터는 대소문자 차이 정도만 있고 사실상 1:1).
+                        des = _cell(col_des) if col_des else ""
+                        if des:
+                            des_values.add(des)
+                            fsc_map_des_to_qcode.setdefault(_norm_plain(des), qcode)
+                            fsc_map_qcode_to_des.setdefault(_norm_plain(qcode), des)
+
+                        # FSC(첫 이력 칸)부터 오른쪽으로 값이 있는 동안만 이력에 담는다.
+                        # (이력 중간에 빈 칸이 나오면 그 뒤는 아직 안 쓴 것으로 본다)
+                        history = []
+                        c = col_fsc
+                        while c <= len(row):
+                            v = _hist_val(row[c - 1])
+                            if not v:
+                                break
+                            history.append(v)
+                            c += 1
+                        if not history:
+                            continue
+
+                        key = (_norm_plain(site), _norm_plain(device), _norm_plain(process),
+                               _norm_plain(vendor), _norm_subproc(subproc), _norm_plain(qcode))
+                        fsc_map[key] = {"row": r_idx, "history": history}
+                        # 세부공정을 뺀 5키는 행번호 순으로 훑으므로 마지막에
+                        # 덮어쓴 값이 자연히 "가장 나중 행"이 된다.
+                        key5 = _fsc_map_key5(site, device, process, vendor, qcode)
+                        fsc_map_5key[key5] = {"row": r_idx, "fsc": history[-1]}
+
+                self.fsc_map = fsc_map
+                self.fsc_map_5key = fsc_map_5key
+                self.fsc_map_qcodes = sorted(qcodes)
+                self.fsc_map_fsc_col = col_fsc or 0
+                self.opt_des_values = sorted(des_values)
+                self.fsc_map_des_to_qcode = fsc_map_des_to_qcode
+                self.fsc_map_qcode_to_des = fsc_map_qcode_to_des
+                self.opt_sites = sorted(sites)
+                self.opt_devices = sorted(devices)
+                self.opt_processes = sorted(processes)
+                self.opt_vendors = sorted(vendors)
+                self.opt_subprocs = sorted(subprocs)
+        finally:
+            wb.close()
+
+    @property
+    def fsc_codes(self):
+        return {f[0] for f in self.fsc}
+
+
+# ---------------------------------------------------------------- 값 변환 / 검증
+def parse_date(text):
+    """YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD -> datetime.date"""
+    t = str(text).strip().replace(".", "-").replace("/", "-")
+    if not t:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return dt.datetime.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_int(text):
+    t = str(text).strip().replace(",", "")
+    if not t:
+        return None
+    try:
+        return int(float(t))
+    except ValueError:
+        return None
+
+
+def combo_code(text):
+    """'ZOR1 - 제품 일반주문' 형태에서 코드만 뽑아낸다."""
+    return str(text).split(" - ", 1)[0].strip()
+
+
+_DIGITS_RE = re.compile(r"\D")
+
+
+def format_date_mask(raw):
+    """입력 중인 문자열을 yyyy-mm-dd 형태로 강제 정렬한다."""
+    digits = _DIGITS_RE.sub("", raw)[:8]
+    if len(digits) <= 4:
+        return digits
+    if len(digits) <= 6:
+        return digits[:4] + "-" + digits[4:]
+    return digits[:4] + "-" + digits[4:6] + "-" + digits[6:]
+
+
+def cursor_after_mask(fixed, digit_count):
+    """포맷팅 후 문자열에서, 원래 커서 앞에 있던 숫자 개수(digit_count) 만큼
+    지나간 위치를 계산한다. 자동으로 붙는 '-' 뒤로 커서를 옮겨줘서
+    숫자를 입력할 때마다 커서가 뒤로 튀는 현상을 막는다."""
+    seen = 0
+    i = 0
+    n = len(fixed)
+    while i < n and seen < digit_count:
+        if fixed[i].isdigit():
+            seen += 1
+        i += 1
+    if i < n and fixed[i] == "-":
+        i += 1
+    return i
+
+
+def due_date_color(d, today=None):
+    """납품요청일까지 남은 기간에 따른 경고색을 정한다 (작성일 기준).
+    6주 이내: 빨강, 6~8주: 주황, 8주 이상: 파랑."""
+    if d is None:
+        return None
+    today = today or dt.date.today()
+    days = (d - today).days
+    if days <= 6 * 7:
+        return "red"
+    if days < 8 * 7:
+        return "orange"
+    return "blue"
+
+
+def ship_to_suffix(code):
+    """인도처코드의 '-' 뒤 단어를 뽑아낸다. 예: '삼성전자-16L' -> '16L'"""
+    code = str(code).strip()
+    if "-" not in code:
+        return ""
+    return code.rsplit("-", 1)[-1].strip()
+
+
+# ---------------------------------------------------------------- 의뢰파일
+# 의뢰파일(견적/발주 의뢰 엑셀)에서 가져올 열 (사용자가 지정한 열 문자 기준)
+REQUEST_COLS = {
+    "po": "D",          # Purchase Requisition -> 고객PO번호
+    "material": "F",    # Material -> 옵션 Q-code
+    "desc": "G",        # Material Description -> 'LOT,' 뒤 값으로 자재코드 검색
+    "qty": "H",         # 수량 -> 생성수량
+    "line": "K",        # 라인 -> '_' 뒤 값으로 대공정
+    "subprocess": "N",  # 세부공정 -> 고객세부공정 + 옵션 세부공정
+    "maker": "X",       # 설비Maker -> 설비MAKER
+    "equip_no": "Z",    # 설비호기 -> 고객설비호기
+    "due": "AA",        # 희망 납품일 -> 납품요청일
+}
+REQUEST_COL_IDX = {k: column_index_from_string(v) - 1 for k, v in REQUEST_COLS.items()}
+
+
+def extract_after_underscore(text):
+    """'P1F_CVD' -> 'CVD' ('_' 뒤 값을 뽑아낸다. 없으면 원문 그대로)"""
+    text = str(text or "").strip()
+    if "_" not in text:
+        return text
+    return text.rsplit("_", 1)[-1].strip()
+
+
+_MODEL_KEYWORD_RE = re.compile(r"^[A-Za-z]+[0-9]+")
+
+
+def extract_model_keyword(text):
+    """'DRY_PUMP;EQ,LOT,HD4500PW' -> 'HD4500'
+    ('LOT,' 뒤 값에서 스펠링+숫자까지만 추출하고, 그 뒤에 붙는 서브모델
+    스펠링(PW 등)은 잘라낸다). 패턴과 안 맞으면 'LOT,' 뒤 값 전체를
+    그대로 돌려준다."""
+    text = str(text or "")
+    marker = "LOT,"
+    idx = text.find(marker)
+    if idx == -1:
+        return ""
+    after = text[idx + len(marker):].strip()
+    m = _MODEL_KEYWORD_RE.match(after)
+    return m.group(0) if m else after
+
+
+def load_request_rows(path):
+    """의뢰파일에서 D/F/G/H/N/X/Z/AA 열 값을 읽어 dict 리스트로 반환한다."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.worksheets[0]
+        max_idx = max(REQUEST_COL_IDX.values())
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row is None or len(row) <= max_idx:
+                continue
+            if all(row[i] is None for i in REQUEST_COL_IDX.values()):
+                continue
+            rows.append({k: row[i] for k, i in REQUEST_COL_IDX.items()})
+        return rows
+    finally:
+        wb.close()
+
+
+# ---------------------------------------------------------------- 엑셀 출력
+def build_output(template_path, rows, out_path):
+    """rows : [{열키: 값}] 을 받아 Sheet1 양식의 새 파일을 만든다.
+    CIP 경고(빨간 글씨)는 화면 입력 단계에서만 표시하고, 업로드에 쓰이는
+    실제 파일에는 서식을 남기지 않는다 (일부 업로드 매크로가 글자색을
+    '이 값은 쓰지 말 것'으로 해석해 정상 자재코드를 거부하는 문제가 있었음)."""
+    tpl = load_workbook(template_path)
+    tws = tpl["Sheet1"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    # --- 헤더행 : 원본 서식 그대로 복사
+    for idx, (key, header, _) in enumerate(COLUMNS, start=1):
+        src = tws.cell(row=1, column=idx)
+        dst = ws.cell(row=1, column=idx, value=src.value)
+        dst.font = Font(name=src.font.name, sz=src.font.sz, b=src.font.b,
+                        color=src.font.color)
+        if src.fill and src.fill.fill_type:
+            dst.fill = PatternFill(fill_type=src.fill.fill_type,
+                                   fgColor=src.fill.fgColor,
+                                   bgColor=src.fill.bgColor)
+        dst.border = Border(left=src.border.left, right=src.border.right,
+                            top=src.border.top, bottom=src.border.bottom)
+        dst.alignment = Alignment(horizontal=src.alignment.horizontal,
+                                  vertical=src.alignment.vertical,
+                                  wrap_text=src.alignment.wrap_text)
+        letter = get_column_letter(idx)
+        if tws.column_dimensions[letter].width:
+            ws.column_dimensions[letter].width = tws.column_dimensions[letter].width
+
+    # --- 데이터행
+    for r, data in enumerate(rows, start=2):
+        for idx, (key, _, _) in enumerate(COLUMNS, start=1):
+            cell = ws.cell(row=r, column=idx, value=data.get(key))
+            if key in ("G", "J", "T"):     # 텍스트 형식 (업로드 시스템이 날짜형 셀을
+                cell.number_format = "@"   # 그대로 인식하지 못하므로 문자열로 고정)
+
+    wb.save(out_path)
+    _use_shared_strings(out_path)
+    return out_path
+
+
+_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+_NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+_NS_XML = "http://www.w3.org/XML/1998/namespace"
+
+
+def _use_shared_strings(path):
+    """openpyxl은 문자열 셀을 항상 인라인 문자열(t="inlineStr")로 저장하는데,
+    일부 업로드 프로그램은 이 형식을 인식하지 못하고 엑셀의 표준 공유 문자열
+    표(sharedStrings.xml, t="s") 형식만 읽어들인다. 그래서 우리가 만든 파일을
+    열었다가 그냥 저장만 해도(엑셀이 공유 문자열로 다시 써주므로) 자재코드가
+    갑자기 인식되는 현상이 있었다. 매번 손으로 다시 저장하지 않아도 되도록
+    엑셀과 동일한 형식으로 파일을 즉석에서 다시 써준다."""
+    ET.register_namespace("", _NS_MAIN)
+
+    with zipfile.ZipFile(path, "r") as zin:
+        data = {name: zin.read(name) for name in zin.namelist()}
+
+    sheet_path = "xl/worksheets/sheet1.xml"
+    root = ET.fromstring(data[sheet_path])
+
+    strings, index = [], {}
+
+    def sst_index(text):
+        if text not in index:
+            index[text] = len(strings)
+            strings.append(text)
+        return index[text]
+
+    is_tag, t_tag, v_tag = (f"{{{_NS_MAIN}}}{n}" for n in ("is", "t", "v"))
+    for c in root.iter(f"{{{_NS_MAIN}}}c"):
+        if c.get("t") != "inlineStr":
+            continue
+        is_el = c.find(is_tag)
+        if is_el is None:
+            continue
+        t_el = is_el.find(t_tag)
+        text = t_el.text if t_el is not None and t_el.text is not None else ""
+        c.remove(is_el)
+        c.set("t", "s")
+        ET.SubElement(c, v_tag).text = str(sst_index(text))
+
+    data[sheet_path] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+    sst_root = ET.Element(f"{{{_NS_MAIN}}}sst", {
+        "count": str(len(strings)), "uniqueCount": str(len(strings))})
+    for s in strings:
+        si = ET.SubElement(sst_root, f"{{{_NS_MAIN}}}si")
+        t_el = ET.SubElement(si, f"{{{_NS_MAIN}}}t")
+        t_el.text = s
+        if s != s.strip():
+            t_el.set(f"{{{_NS_XML}}}space", "preserve")
+    data["xl/sharedStrings.xml"] = ET.tostring(
+        sst_root, encoding="UTF-8", xml_declaration=True)
+
+    ct_path = "[Content_Types].xml"
+    ct_root = ET.fromstring(data[ct_path])
+    if not any(el.get("PartName") == "/xl/sharedStrings.xml" for el in ct_root):
+        ET.SubElement(ct_root, f"{{{_NS_CT}}}Override", {
+            "PartName": "/xl/sharedStrings.xml",
+            "ContentType": "application/vnd.openxmlformats-officedocument."
+                           "spreadsheetml.sharedStrings+xml"})
+    data[ct_path] = ET.tostring(ct_root, encoding="UTF-8", xml_declaration=True)
+
+    rels_path = "xl/_rels/workbook.xml.rels"
+    rels_root = ET.fromstring(data[rels_path])
+    if not any(el.get("Target") == "sharedStrings.xml" for el in rels_root):
+        existing = {el.get("Id") for el in rels_root}
+        n = 1
+        while "rId%d" % n in existing:
+            n += 1
+        ET.SubElement(rels_root, f"{{{_NS_REL}}}Relationship", {
+            "Id": "rId%d" % n,
+            "Type": "http://schemas.openxmlformats.org/officeDocument/2006/"
+                    "relationships/sharedStrings",
+            "Target": "sharedStrings.xml"})
+    data[rels_path] = ET.tostring(rels_root, encoding="UTF-8", xml_declaration=True)
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, content in data.items():
+            zout.writestr(name, content)
+
+
+# ---------------------------------------------------------------- 전체 로그
+def log_path():
+    return os.path.join(upload_dir(), LOG_NAME)
+
+
+def append_log(path, rows, source_name):
+    """생성될 때마다 rows 를 통합 로그 파일 뒤에 쌓는다."""
+    if os.path.exists(path):
+        wb = load_workbook(path)
+        ws = wb.active
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "로그"
+        ws.append(["생성일시", "생성파일"] + [h for _, h, _ in COLUMNS])
+
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    start_row = ws.max_row + 1
+    for row in rows:
+        ws.append([ts, source_name] + [row.get(k) for k, _, _ in COLUMNS])
+    for r in range(start_row, ws.max_row + 1):
+        for key in ("G", "J", "T"):
+            ws.cell(row=r, column=3 + COL_INDEX[key]).number_format = "@"
+
+    wb.save(path)
+
+
+def safe_append_log(rows, source_name):
+    """로그 파일에 기록하되, 다른 프로그램(엑셀 등)이 파일을 열어두는 등의
+    이유로 쓰기가 충돌하면 실패하는 대신 번호를 붙인 새 로그 파일을 만들어
+    기록을 남긴다. 잠금이 풀리면 다음 번에는 다시 원래 로그 파일에 쌓인다."""
+    base, ext = os.path.splitext(LOG_NAME)
+    path = log_path()
+    last_err = None
+    for n in range(1, 51):
+        try:
+            append_log(path, rows, source_name)
+            return path
+        except Exception as e:
+            last_err = e
+            path = os.path.join(upload_dir(), "%s_%d%s" % (base, n + 1, ext))
+    raise last_err
+
+
+def _log_file_candidates():
+    """upload_dir 안의 로그 파일들을 모두 찾는다 (쓰기 충돌로 번호가 붙어
+    따로 생성된 파일들 포함)."""
+    base, ext = os.path.splitext(LOG_NAME)
+    folder = upload_dir()
+    pattern = re.compile(r"^%s(_\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    return [os.path.join(folder, name) for name in os.listdir(folder)
+            if pattern.match(name)]
+
+
+def load_price_map(path=None):
+    """로그 파일(쓰기 충돌로 나뉜 것 포함)을 모두 읽어 자재코드 -> 가장
+    최근 단가 매핑을 만든다. path 를 지정하면 그 파일 하나만 읽는다."""
+    paths = [path] if path is not None else _log_file_candidates()
+    entries = []   # (생성일시, 자재코드, 단가) - 시간순 정렬 후 뒤에서 덮어써서 최신값을 남김
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        try:
+            wb = load_workbook(p, read_only=True, data_only=True)
+        except Exception:
+            continue
+        try:
+            ws = wb.active
+            q_idx = 2 + COL_INDEX["Q"]
+            w_idx = 2 + COL_INDEX["W"]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if len(row) <= max(q_idx, w_idx):
+                    continue
+                code, price = row[q_idx], row[w_idx]
+                if code is None or price is None:
+                    continue
+                entries.append((str(row[0] or ""), str(code).strip(), price))
+        finally:
+            wb.close()
+    entries.sort(key=lambda t: t[0])
+    prices = {}
+    for _, code, price in entries:
+        prices[code] = price
+    return prices
+
+
+# ---------------------------------------------------------------- 버튼 색상
+def _darken(hex_color, amount):
+    """hex_color(#RRGGBB)를 amount만큼 어둡게 해 hover 색을 만든다."""
+    hex_color = hex_color.lstrip("#")
+    r = max(0, int(hex_color[0:2], 16) - amount)
+    g = max(0, int(hex_color[2:4], 16) - amount)
+    b = max(0, int(hex_color[4:6], 16) - amount)
+    return "#%02X%02X%02X" % (r, g, b)
+
+
+def _colored_button(parent, text, command=None, bg="#E0E0E0", fg="#000000", **kw):
+    """색이 잘 안 보이는 기본 ttk.Button 대신 tk.Button으로 배경색을 확실히
+    넣는다 (ttk.Button은 Windows 기본 테마(vista 등)에서 배경색 지정이
+    무시되는 경우가 많아, 테마를 바꾸지 않고도 항상 보이는 classic
+    tk.Button을 색상 버튼 전용으로 쓴다)."""
+    hover = _darken(bg, 24)
+    return tk.Button(
+        parent, text=text, command=command,
+        bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
+        relief="raised", bd=1, font=("맑은 고딕", 9),
+        padx=8, pady=3, cursor="hand2",
+        **kw,
+    )
+
+
+# ---------------------------------------------------------------- 검색 팝업
+class PickerDialog(tk.Toplevel):
+    """검색 + 목록 선택 공용 팝업."""
+
+    def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
+                 highlight_keys=None, warn_levels=None, recommended_fsc=None,
+                 recommend_confirmed=True, previous_fsc=None, show_recommend_col=False,
+                 note=None):
+        """
+        note : 검색줄 아래에 한 줄로 보여줄 안내 문구(예: 목록이 이미
+          어떤 조건으로 걸러져 있는지). 지정하지 않으면 표시하지 않는다.
+        highlight_keys : 강조 표시할 키 값들의 집합(초록 배경 + 목록 상위 정렬).
+          (예: 전체 로그에 이미 등장한 적 있는 자재코드)
+        warn_levels    : {키 값: "red"/"orange"}. CIP AS-IS FSC 알람.
+          None이 아니면(빈 dict라도) key_index 열 왼쪽에 "검토" 전용 열을
+          따로 만든다 — 코드 칸 안에 마커 글자를 붙이면 칸이 좁아 코드
+          자체가 가려지는 문제가 있어 열을 분리했다. highlight_keys보다
+          우선해 목록 맨 위로 올린다. 실제 반환값(self.result)에는
+          섞이지 않도록 원본 행을 iid로 따로 기억해둔다.
+        recommended_fsc : FSC매핑에서 찾은 추천 자재코드(문자열) 또는
+          None(일치하는 조합 없음). "검토"/"이전 이력"과는 완전히 다른
+          채널(별도 "추천" 열)이라 셋 다 동시에 표시될 수 있다. 무엇보다
+          우선해 목록 맨 위로 올린다.
+        recommend_confirmed : recommended_fsc가 세부공정까지 포함한 조건과
+          정확히 일치해 나온 값이면 True(확정 ⭐), 세부공정을 제외한
+          나머지 조건만 일치해 나온 후보값이면 False(후보 ☆).
+        previous_fsc : 같은 조합(6키)에 새 FSC가 등록되면서 추천이 바뀌기
+          바로 전까지 추천되던 코드. "추천" 열에 △이전으로 표시한다 —
+          방금까지 쓰던 코드를 찾기 쉽게 하기 위함. recommended_fsc가
+          확정(⭐)일 때만 의미가 있다.
+        show_recommend_col : "추천" 열 자체를 보여줄지. 지정하지 않으면
+          recommended_fsc가 있을 때만 보여준다(호출부가 항상 이 열을
+          띄우고 싶으면 True로 명시한다).
+        """
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+        self._key_index = key_index
+        self._note = note
+        self._highlight_keys = {str(k) for k in highlight_keys} if highlight_keys else set()
+        self._show_review_col = warn_levels is not None
+        self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
+        self._recommended = str(recommended_fsc) if recommended_fsc else None
+        self._recommend_confirmed = recommend_confirmed
+        self._previous_fsc = str(previous_fsc) if previous_fsc else None
+        self._show_recommend_col = (show_recommend_col or self._recommended is not None
+                                    or self._previous_fsc is not None)
+        self._iid_to_row = {}
+
+        rows = list(rows)
+
+        def _priority(r):
+            key = str(r[key_index])
+            if key == self._recommended:
+                return 0 if self._recommend_confirmed else 1
+            if key == self._previous_fsc:
+                return 2
+            level = self._level_of(self._warn_levels.get(key))
+            if level == "red":
+                return 3
+            if level == "orange":
+                return 4
+            if key in self._highlight_keys:
+                return 5
+            return 6
+
+        if (self._highlight_keys or self._warn_levels or self._recommended
+                or self._previous_fsc):
+            # 안정 정렬이므로 각 우선순위 그룹 내 원래 순서는 유지된다.
+            rows.sort(key=_priority)
+        self._rows = rows
+
+        top = ttk.Frame(self, padding=8)
+        top.pack(fill="x")
+        ttk.Label(top, text="검색").pack(side="left")
+        self.var = tk.StringVar(value=initial)
+        ent = ttk.Entry(top, textvariable=self.var, width=40)
+        ent.pack(side="left", padx=6)
+        ent.focus_set()
+        self.var.trace_add("write", lambda *_: self._refresh())
+        # 한글 등 조합형 IME로 입력할 때는 글자 조합이 끝나기 전까지
+        # StringVar의 write 트레이스가 안 올라오는 경우가 있어(예: 자모를
+        # 조합하는 중에는 변수가 갱신되지 않다가, 다음 글자로 넘어가야
+        # 비로소 갱신됨) 그동안은 실시간 검색이 안 되는 것처럼 보인다.
+        # 트레이스만으로는 못 잡는 그 구간을 짧은 주기로 직접 확인해서
+        # 메꾼다.
+        self._search_poll_text = self.var.get()
+        self._poll_search_ime()
+        self.count = ttk.Label(top, text="")
+        self.count.pack(side="left", padx=6)
+
+        # 안내 문구들은 검색 줄에 나란히 붙이면 (내용에 맞춰 고정폭으로
+        # 정한) 목록 너비보다 창이 더 넓어져 버린다 — 검색 줄 아래에 세로로
+        # 쌓아서 창 너비를 목록 기준으로 맞춘다.
+        if self._show_recommend_col or self._highlight_keys or self._show_review_col or self._note:
+            hints = ttk.Frame(self, padding=(8, 0, 8, 4))
+            hints.pack(fill="x")
+            if self._note:
+                ttk.Label(hints, text=self._note, foreground="#555555").pack(anchor="w")
+            if self._show_recommend_col:
+                ttk.Label(hints, text="⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치"
+                          " / △이전 = 방금까지 추천되던 코드",
+                          foreground="#1565C0").pack(anchor="w")
+            if self._highlight_keys:
+                ttk.Label(hints, text="초록색 = 이전 주문 이력 있음",
+                          foreground="#2e7d32").pack(anchor="w")
+            if self._show_review_col:
+                ttk.Label(hints, text="검토필요 열: 🔴 완전 일치 / 🟠 세부공정만 다름"
+                          " (→ TO-BE는 CIP 교체 추천 코드)",
+                          foreground="#c00").pack(anchor="w")
+
+        body = ttk.Frame(self, padding=(8, 0, 8, 8))
+        body.pack(fill="both", expand=True)
+
+        # 추천 열 -> 검토필요 열 순으로 key_index(FSC) 열 바로 왼쪽에 끼워 넣는다.
+        extra_cols, extra_widths = [], []
+        if self._show_recommend_col:
+            extra_cols.append("추천"); extra_widths.append(70)
+        if self._show_review_col:
+            extra_cols.append("검토필요"); extra_widths.append(230)
+        self._extra_col_pos = key_index
+        display_columns = list(columns[:key_index]) + extra_cols + list(columns[key_index:])
+        display_widths = list(widths[:key_index]) + extra_widths + list(widths[key_index:])
+
+        self.tree = ttk.Treeview(body, columns=display_columns, show="headings",
+                                 height=18, selectmode="browse")
+        for c, w in zip(display_columns, display_widths):
+            self.tree.heading(c, text=c)
+            # stretch=False: 창을 넓혀도 열 너비가 비례로 늘어나지 않는다
+            # (그대로 두면 빈 열이 필요 이상으로 넓어져 보였다). 폭 조절도
+            # 막아서(아래 바인딩) 항상 지정한 너비 그대로 유지된다.
+            self.tree.column(c, width=w, anchor="w", stretch=False)
+        self.tree.tag_configure("used", background="#C8E6C9")
+        vs = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vs.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="left", fill="y")
+        self.tree.bind("<Double-1>", lambda e: self._ok())
+        self.tree.bind("<Return>", lambda e: self._ok())
+        # 열 경계를 드래그해 너비를 바꾸지 못하게 막는다 (구분선 위 클릭만
+        # 무시하면 되므로 셀 선택 등 다른 동작에는 영향이 없다).
+        self.tree.bind("<Button-1>", self._block_column_resize, add="+")
+        # 셀 위에 마우스를 올리면 잘린 칸(특히 설명)도 전체 내용을 툴팁으로
+        # 보여준다.
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", lambda e: self._hide_tooltip())
+        self._tooltip_win = None
+        self._tooltip_cell = None
+        ent.bind("<Return>", lambda e: self._focus_first())
+        ent.bind("<Down>", lambda e: self._focus_first())
+
+        btn = ttk.Frame(self, padding=(8, 0, 8, 8))
+        btn.pack(fill="x")
+        _colored_button(btn, "선택", command=self._ok, bg="#C8E6C9").pack(side="right")
+        _colored_button(btn, "취소", command=self.destroy, bg="#ECEFF1").pack(
+            side="right", padx=6)
+
+        self._refresh()
+        self.geometry("+%d+%d" % (parent.winfo_rootx() + 60, parent.winfo_rooty() + 60))
+
+    @staticmethod
+    def _level_of(v):
+        """warn_levels 값에서 등급 문자열("red"/"orange")만 뽑아낸다.
+        v가 {"level":.., "tobe":..} 형태(TO-BE 추천 포함)든 예전처럼
+        단순 문자열이든 둘 다 받는다."""
+        return v.get("level") if isinstance(v, dict) else v
+
+    def _poll_search_ime(self):
+        """IME 조합 중이라 트레이스가 안 올라온 사이에도, 검색창 텍스트가
+        실제로 바뀌어 있으면 잡아내서 다시 그린다."""
+        if not self.winfo_exists():
+            return
+        text = self.var.get()
+        if text != self._search_poll_text:
+            self._search_poll_text = text
+            self._refresh()
+        self.after(120, self._poll_search_ime)
+
+    def _refresh(self):
+        self._search_poll_text = self.var.get()
+        kw = self.var.get().strip().lower()
+        self.tree.delete(*self.tree.get_children())
+        self._iid_to_row = {}
+        shown = 0
+        for i, row in enumerate(self._rows):
+            if kw and not any(kw in str(v).lower() for v in row):
+                continue
+            key = str(row[self._key_index])
+            level_info = self._warn_levels.get(key)
+            level = self._level_of(level_info)
+            tobe = level_info.get("tobe") if isinstance(level_info, dict) else None
+            used = key in self._highlight_keys
+
+            extra_vals = []
+            if self._show_recommend_col:
+                if self._recommended and key == self._recommended:
+                    extra_vals.append("⭐ 확정" if self._recommend_confirmed else "☆ 후보")
+                elif self._previous_fsc and key == self._previous_fsc:
+                    extra_vals.append("△이전")
+                else:
+                    extra_vals.append("")
+            if self._show_review_col:
+                if level == "red":
+                    review_text = "🔴 검토 필요"
+                elif level == "orange":
+                    review_text = "🟠 세부공정만 다름"
+                else:
+                    review_text = ""
+                if review_text and tobe:
+                    review_text += " → TO-BE %s" % tobe
+                extra_vals.append(review_text)
+
+            if extra_vals:
+                pos = self._extra_col_pos
+                display = list(row[:pos]) + extra_vals + list(row[pos:])
+            else:
+                display = list(row)
+
+            iid = str(i)
+            self._iid_to_row[iid] = row
+            # "used"(초록 배경, 이전 주문 이력)와 검토 열의 마커는 서로 다른
+            # 채널(배경색 vs 별도 열의 글자)이라 둘 다 해당돼도 항상 같이
+            # 보인다 — 이전에는 마커를 FSC 칸 글자에 붙여서 칸이 좁으면
+            # 하나가 가려 보이는 문제가 있었다.
+            self.tree.insert("", "end", iid=iid, values=display,
+                             tags=("used",) if used else ())
+            shown += 1
+            if shown >= 500:
+                break
+        self.count.config(text="%d건 표시 (전체 %d건)" % (shown, len(self._rows)))
+
+    def _focus_first(self):
+        kids = self.tree.get_children()
+        if kids:
+            self.tree.selection_set(kids[0])
+            self.tree.focus(kids[0])
+            self.tree.focus_set()
+
+    def _block_column_resize(self, event):
+        """열 구분선을 드래그해 너비를 바꾸는 것만 막는다 — 그 외 클릭
+        (행 선택 등)은 그대로 통과시킨다."""
+        if self.tree.identify_region(event.x, event.y) == "separator":
+            return "break"
+
+    def _on_tree_motion(self, event):
+        row = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        if not row or not col:
+            self._hide_tooltip()
+            return
+        cell = (row, col)
+        if cell == self._tooltip_cell:
+            return
+        col_idx = int(col.replace("#", "")) - 1
+        values = self.tree.item(row, "values")
+        text = str(values[col_idx]) if 0 <= col_idx < len(values) else ""
+        self._hide_tooltip()
+        if text:
+            self._show_tooltip(event.x_root, event.y_root, text)
+        self._tooltip_cell = cell
+
+    def _show_tooltip(self, x, y, text):
+        tw = tk.Toplevel(self)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry("+%d+%d" % (x + 14, y + 12))
+        ttk.Label(tw, text=text, background="#ffffe0", relief="solid",
+                  borderwidth=1, padding=(4, 2), wraplength=480,
+                  justify="left").pack()
+        self._tooltip_win = tw
+
+    def _hide_tooltip(self):
+        if self._tooltip_win is not None:
+            self._tooltip_win.destroy()
+            self._tooltip_win = None
+        self._tooltip_cell = None
+
+    def destroy(self):
+        self._hide_tooltip()
+        super().destroy()
+
+    def _ok(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        row = self._iid_to_row.get(sel[0])
+        if row is not None:
+            self.result = row[self._key_index]
+        else:
+            self.result = self.tree.item(sel[0], "values")[self._key_index]
+        self.destroy()
+
+
+# ---------------------------------------------------------------- 메인 앱
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_TITLE)
+        self.minsize(1100, 700)
+
+        try:
+            self.option_add("*Font", ("맑은 고딕", 9))
+        except tk.TclError:
+            pass
+
+        self.master_path = tk.StringVar(value=self._find_template())
+        self.md = None
+        self.common_vars = {}
+        self.line_vars = {}
+        # CIP AS-IS FSC 알람용 옵션(사업장/DEVICE/대공정/설비사/세부공정).
+        # 품목 라인과 달리 여러 행을 추가하는 동안 값이 유지된다.
+        self.option_vars = {}
+        self.cip_cbo = {}         # {"site"/"device"/"process"/"vendor": Combobox}
+        self._subproc_all_values = []
+        self.lines = []          # [{열키: 원시 문자열, "_opt": 추가 당시 옵션 스냅샷}]
+        self.price_map = load_price_map()   # 자재코드 -> 최근 단가 (모든 로그 파일 취합)
+        self.request_path = tk.StringVar()
+        self.request_rows = []    # 의뢰파일에서 읽은 dict 리스트
+        # 의뢰파일 더블클릭 시 규격(desc)에서 뽑아낸 모델 키워드. "찾기"
+        # 버튼을 누르면 이 값으로 자재코드 찾기 창의 검색창을 채운다.
+        self._last_model_keyword = ""
+        self._qcode_all_values = []
+        self._des_all_values = []
+        self._opt_all_values = {}  # {"site"/"device"/"process"/"vendor": [값, ...]}
+        # 규격<->Q-code 콤보박스가 서로를 자동으로 채워줄 때, 그 자동입력이
+        # 다시 상대쪽을 건드려 무한 반복되는 것을 막는 재진입 방지 플래그.
+        self._des_qcode_sync = False
+
+        self._build_ui()
+        self._load_master(initial=True)
+        self._load_settings()
+        self._fit_window_to_content()
+
+    # ---------- 초기화
+    def _find_template(self):
+        p = os.path.join(app_dir(), TEMPLATE_NAME)
+        return p if os.path.exists(p) else ""
+
+    def _fit_window_to_content(self):
+        """최초 실행 시 창이 고정 크기(1280x820)보다 실제 내용이 더 커서
+        하단 버튼 등이 화면 밖으로 밀려나 안 보이던 문제를 고친다
+        (창 크기를 조절하면 다시 보이는 게 바로 이 증상이었다).
+        고정값 대신 update_idletasks() 로 실제 필요한 크기를 계산해
+        화면 크기를 넘지 않는 선에서 창을 그 크기로 맞추고 화면 중앙에 놓는다."""
+        self.update_idletasks()
+        req_w = self.winfo_reqwidth()
+        req_h = self.winfo_reqheight()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        w = min(max(req_w, 1100), screen_w - 80)
+        h = min(max(req_h, 700), screen_h - 80)
+        x = max(0, (screen_w - w) // 2)
+        y = max(0, (screen_h - h) // 2)
+        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+    def _load_master(self, initial=False):
+        path = self.master_path.get()
+        if not path or not os.path.exists(path):
+            if not initial:
+                messagebox.showerror("오류", "양식 파일을 찾을 수 없습니다.")
+            self.status.config(text="양식 파일을 지정해 주세요.")
+            self._set_form_locked(self.md is None)
+            return
+        try:
+            self.md = MasterData(path)
+        except Exception as e:
+            messagebox.showerror("오류", "양식 파일을 읽지 못했습니다.\n\n%s" % e)
+            self._set_form_locked(self.md is None)
+            return
+        self._fill_combos()
+        self._fill_option_combos()
+        text = ("양식 로드 완료 · 판매처 %d · 인도처 %d · FSC %d건"
+                % (len(self.md.sold_to), len(self.md.ship_to), len(self.md.fsc)))
+        if self.md.fsc_filter_note:
+            text += " (%s)" % self.md.fsc_filter_note
+        self.status.config(text=text)
+        self._set_form_locked(self.md is None)
+
+    def _fill_combos(self):
+        def items(pairs):
+            return ["%s - %s" % (c, d) if d else c for c, d in pairs]
+
+        self.cbo["A"]["values"] = items(self.md.order_types)
+        self.cbo["D"]["values"] = items(self.md.channels)
+        self.cbo["H"]["values"] = items(self.md.inco_terms)
+        self.cbo["K"]["values"] = items(self.md.currencies)
+        self.cbo["Y"]["values"] = items(self.md.comm_types)
+
+        # 드롭다운은 최초에 첫 항목이 선택되어 있도록 한다 (이미 값이 있으면 유지)
+        for key in ("A", "D", "H", "K", "Y"):
+            values = self.cbo[key]["values"]
+            if values and not self.common_vars[key].get().strip():
+                self.common_vars[key].set(values[0])
+
+    def _fill_option_combos(self):
+        """FSC매핑 시트에서 뽑아낸 고유값으로 옵션 콤보박스 목록을 채운다.
+        (CIP가 아니라 FSC매핑을 기준으로 삼아야, 여기서 고른 조건 그대로
+        FSC 추천과 CIP AS-IS 검토필요 알람을 함께 확인할 수 있다.)
+        (공통값 콤보와 달리 기본값을 자동 선택하지 않는다 — '이 조건에 맞는
+        값을 직접 고르거나 입력'하는 용도라 임의의 첫 값을 넣으면 오히려
+        혼란을 준다.)"""
+        self._opt_all_values = {
+            "site": list(self.md.opt_sites),
+            "device": list(self.md.opt_devices),
+            "process": list(self.md.opt_processes),
+            "vendor": list(self.md.opt_vendors),
+        }
+        for key, values in self._opt_all_values.items():
+            self.cip_cbo[key]["values"] = values
+        self._subproc_all_values = list(self.md.opt_subprocs)
+        self._subproc_cbo["values"] = self._subproc_all_values
+        self._qcode_all_values = list(self.md.fsc_map_qcodes)
+        self._qcode_cbo["values"] = self._qcode_all_values
+        self._des_all_values = list(self.md.opt_des_values)
+        self._des_cbo["values"] = self._des_all_values
+
+    def _on_locked_click(self, event):
+        """양식을 불러오기 전에 입력 영역을 클릭하면 안내 문구를 띄운다."""
+        if self.md is not None:
+            return
+        w = event.widget
+        locked_boxes = (getattr(self, "_common_box", None),
+                       getattr(self, "_option_box", None),
+                       getattr(self, "_line_box", None))
+        while w is not None:
+            if w in locked_boxes:
+                messagebox.showinfo("안내", "먼저 통합양식을 업로드 하세요.")
+                return
+            w = w.master
+
+    def _set_state_recursive(self, widget, disabled):
+        flag = "disabled" if disabled else "!disabled"
+        for child in widget.winfo_children():
+            if isinstance(child, (ttk.Entry, ttk.Combobox, ttk.Button, ttk.Treeview)):
+                try:
+                    child.state([flag])
+                except tk.TclError:
+                    pass
+            elif isinstance(child, tk.Button):
+                # 색상 버튼(_colored_button)은 ttk가 아닌 classic tk.Button이라
+                # .state()가 없다 — .config(state=...)로 동일하게 잠근다.
+                try:
+                    child.config(state=(tk.DISABLED if disabled else tk.NORMAL))
+                except tk.TclError:
+                    pass
+            self._set_state_recursive(child, disabled)
+
+    def _set_form_locked(self, locked):
+        """양식을 불러오기 전에는 공통값/옵션/품목 라인 입력 영역을 모두 비활성화한다."""
+        if hasattr(self, "_common_box"):
+            self._set_state_recursive(self._common_box, locked)
+        if hasattr(self, "_option_box"):
+            self._set_state_recursive(self._option_box, locked)
+        if hasattr(self, "_line_box"):
+            self._set_state_recursive(self._line_box, locked)
+
+    # ---------- 화면 구성
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=8)
+        root.pack(fill="both", expand=True)
+
+        # 양식 파일
+        bar = ttk.Frame(root)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="양식 파일").pack(side="left")
+        ttk.Entry(bar, textvariable=self.master_path).pack(
+            side="left", fill="x", expand=True, padx=6)
+        _colored_button(bar, "찾아보기", command=self._pick_master,
+                        bg="#BBDEFB").pack(side="left")
+        _colored_button(bar, "다시 읽기", command=lambda: self._load_master(),
+                        bg="#BBDEFB").pack(side="left", padx=4)
+
+        # 공통값
+        common_head = ttk.Frame(root)
+        ttk.Label(common_head, text=" 공통값 (모든 행에 동일하게 들어감) ").pack(side="left")
+        _colored_button(common_head, "공통값 고정", command=self._save_settings,
+                        bg="#E0F2F1").pack(side="left", padx=(6, 0))
+        box = ttk.LabelFrame(root, labelwidget=common_head, padding=8)
+        box.pack(fill="x")
+        self._common_box = box
+        self.cbo = {}
+        self._common_grid(box)
+
+        # 의뢰파일
+        rbox = ttk.LabelFrame(root, text=" 의뢰파일 (더블클릭하면 품목 라인에 자동입력) ",
+                              padding=8)
+        rbox.pack(fill="x", pady=(8, 0))
+        self._request_box(rbox)
+
+        # 옵션 (자재코드 + CIP AS-IS FSC 알람용 조건)
+        obox = ttk.LabelFrame(
+            root, text=" 옵션 (자재코드 · CIP AS-IS FSC 검토 필요 알람 조건) ", padding=8)
+        obox.pack(fill="x", pady=(8, 0))
+        self._option_box = obox
+        self._build_options_box(obox)
+
+        # 하단 버튼 바 — 품목 라인(표)보다 먼저, side="bottom"으로 붙여서
+        # 창이 좁아져도 이 버튼들이 항상 온전히 보이게 한다. (나중에 붙이는
+        # expand=True 위젯이 남은 공간을 다 가져가버려 이 버튼들이 찌그러지던
+        # 문제가 있었다 — pack()은 먼저 붙인 위젯의 크기부터 확보한다.)
+        bottom = ttk.Frame(root)
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+        self.status = ttk.Label(bottom, text="", foreground="#555")
+        self.status.pack(side="left")
+        _colored_button(bottom, "엑셀 파일 생성", command=self._export,
+                        bg="#FFE0B2").pack(side="right")
+        _colored_button(bottom, "생성 폴더 열기", command=self._open_upload_dir,
+                        bg="#E8EAF6").pack(side="right", padx=(0, 6))
+        _colored_button(bottom, "초기화", command=self._reset_all,
+                        bg="#FFCDD2").pack(side="right", padx=(0, 6))
+
+        # 품목 라인 입력 — 하단 버튼 바보다 나중에 붙여서, 창이 좁을 때
+        # 이 영역(특히 표)이 먼저 줄어들게 한다. 표 자체에 스크롤바가
+        # 있으니 버튼처럼 찌그러지는 대신 스크롤로 자연스럽게 대응된다.
+        lbox = ttk.LabelFrame(root, text=" 품목 라인 (행마다 달라지는 값) ", padding=8)
+        lbox.pack(fill="both", expand=True, pady=(8, 0))
+        self._line_box = lbox
+        self._line_form(lbox)
+        self._line_table(lbox)
+
+        # 양식을 아직 불러오기 전에는 입력칸을 잠그고, 클릭하면 안내 문구를 띄운다.
+        self.bind_all("<Button-1>", self._on_locked_click, add="+")
+
+    @staticmethod
+    def _common_defaults():
+        """공통값 최초 기본값. 초기화 버튼에서도 동일한 값을 써야 하므로
+        (재)로딩 시점에 상관없이 항상 오늘 날짜를 기준으로 새로 계산한다."""
+        today = dt.date.today().strftime("%Y%m%d")
+        return {"E": "10", "G": today, "R": "1", "S": "EA",
+                "U": "1100", "V": "PR00"}
+
+    def _common_grid(self, parent):
+        """공통값 입력칸을 4열로 배치."""
+        specs = [
+            ("A", "combo"), ("B", "pick_sold"), ("D", "combo"), ("E", "entry"),
+            ("G", "date8"), ("H", "combo"), ("J", "date8"), ("K", "combo"),
+            ("R", "fixed"), ("S", "entry"), ("U", "entry"), ("V", "entry"),
+            ("Y", "combo"),
+        ]
+        defaults = self._common_defaults()
+        for i, (key, kind) in enumerate(specs):
+            r, c = divmod(i, 4)
+            cell = ttk.Frame(parent)
+            cell.grid(row=r, column=c, sticky="ew", padx=6, pady=3)
+            parent.columnconfigure(c, weight=1, minsize=220)
+
+            label = HEADER_BY_KEY[key]
+            if key in REQUIRED_KEYS:
+                label = "* " + label
+            ttk.Label(cell, text="%s (%s)" % (label, key), width=16).pack(side="left")
+
+            if key == "J":
+                # 고객PO일자(G)와 가격결정일(J)은 항상 같은 값을 쓰므로
+                # 변수를 공유해서 어느 한쪽을 고치면 즉시 서로 같아지게 한다.
+                var = self.common_vars["G"]
+            else:
+                var = tk.StringVar(value=defaults.get(key, ""))
+            self.common_vars[key] = var
+
+            if kind == "combo":
+                w = ttk.Combobox(cell, textvariable=var, state="readonly", width=22)
+                w.pack(side="left", fill="x", expand=True)
+                self.cbo[key] = w
+            elif kind == "pick_sold":
+                # 창이 좁아져도 '찾기' 버튼이 가장 먼저 자리를 확보하도록
+                # 오른쪽에 먼저 배치하고, 이름 표시 라벨이 남는 공간을 흡수/축소한다.
+                _colored_button(cell, "찾기", width=5, bg="#E8EAF6",
+                                command=lambda v=var: self._pick_partner("sold", v)
+                                ).pack(side="right")
+                ttk.Entry(cell, textvariable=var, width=12).pack(side="left")
+                lbl = ttk.Label(cell, text="", foreground="#0a6")
+                lbl.pack(side="left", fill="x", expand=True, padx=3)
+                self._name_B = lbl
+                var.trace_add("write", lambda *_a: self._show_partner_name("B"))
+            elif kind == "fixed":
+                e = ttk.Entry(cell, textvariable=var, width=22, state="readonly")
+                e.pack(side="left", fill="x", expand=True)
+            else:
+                ttk.Entry(cell, textvariable=var, width=22).pack(
+                    side="left", fill="x", expand=True)
+
+    def _request_box(self, parent):
+        bar = ttk.Frame(parent)
+        bar.pack(fill="x")
+        ttk.Entry(bar, textvariable=self.request_path).pack(
+            side="left", fill="x", expand=True, padx=(0, 6))
+        _colored_button(bar, "불러오기", command=self._pick_request_file,
+                        bg="#BBDEFB").pack(side="left")
+        self.request_status = ttk.Label(bar, text="", foreground="#555")
+        self.request_status.pack(side="left", padx=(10, 0))
+
+        cols = ["po", "material", "desc", "qty", "line", "subprocess", "maker",
+                "equip_no", "due"]
+        headers = {"po": "고객PO번호(D)", "material": "Material(F)", "desc": "규격(G)",
+                  "qty": "수량(H)", "line": "라인(K)", "subprocess": "세부공정(N)",
+                  "maker": "설비Maker(X)", "equip_no": "설비호기(Z)",
+                  "due": "희망납품일(AA)"}
+        widths = {"po": 110, "material": 100, "desc": 220, "qty": 50, "line": 90,
+                 "subprocess": 110, "maker": 90, "equip_no": 90, "due": 90}
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill="x", pady=(6, 0))
+        self.request_tree = ttk.Treeview(wrap, columns=cols, show="headings", height=5)
+        for c in cols:
+            self.request_tree.heading(c, text=headers[c])
+            self.request_tree.column(c, width=widths[c], anchor="w")
+        vs = ttk.Scrollbar(wrap, orient="vertical", command=self.request_tree.yview)
+        self.request_tree.configure(yscrollcommand=vs.set)
+        self.request_tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="left", fill="y")
+        self.request_tree.bind("<Double-1>", self._on_request_dblclick)
+
+    def _pick_request_file(self):
+        p = filedialog.askopenfilename(
+            title="의뢰파일 선택",
+            filetypes=[("Excel", "*.xlsx *.xlsm"), ("모든 파일", "*.*")])
+        if not p:
+            return
+        self.request_path.set(p)
+        self._read_request_file()
+
+    def _read_request_file(self):
+        path = self.request_path.get()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            self.request_rows = load_request_rows(path)
+        except Exception as e:
+            messagebox.showerror("오류", "의뢰파일을 읽지 못했습니다.\n\n%s" % e)
+            return
+        self._refresh_request_tree()
+        self.request_status.config(text="%d건 로드 (더블클릭하면 자동입력)"
+                                   % len(self.request_rows))
+
+    def _refresh_request_tree(self):
+        self.request_tree.delete(*self.request_tree.get_children())
+        for i, r in enumerate(self.request_rows):
+            due = r.get("due")
+            due_text = due.strftime("%Y-%m-%d") if isinstance(due, dt.datetime) else (due or "")
+            self.request_tree.insert("", "end", iid=str(i), values=[
+                r.get("po") if r.get("po") is not None else "",
+                r.get("material") if r.get("material") is not None else "",
+                r.get("desc") if r.get("desc") is not None else "",
+                r.get("qty") if r.get("qty") is not None else "",
+                r.get("line") if r.get("line") is not None else "",
+                r.get("subprocess") if r.get("subprocess") is not None else "",
+                r.get("maker") if r.get("maker") is not None else "",
+                r.get("equip_no") if r.get("equip_no") is not None else "",
+                due_text,
+            ])
+
+    def _on_request_dblclick(self, event):
+        sel = self.request_tree.selection()
+        if not sel:
+            return
+        if self.md is None:
+            messagebox.showinfo("안내", "먼저 통합양식을 업로드 하세요.")
+            return
+        r = self.request_rows[int(sel[0])]
+
+        po = r.get("po")
+        if po is not None:
+            iv = parse_int(po)
+            self.line_vars["F"].set(str(iv) if iv is not None else str(po))
+
+        qty = parse_int(r.get("qty"))
+        self.line_qty.set(str(qty) if qty and qty >= 1 else "1")
+
+        if r.get("line") is not None:
+            proc = extract_after_underscore(r["line"])
+            self.line_vars["M"].set(proc)
+            self.option_vars["process"].set(proc)   # 옵션의 대공정도 동일하게
+        if r.get("subprocess") is not None:
+            subproc = str(r["subprocess"]).strip()
+            self.line_vars["O"].set(subproc)
+            self.option_vars["subproc"].set(subproc)   # 옵션의 세부공정도 동일하게
+        if r.get("material") is not None:
+            self.option_vars["qcode"].set(str(r["material"]).strip())   # 옵션의 Q-code
+        if r.get("maker") is not None:
+            maker = str(r["maker"]).strip()
+            self.line_vars["N"].set(maker)
+            self.option_vars["vendor"].set(maker)   # 옵션의 설비사도 동일하게
+        if r.get("equip_no") is not None:
+            self.line_vars["P"].set(str(r["equip_no"]).strip())
+
+        due = r.get("due")
+        if isinstance(due, dt.datetime):
+            self.line_vars["T"].set(due.strftime("%Y-%m-%d"))
+        elif due:
+            self.line_vars["T"].set(format_date_mask(str(due)))
+
+        # 규격(desc)의 "LOT," 뒤 값에서 스펠링+숫자까지만 뽑아 기억해둔다 —
+        # "찾기" 버튼을 누르면 이 값으로 검색창이 채워진다(모델 서브타입
+        # 스펠링까지 넣으면 오히려 검색이 너무 좁아져서 거기까지는 뺀다).
+        self._last_model_keyword = extract_model_keyword(r.get("desc"))
+
+    # ---------- 옵션 (자재코드 + CIP AS-IS FSC 알람 조건)
+    def _build_options_box(self, parent):
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정)을 먼저 고르고, 그
+        # 조건으로 자재코드를 찾는 흐름이 더 직관적이라 자재코드 입력을
+        # 옵션 아래로 내렸다.
+        row1 = ttk.Frame(parent)
+        row1.pack(fill="x")
+
+        def _combo_cell(label, key):
+            cell = ttk.Frame(row1)
+            cell.pack(side="left", padx=(0, 14))
+            ttk.Label(cell, text=label).pack(anchor="w")
+            inner = ttk.Frame(cell)
+            inner.pack()
+            var = tk.StringVar()
+            self.option_vars[key] = var
+            self._make_clear_button(inner, key).pack(side="left")
+            cbo = ttk.Combobox(inner, textvariable=var, width=14)
+            cbo.pack(side="left")
+            self.cip_cbo[key] = cbo
+            self._bind_autocomplete(cbo)
+            var.trace_add("write", lambda *_, k=key: self._on_option_combo_input(k))
+
+        _combo_cell("사업장", "site")
+        _combo_cell("DEVICE", "device")
+        _combo_cell("대공정", "process")
+        _combo_cell("설비사", "vendor")
+
+        # 세부공정: 특수문자를 '-'로 통일해 스펠링만 인식하고, 입력하는
+        # 대로 드롭다운 목록을 실시간으로 좁혀 보여준다.
+        cell = ttk.Frame(row1)
+        cell.pack(side="left", padx=(0, 14))
+        ttk.Label(cell, text="세부공정").pack(anchor="w")
+        inner = ttk.Frame(cell)
+        inner.pack()
+        var_sub = tk.StringVar()
+        self.option_vars["subproc"] = var_sub
+        self._make_clear_button(inner, "subproc").pack(side="left")
+        self._subproc_cbo = ttk.Combobox(inner, textvariable=var_sub, width=14)
+        self._subproc_cbo.pack(side="left")
+        self._bind_autocomplete(self._subproc_cbo)
+        var_sub.trace_add("write", lambda *_: self._on_subproc_input())
+
+        # Q-code: FSC매핑 시트에서 추천 자재코드를 찾는 6번째 조건.
+        # 값이 많아(수백 개) 세부공정처럼 입력하는 대로 목록을 좁혀 보여준다.
+        cell = ttk.Frame(row1)
+        cell.pack(side="left", padx=(0, 14))
+        ttk.Label(cell, text="Q-code").pack(anchor="w")
+        inner = ttk.Frame(cell)
+        inner.pack()
+        var_qcode = tk.StringVar()
+        self.option_vars["qcode"] = var_qcode
+        self._make_clear_button(inner, "qcode").pack(side="left")
+        self._qcode_cbo = ttk.Combobox(inner, textvariable=var_qcode, width=16)
+        self._qcode_cbo.pack(side="left")
+        self._bind_autocomplete(self._qcode_cbo)
+        var_qcode.trace_add("write", lambda *_: self._on_qcode_input())
+
+        # 규격(DES, FSC매핑 H열): Q-code와 거의 1:1로 대응돼서, 규격을
+        # 검색해 고르면 Q-code가 자동으로 채워진다(그 반대도 마찬가지).
+        cell = ttk.Frame(row1)
+        cell.pack(side="left")
+        ttk.Label(cell, text="규격").pack(anchor="w")
+        inner = ttk.Frame(cell)
+        inner.pack()
+        var_des = tk.StringVar()
+        self.option_vars["des"] = var_des
+        self._make_clear_button(inner, "des").pack(side="left")
+        self._des_cbo = ttk.Combobox(inner, textvariable=var_des, width=26)
+        self._des_cbo.pack(side="left")
+        self._bind_autocomplete(self._des_cbo)
+        var_des.trace_add("write", lambda *_: self._on_des_input())
+
+        row2 = ttk.Frame(parent)
+        row2.pack(fill="x", pady=(8, 0))
+        ttk.Label(row2, text="자재코드(Q)", width=16).pack(side="left")
+        var_q = tk.StringVar()
+        self.line_vars["Q"] = var_q
+        self.entry_Q = ttk.Entry(row2, textvariable=var_q, width=18)
+        self.entry_Q.pack(side="left")
+        _colored_button(row2, "찾기", width=5, bg="#E8EAF6",
+                        command=self._pick_fsc).pack(side="left", padx=2)
+        self.lbl_fsc_recommend = ttk.Label(row2, text="", foreground="#1565C0")
+        self.lbl_fsc_recommend.pack(side="left", padx=(10, 0))
+        self.lbl_cip_status = ttk.Label(row2, text="", foreground="#c00")
+        self.lbl_cip_status.pack(side="left", padx=(10, 0))
+
+        # 자재코드(Q) 입력시 로그상 최근 단가 자동입력 (없으면 그대로, 수정 가능)
+        var_q.trace_add("write", lambda *_: self._auto_price())
+        # 자재코드(Q)가 CIP AS-IS와 (옵션 조건까지 포함해) 일치하면 알람 표시
+        var_q.trace_add("write", lambda *_: self._update_cip_status())
+
+    def _make_clear_button(self, parent, key):
+        """옵션 입력창 하나만 바로 비우는 작은 × 버튼 (전체 초기화 버튼과
+        달리 이 필드 하나만 지운다). ttk 콤보박스는 드롭다운 화살표가
+        위젯에 내장돼 있어 그 안쪽(화살표 바로 왼쪽)에 끼워 넣을 수는
+        없어서, 콤보박스 전체 바로 왼쪽에 둔다."""
+        return tk.Button(
+            parent, text="×", command=lambda: self.option_vars[key].set(""),
+            relief="flat", bd=1, padx=3, pady=0, font=("맑은 고딕", 9),
+            fg="#888888", activeforeground="#c00", cursor="hand2",
+        )
+
+    def _bind_autocomplete(self, cbo):
+        """옵션 콤보박스에 입력하는 동안, 화살표를 눌러 수동으로 펼치지
+        않아도 후보 목록이 자동으로 보이게 한다(값 목록은 각 필드의
+        실시간 필터링 로직이 이미 좁혀 놓은 상태).
+
+        ttk 콤보박스의 기본 드롭다운(Post/<Down> 방식 둘 다)은 열리는
+        순간 자체적으로 키보드 포커스/그랩을 목록 쪽으로 가져가버려서,
+        그 다음 글자를 입력칸이 아니라 목록이 받아버리는 문제가 있었다
+        — 이건 ttk 콤보박스 팝다운의 근본적인 동작이라 여는 방식을
+        바꾸는 걸로는 해결이 안 된다. 그래서 ttk의 기본 드롭다운은 아예
+        쓰지 않고, 입력칸 바로 아래에 후보를 보여주는 작은 목록 창을
+        직접 그린다 — 이 창은 포커스를 가져가지 않으므로 타이핑은
+        입력칸에서 계속된다. 목록 항목은 마우스 클릭으로 선택한다."""
+        state = {"win": None, "listbox": None}
+
+        def _close():
+            win = state["win"]
+            if win is not None:
+                win.destroy()
+                state["win"] = None
+                state["listbox"] = None
+
+        def _select(value):
+            cbo.set(value)
+            _close()
+            cbo.focus_set()
+            cbo.icursor("end")
+
+        def _open(values):
+            _close()
+            win = tk.Toplevel(cbo)
+            win.wm_overrideredirect(True)
+            try:
+                win.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            x = cbo.winfo_rootx()
+            y = cbo.winfo_rooty() + cbo.winfo_height()
+            win.wm_geometry("+%d+%d" % (x, y))
+            try:
+                combo_w = int(cbo.cget("width"))
+            except (tk.TclError, ValueError):
+                combo_w = 20
+            lb = tk.Listbox(win, height=min(len(values), 8), width=combo_w,
+                             exportselection=False)
+            for v in values:
+                lb.insert("end", v)
+            lb.pack()
+            lb.bind("<ButtonRelease-1>",
+                    lambda e: _select(lb.get(lb.nearest(e.y))))
+            state["win"] = win
+            state["listbox"] = lb
+
+        def _on_key(event):
+            if event.keysym == "Escape":
+                _close()
+                return
+            if event.keysym in ("Return", "KP_Enter", "Up", "Down", "Tab", "ISO_Left_Tab"):
+                return
+            text = cbo.get().strip()
+            values = list(cbo["values"])
+            if text and values:
+                _open(values[:20])
+            else:
+                _close()
+
+        # 클릭으로 항목을 고르는 중에 입력칸이 먼저 포커스를 잃어도
+        # 클릭 처리가 끝날 시간을 준 다음에 닫는다.
+        cbo.bind("<KeyRelease>", _on_key)
+        cbo.bind("<FocusOut>", lambda e: cbo.after(150, _close))
+
+    def _on_option_combo_input(self, key):
+        self._filter_option_combo(key)
+        self._on_option_field_changed()
+
+    def _filter_option_combo(self, key):
+        """사업장/DEVICE/대공정/설비사 입력값과 부분 일치하는 항목만
+        드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_plain(self.option_vars[key].get())
+        all_values = self._opt_all_values.get(key, [])
+        if not typed:
+            self.cip_cbo[key]["values"] = all_values
+        else:
+            self.cip_cbo[key]["values"] = [v for v in all_values if typed in _norm_plain(v)]
+
+    def _on_subproc_input(self):
+        self._filter_subproc_combo()
+        self._update_cip_status()
+        self._update_fsc_recommend_status()
+
+    def _on_qcode_input(self):
+        self._filter_qcode_combo()
+        if not self._des_qcode_sync and self.md:
+            qcode = self.option_vars["qcode"].get().strip()
+            des = self.md.fsc_map_qcode_to_des.get(_norm_plain(qcode))
+            if des and self.option_vars["des"].get().strip() != des:
+                self._des_qcode_sync = True
+                try:
+                    self.option_vars["des"].set(des)
+                finally:
+                    self._des_qcode_sync = False
+        self._update_fsc_recommend_status()
+
+    def _filter_qcode_combo(self):
+        """Q-code 입력값과 부분 일치하는 항목만 드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_plain(self.option_vars["qcode"].get())
+        all_values = getattr(self, "_qcode_all_values", [])
+        if not typed:
+            self._qcode_cbo["values"] = all_values
+        else:
+            self._qcode_cbo["values"] = [v for v in all_values if typed in _norm_plain(v)]
+
+    def _on_des_input(self):
+        self._filter_des_combo()
+        if not self._des_qcode_sync and self.md:
+            des = self.option_vars["des"].get().strip()
+            qcode = self.md.fsc_map_des_to_qcode.get(_norm_plain(des))
+            if qcode and self.option_vars["qcode"].get().strip() != qcode:
+                self._des_qcode_sync = True
+                try:
+                    self.option_vars["qcode"].set(qcode)
+                finally:
+                    self._des_qcode_sync = False
+        self._update_fsc_recommend_status()
+
+    def _filter_des_combo(self):
+        """규격 입력값과 부분 일치하는 항목만 드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_plain(self.option_vars["des"].get())
+        all_values = getattr(self, "_des_all_values", [])
+        if not typed:
+            self._des_cbo["values"] = all_values
+        else:
+            self._des_cbo["values"] = [v for v in all_values if typed in _norm_plain(v)]
+
+    def _update_fsc_recommend_status(self):
+        """옵션 필드로 FSC매핑을 조회해 추천 자재코드를 라벨에 표시한다.
+        세부공정까지 일치하면 확정(⭐), 나머지 5개 조건만 일치하면
+        후보(☆)로 구분해서 보여준다."""
+        if not self.md:
+            self.lbl_fsc_recommend.config(text="")
+            return
+        opt = self._current_option_fields()
+        rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],
+                            opt["process"], opt["vendor"], opt["subproc"], opt["qcode"])
+        if not rec:
+            text = ""
+        elif rec["confirmed"]:
+            text = "⭐ 확정 추천: %s" % rec["fsc"]
+        else:
+            text = "☆ 추천(세부공정 다름): %s" % rec["fsc"]
+        self.lbl_fsc_recommend.config(text=text)
+
+    def _filter_subproc_combo(self):
+        """세부공정 입력값과 스펠링이 일치하는(특수문자·대소문자 무시) 항목만
+        드롭다운 목록에 실시간으로 남긴다."""
+        typed = _norm_subproc(self.option_vars["subproc"].get())
+        all_values = self._subproc_all_values
+        if not typed:
+            self._subproc_cbo["values"] = all_values
+        else:
+            self._subproc_cbo["values"] = [v for v in all_values if typed in v]
+
+    def _current_option_fields(self):
+        return {k: self.option_vars[k].get() for k in
+                ("site", "device", "process", "vendor", "subproc", "qcode", "des")}
+
+    def _on_option_field_changed(self):
+        """사업장/DEVICE/대공정/설비사 콤보박스 값이 바뀔 때마다 CIP 알람과
+        FSC매핑 추천 상태를 함께 갱신한다."""
+        self._update_cip_status()
+        self._update_fsc_recommend_status()
+
+    def _update_cip_status(self):
+        """옵션 5개 필드 + 자재코드를 CIP AS-IS와 비교해 상태 라벨을 갱신한다."""
+        if not self.md:
+            self.lbl_cip_status.config(text="")
+            return
+        opt = self._current_option_fields()
+        fsc = self.line_vars["Q"].get()
+        level = cip_match_level(self.md.cip_rows, opt["site"], opt["device"],
+                                opt["process"], opt["vendor"], opt["subproc"], fsc)
+        if not level:
+            self.lbl_cip_status.config(text="")
+            return
+        # TO-BE 추천은 level 판정과 별개로 계산한다 — CIP TO-BE 칸이
+        # 비어 있는 것 같은 예외적인 경우에도 기존처럼 검토 알람 자체는
+        # 그대로 보여주기 위함이다.
+        rec = cip_tobe_recommend(self.md.cip_rows, opt["site"], opt["device"],
+                                 opt["process"], opt["vendor"], opt["subproc"], fsc)
+        tobe_suffix = " → TO-BE 추천: %s" % rec["tobe"] if rec and rec["tobe"] else ""
+        if level == "red":
+            self.lbl_cip_status.config(
+                text="🔴 검토 필요 (현재 조건 AS-IS와 완전히 일치)" + tobe_suffix,
+                foreground="#c00")
+        else:
+            self.lbl_cip_status.config(
+                text="🟠 검토 필요 (세부공정 제외 동일)" + tobe_suffix,
+                foreground="#e65100")
+
+    def _line_form(self, parent):
+        form = ttk.Frame(parent)
+        form.pack(fill="x")
+        # 고객PO번호는 숫자만 입력되도록 키 입력 단계에서 걸러낸다.
+        vcmd_digits = (self.register(lambda p: p == "" or p.isdigit()), "%P")
+        # 자재코드(Q)는 옵션 박스로 이동했다 — 이 폼에는 만들지 않는다.
+        specs = [("C", 12), ("F", 12), ("I", 8), ("L", 8),
+                 ("M", 10), ("N", 12), ("O", 14), ("P", 10),
+                 ("T", 12), ("W", 10), ("X", 10)]
+        for i, (key, width) in enumerate(specs):
+            cell = ttk.Frame(form)
+            cell.grid(row=0, column=i, padx=4, sticky="nw")
+            label = HEADER_BY_KEY[key]
+            if key in REQUIRED_KEYS:
+                label = "* " + label
+            ttk.Label(cell, text=label).pack(anchor="w")
+            var = tk.StringVar()
+            self.line_vars[key] = var
+            row = ttk.Frame(cell)
+            row.pack()
+            if key == "F":
+                entry = ttk.Entry(row, textvariable=var, width=width,
+                                  validate="key", validatecommand=vcmd_digits)
+            else:
+                entry = ttk.Entry(row, textvariable=var, width=width)
+            entry.pack(side="left")
+            if key == "T":
+                self.entry_T = entry
+            if key == "C":
+                _colored_button(row, "찾기", width=5, bg="#E8EAF6",
+                                command=self._pick_line_ship).pack(side="left", padx=2)
+                self._name_C = ttk.Label(cell, text="", foreground="#0a6")
+                self._name_C.pack(anchor="w")
+
+        # 금액(X) 옆 : 이 값으로 몇 행을 한번에 만들지 지정 (기본 1)
+        qty_cell = ttk.Frame(form)
+        qty_cell.grid(row=0, column=len(specs), padx=4, sticky="nw")
+        ttk.Label(qty_cell, text="생성수량").pack(anchor="w")
+        self.line_qty = tk.StringVar(value="1")
+        qty_row = ttk.Frame(qty_cell)
+        qty_row.pack()
+        ttk.Entry(qty_row, textvariable=self.line_qty, width=6,
+                 validate="key", validatecommand=vcmd_digits).pack(side="left")
+
+        # 인도처코드(C) 선택시 이름 표시 + 인도장소/고객라인 자동입력
+        self.line_vars["C"].trace_add("write", lambda *_: self._on_line_ship_change())
+        # 자재코드(Q)/CIP 매치 관련 트레이스는 옵션 박스(_build_options_box)에서 건다.
+        # 단가 -> 금액 자동
+        self.line_vars["W"].trace_add("write", lambda *_: self._auto_amount())
+        # 납품요청일 입력 형식을 yyyy-mm-dd 로 고정
+        self._t_guard = False
+        self.line_vars["T"].trace_add("write", lambda *_: self._on_date_input())
+        # 납품요청일까지 남은 기간에 따라 입력칸 글자색을 바꾼다 (6주내 빨강/
+        # 7주내 주황/8주이상 파랑)
+        self.line_vars["T"].trace_add("write", lambda *_: self._update_due_color())
+
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x", pady=(6, 6))
+        ttk.Label(btns,
+                  text="납품요청일은 입력 즉시 yyyy-mm-dd 형식으로 정렬됩니다 · "
+                       "여러 행을 체크한 뒤 [선택 행에 반영]을 누르면 아래 입력칸의 "
+                       "값이 체크된 모든 행에 그대로 적용됩니다",
+                  foreground="#777").pack(side="left")
+        self.btn_add = _colored_button(btns, "행 추가", command=self._add_line,
+                                        bg="#C8E6C9")
+        self.btn_add.pack(side="right")
+        _colored_button(btns, "입력칸 비우기", command=self._clear_line_form,
+                        bg="#ECEFF1").pack(side="right", padx=6)
+
+    def _line_table(self, parent):
+        # 행 조작 버튼 바를 표보다 먼저 side="bottom"으로 붙인다 — 창이
+        # 좁아졌을 때 표 대신 이 버튼들이 찌그러지는 일이 없게 하기 위함
+        # (표는 자체 스크롤바가 있어 공간이 부족하면 스크롤로 대응된다).
+        tb = ttk.Frame(parent)
+        tb.pack(side="bottom", fill="x", pady=(6, 0))
+        _colored_button(tb, "전체 선택", command=self._select_all_lines,
+                        bg="#BBDEFB").pack(side="left")
+        _colored_button(tb, "선택 행에 반영", command=self._apply_to_selected,
+                        bg="#FFF9C4").pack(side="left", padx=6)
+        _colored_button(tb, "선택 행 복제", command=self._dup_line,
+                        bg="#E8EAF6").pack(side="left")
+        _colored_button(tb, "선택 행 삭제", command=self._del_line,
+                        bg="#FFCDD2").pack(side="left", padx=6)
+        _colored_button(tb, "전체 삭제", command=self._clear_lines,
+                        bg="#EF9A9A").pack(side="left")
+        self.line_count = ttk.Label(tb, text="0 행")
+        self.line_count.pack(side="right")
+
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill="both", expand=True)
+        cols = ["선택", "No"] + LINE_KEYS
+        # 옵션 박스가 추가되며 창 전체 높이가 늘어나, 노트북 화면(1366x768
+        # 등)에서 창이 눌려 아래 버튼이 잘 안 보이던 문제가 있었다. 표
+        # 자체엔 스크롤바가 있으니 기본 표시 행 수를 줄여 여유를 둔다.
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                                 height=8, selectmode="extended")
+        self.tree.heading("선택", text="선택")
+        self.tree.column("선택", width=40, anchor="center")
+        self.tree.heading("No", text="No")
+        self.tree.column("No", width=40, anchor="center")
+        widths = {"C": 110, "F": 100, "I": 80, "L": 80, "M": 90, "N": 110,
+                  "O": 120, "P": 100, "Q": 210, "T": 100, "W": 100, "X": 100}
+        for k in LINE_KEYS:
+            self.tree.heading(k, text=HEADER_BY_KEY[k])
+            self.tree.column(k, width=widths[k], anchor="w")
+        vs = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vs.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="left", fill="y")
+        # CIP AS-IS 알람(빨강/주황)은 자재코드 앞 마커 텍스트로 표시하므로
+        # (색이 아니라 텍스트라 아래 글자색 태그와 절대 충돌하지 않는다)
+        # 여기서는 납품임박색만 태그로 관리한다.
+        self.tree.tag_configure("due_red", foreground="red")
+        self.tree.tag_configure("due_orange", foreground="#E65100")
+        self.tree.tag_configure("due_blue", foreground="blue")
+        self.tree.bind("<Double-1>", lambda e: self._load_selected())
+        self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<<TreeviewSelect>>", self._refresh_checks)
+
+    # ---------- 동작
+    def _pick_master(self):
+        p = filedialog.askopenfilename(
+            title="통합양식 파일 선택",
+            filetypes=[("Excel", "*.xlsx *.xlsm"), ("모든 파일", "*.*")])
+        if p:
+            self.master_path.set(p)
+            self._load_master()
+
+    def _pick_partner(self, which, var):
+        if not self.md:
+            return
+        if which == "sold":
+            rows, title = self.md.sold_to, "판매처 선택"
+        else:
+            rows, title = self.md.ship_to, "인도처 선택"
+        dlg = PickerDialog(self, title, ("코드", "이름", "주소"),
+                           (90, 220, 220), rows)
+        self.wait_window(dlg)
+        if dlg.result:
+            var.set(dlg.result)
+
+    def _pick_line_ship(self):
+        self._pick_partner("ship", self.line_vars["C"])
+
+    def _on_line_ship_change(self):
+        code = self.line_vars["C"].get().strip()
+        name = ""
+        if self.md:
+            name = next((r[1] for r in self.md.ship_to if r[0] == code), "")
+        if hasattr(self, "_name_C"):
+            self._name_C.config(text=name if name else ("코드 없음" if code else ""),
+                                foreground="#0a6" if name else "#c00")
+        # 인도장소(I)/고객라인(L)은 인도처코드의 '-' 뒤 단어를 최초값으로 사용한다.
+        # (동일한 값으로 채워지되, 이후 각각 자유롭게 수정 가능)
+        # 인도처코드 자체는 순수 숫자(엑셀 숫자로 저장되어야 함)라 '-'가 없는
+        # 경우가 많으므로, 코드에 없으면 이름(예: '삼성전자-16L')에서도 찾는다.
+        suffix = ship_to_suffix(code) or ship_to_suffix(name)
+        if suffix:
+            if not self.line_vars["I"].get().strip():
+                self.line_vars["I"].set(suffix)
+            if not self.line_vars["L"].get().strip():
+                self.line_vars["L"].set(suffix)
+
+    def _show_partner_name(self, key):
+        if not self.md:
+            return
+        code = self.common_vars[key].get().strip()
+        rows = self.md.sold_to if key == "B" else self.md.ship_to
+        name = next((r[1] for r in rows if r[0] == code), "")
+        lbl = getattr(self, "_name_%s" % key, None)
+        if lbl is not None:
+            lbl.config(text=name if name else ("코드 없음" if code else ""),
+                       foreground="#0a6" if name else "#c00")
+
+    def _pick_fsc(self):
+        if not self.md:
+            return
+        # 전체 로그(price_map)에 등장한 적 있는 자재코드는 강조 표시하고
+        # 목록 맨 위로 올려서, 이전에 실제로 주문했던 FSC를 빠르게 찾을 수 있게 한다.
+        # 현재 옵션(사업장/DEVICE/대공정/설비사/세부공정) 조건에서 CIP AS-IS와
+        # 일치하는 후보는 그보다 더 우선해 빨강/주황으로 표시한다.
+        opt = self._current_option_fields()
+        warn_levels = {}
+        for f in self.md.fsc:
+            code = f[0]
+            level = cip_match_level(self.md.cip_rows, opt["site"], opt["device"],
+                                    opt["process"], opt["vendor"], opt["subproc"], code)
+            if level:
+                # TO-BE 추천은 level 판정과 별개로 계산해서, TO-BE 칸이
+                # 비어 있는 예외적인 경우에도 검토 표시 자체는 유지한다.
+                tobe_rec = cip_tobe_recommend(self.md.cip_rows, opt["site"], opt["device"],
+                                              opt["process"], opt["vendor"], opt["subproc"], code)
+                warn_levels[code] = {"level": level,
+                                     "tobe": tobe_rec["tobe"] if tobe_rec else None}
+        # FSC매핑에서 추천 자재코드를 찾는다 — 세부공정까지 일치하면 확정,
+        # 나머지 5개 조건(Q-code 포함)만 일치해도 후보로 목록 맨 위에 표시한다.
+        rec = fsc_recommend(self.md.fsc_map, self.md.fsc_map_5key, opt["site"], opt["device"],
+                            opt["process"], opt["vendor"], opt["subproc"], opt["qcode"])
+        # VER/상태는 모든 행이 사실상 같은 값이라(상태는 애초에 'BOM활성화'로
+        # 걸러서 이 목록에 올라온 것) 열로 보여줄 실익이 없어 뺐다 — 그 대신
+        # 안내 문구 한 줄로 설명한다. 뺀 만큼 다른 열(특히 TO-BE 추천까지
+        # 붙는 검토필요 열)에 너비를 더 준다. 설명은 잘려도 마우스오버 시
+        # 툴팁으로 전체 내용을 볼 수 있다.
+        fsc_rows = [(f[0], f[2], f[3]) for f in self.md.fsc]
+        note = (self.md.fsc_filter_note or
+                "자재코드 목록은 상태값이 'BOM활성화'인 FSC만 조회합니다.")
+        dlg = PickerDialog(self, "자재코드(FSC) 선택",
+                           ("FSC", "모델명", "설명"),
+                           (115, 130, 320), fsc_rows,
+                           initial=self._last_model_keyword,
+                           highlight_keys=set(self.price_map.keys()),
+                           warn_levels=warn_levels,
+                           recommended_fsc=rec["fsc"] if rec else None,
+                           recommend_confirmed=rec["confirmed"] if rec else True,
+                           previous_fsc=rec.get("prev") if rec else None,
+                           show_recommend_col=True, note=note)
+        self.wait_window(dlg)
+        if dlg.result:
+            self.line_vars["Q"].set(dlg.result)
+
+    def _auto_amount(self):
+        w = parse_int(self.line_vars["W"].get())
+        if w is not None:
+            self.line_vars["X"].set(str(w))
+
+    def _auto_price(self):
+        code = self.line_vars["Q"].get().strip()
+        if not code:
+            return
+        price = self.price_map.get(code)
+        if price is not None and not self.line_vars["W"].get().strip():
+            self.line_vars["W"].set(str(price))
+
+    def _on_date_input(self):
+        if self._t_guard:
+            return
+        raw = self.line_vars["T"].get()
+        fixed = format_date_mask(raw)
+        if fixed == raw:
+            return
+        entry = getattr(self, "entry_T", None)
+        try:
+            cursor = entry.index("insert") if entry is not None else len(raw)
+        except tk.TclError:
+            cursor = len(raw)
+        digit_count = len(_DIGITS_RE.sub("", raw[:cursor]))
+        self._t_guard = True
+        self.line_vars["T"].set(fixed)
+
+        def _fix_cursor():
+            # Entry 위젯 자체의 삽입 후처리가 이 트레이스보다 나중에 커서를
+            # 재배치하므로, 이벤트 루프가 한 번 돈 뒤(after_idle)에 다시
+            # 올바른 위치로 옮겨야 덮어써지지 않는다.
+            if entry is not None:
+                try:
+                    entry.icursor(cursor_after_mask(fixed, digit_count))
+                except tk.TclError:
+                    pass
+            self._t_guard = False
+
+        if entry is not None:
+            entry.after_idle(_fix_cursor)
+        else:
+            self._t_guard = False
+
+    def _update_due_color(self):
+        d = parse_date(self.line_vars["T"].get())
+        color = due_date_color(d) or "black"
+        entry = getattr(self, "entry_T", None)
+        if entry is not None:
+            entry.configure(foreground=color)
+
+    def _clear_line_form(self, reset_qty=True):
+        for k in LINE_KEYS:
+            self.line_vars[k].set("")
+        if hasattr(self, "_name_C"):
+            self._name_C.config(text="")
+        if reset_qty and hasattr(self, "line_qty"):
+            self.line_qty.set("1")
+
+    def _validate_line(self, data):
+        errs = []
+        for k in LINE_KEYS:
+            if k in REQUIRED_KEYS and not data[k].strip():
+                errs.append("%s(%s) 은(는) 필수입니다." % (HEADER_BY_KEY[k], k))
+        c = data["C"].strip()
+        if c and self.md and c not in {r[0] for r in self.md.ship_to}:
+            errs.append("인도처코드 '%s' 은(는) 목록에 없습니다." % c)
+        q = data["Q"].strip()
+        if q and self.md and q not in self.md.fsc_codes:
+            errs.append("자재코드 '%s' 은(는) FSC 목록에 없습니다." % q)
+        if data["T"].strip() and parse_date(data["T"]) is None:
+            errs.append("납품요청일 형식이 올바르지 않습니다. (예: 2026-10-26)")
+        for k in ("W", "X"):
+            if data[k].strip() and parse_int(data[k]) is None:
+                errs.append("%s 은(는) 숫자여야 합니다." % HEADER_BY_KEY[k])
+        return errs
+
+    def _add_line(self):
+        data = {k: self.line_vars[k].get().strip() for k in LINE_KEYS}
+        errs = self._validate_line(data)
+        if errs:
+            messagebox.showwarning("확인 필요", "\n".join(errs))
+            return
+        qty = parse_int(self.line_qty.get())
+        if qty is None or qty < 1:
+            qty = 1
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정)은 여러 행을 추가하는 동안
+        # 계속 바뀔 수 있으므로, 나중에 CIP 알람을 다시 계산할 때 "지금
+        # 옵션이 뭔지"가 아니라 "이 행을 추가할 당시 옵션이 뭐였는지"를 써야
+        # 한다. 행마다 그 시점의 옵션 값을 그대로 저장해둔다.
+        opt_snapshot = self._current_option_fields()
+        for _ in range(qty):
+            row = dict(data)
+            row["_opt"] = dict(opt_snapshot)
+            self.lines.append(row)
+        self._refresh_tree()
+        # 다음 행 입력 편의를 위해 유지 (자재코드/단가/금액만 새로 입력)
+        # 생성수량도 여기서 "1"로 되돌리지 않는다 — 의뢰파일 더블클릭으로
+        # 채워진 값(H열 수량)이 방금 몇 행 생성했는지 그대로 남아 있어야
+        # 방금 생성된 수량과 화면이 어긋나 보이지 않는다.
+        keep = {k: data[k] for k in ("C", "F", "I", "L", "M", "N", "O", "P", "T")}
+        self._clear_line_form(reset_qty=False)
+        for k, v in keep.items():
+            self.line_vars[k].set(v)
+
+    def _selected_indices(self):
+        return sorted(self.tree.index(iid) for iid in self.tree.selection())
+
+    def _select_all_lines(self):
+        self.tree.selection_set(self.tree.get_children())
+
+    def _selected_index(self):
+        idxs = self._selected_indices()
+        return idxs[0] if idxs else None
+
+    def _on_tree_click(self, event):
+        """'선택' 열을 클릭하면 다중 선택을 켜고 끈다 (체크박스처럼 동작)."""
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        col = self.tree.identify_column(event.x)
+        row = self.tree.identify_row(event.y)
+        if not row or col != "#1":
+            return
+        if row in self.tree.selection():
+            self.tree.selection_remove(row)
+        else:
+            self.tree.selection_add(row)
+        return "break"
+
+    def _refresh_checks(self, *_):
+        sel = set(self.tree.selection())
+        for iid in self.tree.get_children():
+            vals = list(self.tree.item(iid, "values"))
+            vals[0] = "☑" if iid in sel else "☐"
+            self.tree.item(iid, values=vals)
+
+    def _load_selected(self):
+        """체크(선택)된 행 중 첫 번째 행의 값을 입력칸으로 불러온다."""
+        i = self._selected_index()
+        if i is None:
+            return
+        for k in LINE_KEYS:
+            self.line_vars[k].set(self.lines[i][k])
+
+    def _apply_to_selected(self):
+        """입력칸의 값을 지금 체크되어 있는 모든 행에 그대로 반영한다.
+        체크 표시가 곧 적용 대상이므로 둘이 어긋날 일이 없다."""
+        idxs = self._selected_indices()
+        if not idxs:
+            messagebox.showwarning("확인 필요", "반영할 행을 먼저 체크하세요.")
+            return
+        data = {k: self.line_vars[k].get().strip() for k in LINE_KEYS}
+        errs = self._validate_line(data)
+        if errs:
+            messagebox.showwarning("확인 필요", "\n".join(errs))
+            return
+        opt_snapshot = self._current_option_fields()
+        for i in idxs:
+            row = dict(data)
+            row["_opt"] = dict(opt_snapshot)
+            self.lines[i] = row
+        self._refresh_tree()
+        kids = self.tree.get_children()
+        self.tree.selection_set([kids[i] for i in idxs])
+
+    def _dup_line(self):
+        """선택된 행(여러 행 가능)을 각각 바로 아래에 복제한다."""
+        idxs = self._selected_indices()
+        if not idxs:
+            return
+        for i in sorted(idxs, reverse=True):
+            self.lines.insert(i + 1, dict(self.lines[i]))
+        self._refresh_tree()
+
+    def _del_line(self):
+        idxs = self._selected_indices()
+        if not idxs:
+            return
+        if not messagebox.askyesno("확인", "선택한 %d개 행을 삭제할까요?" % len(idxs)):
+            return
+        for i in sorted(idxs, reverse=True):
+            del self.lines[i]
+        self._clear_line_form()
+        self._refresh_tree()
+
+    def _clear_lines(self):
+        if self.lines and messagebox.askyesno("확인", "품목 라인을 모두 지울까요?"):
+            self.lines = []
+            self._clear_line_form()
+            self._refresh_tree()
+
+    def _reset_all(self):
+        """공통값·의뢰파일·옵션·품목 라인을 전부 초기 상태로 되돌린다.
+        통합양식(마스터) 파일 선택은 그대로 둔다 — 다시 읽을 필요가
+        없고, 매번 파일을 다시 고르게 하면 오히려 불편하다."""
+        if not messagebox.askyesno(
+                "초기화 확인",
+                "공통값·의뢰파일·옵션·품목 라인이 모두 초기화됩니다. 계속할까요?"):
+            return
+
+        defaults = self._common_defaults()
+        for k, var in self.common_vars.items():
+            if k == "J":     # G와 변수를 공유하므로 G에서 이미 반영됨
+                continue
+            var.set(defaults.get(k, ""))
+        if self.md:          # 콤보박스 첫 항목 재적용 (A/D/H/K/Y)
+            self._fill_combos()
+
+        self.request_path.set("")
+        self.request_rows = []
+        self._last_model_keyword = ""
+        self._refresh_request_tree()
+        self.request_status.config(text="")
+
+        # 옵션(사업장/DEVICE/대공정/설비사/세부공정/Q-code)은 여러 행 추가
+        # 동안 일부러 유지시키는 값이라 [행 추가]/[입력칸 비우기]로는 안
+        # 지워진다 — 완전 초기화는 여기서만 비운다.
+        for var in self.option_vars.values():
+            var.set("")
+        self._filter_subproc_combo()
+        self._filter_qcode_combo()
+        self._filter_des_combo()
+
+        self.lines = []
+        self._clear_line_form()
+        self._refresh_tree()
+        self._update_cip_status()
+        self._update_fsc_recommend_status()
+
+        self.status.config(text="초기화했습니다.")
+
+    def _refresh_tree(self):
+        self.tree.delete(*self.tree.get_children())
+        cip_rows = self.md.cip_rows if self.md else []
+        q_idx = LINE_KEYS.index("Q")
+        for n, d in enumerate(self.lines, start=1):
+            # CIP AS-IS 알람은 배경색이 아니라 자재코드 앞 마커 텍스트로
+            # 표시한다 — 납품임박색(due_*, 글자색)과 같은 채널을 쓰지
+            # 않으므로 우선순위 없이 항상 둘 다 눈에 보인다. 이 행을
+            # 추가할 당시의 옵션 값(_opt)을 써야 나중에 옵션을 바꿔도
+            # 예전 행이 엉뚱하게 다시 칠해지지 않는다.
+            opt = d.get("_opt", {})
+            level = cip_match_level(
+                cip_rows, opt.get("site", ""), opt.get("device", ""),
+                opt.get("process", ""), opt.get("vendor", ""),
+                opt.get("subproc", ""), d["Q"])
+            values = ["☐", n] + [d[k] for k in LINE_KEYS]
+            if level == "red":
+                values[2 + q_idx] = "🔴검토필요 " + d["Q"]
+            elif level == "orange":
+                values[2 + q_idx] = "🟠검토필요(세부공정↓) " + d["Q"]
+
+            tags = []
+            color = due_date_color(parse_date(d["T"]))
+            if color:
+                tags.append("due_%s" % color)
+            self.tree.insert("", "end", values=values, tags=tuple(tags))
+        self.line_count.config(text="%d 행" % len(self.lines))
+
+    # ---------- 출력
+    def _collect_common(self):
+        out, errs = {}, []
+        for k in COMMON_KEYS:
+            raw = self.common_vars[k].get().strip()
+            if k in ("A", "D", "H", "K", "Y"):
+                raw = combo_code(raw)
+            if k in REQUIRED_KEYS and not raw:
+                errs.append("%s(%s) 은(는) 필수입니다." % (HEADER_BY_KEY[k], k))
+            out[k] = raw
+        if out.get("B") and self.md and out["B"] not in {r[0] for r in self.md.sold_to}:
+            errs.append("판매처코드 '%s' 은(는) 목록에 없습니다." % out["B"])
+        for k in ("G", "J"):
+            if out[k]:
+                d = parse_date(out[k])
+                if d is None:
+                    errs.append("%s 형식이 올바르지 않습니다." % HEADER_BY_KEY[k])
+                else:
+                    out[k] = d.strftime("%Y%m%d")
+        return out, errs
+
+    def _build_rows(self, common):
+        # 판매처코드/인도처코드/유통경로/제품군/출하지점/고객PO번호는 업로드
+        # 시스템이 반드시 엑셀 숫자 형식으로 인식해야 하므로 정수로 변환해
+        # 저장한다. (숫자로 변환되지 않는 값은 원래 문자열을 그대로 둔다)
+        rows = []
+        for d in self.lines:
+            row = {}
+            for k in COMMON_KEYS:
+                v = common[k]
+                if k in ("B", "D", "E", "U"):
+                    iv = parse_int(v)
+                    v = iv if iv is not None else (v or None)
+                elif k == "R":
+                    v = 1                       # 오더수량은 항상 1
+                row[k] = v if v != "" else None
+            for k in LINE_KEYS:
+                v = d[k]
+                if k in ("C", "F"):
+                    iv = parse_int(v)
+                    v = iv if iv is not None else (v or None)
+                elif k == "T":
+                    dv = parse_date(v)
+                    v = dv.strftime("%Y-%m-%d") if dv else None
+                elif k in ("W", "X"):
+                    iv = parse_int(v)
+                    v = iv if iv is not None else (v or None)
+                row[k] = v if v != "" else None
+            rows.append(row)
+        return rows
+
+    def _open_upload_dir(self):
+        open_folder(upload_dir())
+
+    def _export(self):
+        if not self.md:
+            messagebox.showerror("오류", "먼저 양식 파일을 읽어주세요.")
+            return
+        if not self.lines:
+            messagebox.showwarning("확인 필요", "품목 라인이 없습니다.")
+            return
+        common, errs = self._collect_common()
+        for n, d in enumerate(self.lines, start=1):
+            for e in self._validate_line(d):
+                errs.append("%d행: %s" % (n, e))
+        if errs:
+            messagebox.showwarning("확인 필요", "\n".join(errs[:15]))
+            return
+
+        out_dir = upload_dir()
+        stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = os.path.join(out_dir, "CSP_주문접수_%s.xlsx" % stamp)
+        n = 1
+        while os.path.exists(out):        # 같은 초에 두 번 생성되는 경우 대비
+            n += 1
+            out = os.path.join(out_dir, "CSP_주문접수_%s_%d.xlsx" % (stamp, n))
+        rows = self._build_rows(common)
+        try:
+            build_output(self.master_path.get(), rows, out)
+        except Exception as e:
+            messagebox.showerror("오류", "파일 생성에 실패했습니다.\n\n%s" % e)
+            return
+        try:
+            safe_append_log(rows, os.path.basename(out))
+        except Exception as e:
+            # 주문 파일 자체는 이미 만들어졌으니 실패로 처리하지 않고 알리기만 한다.
+            messagebox.showwarning(
+                "안내", "주문 파일은 생성되었지만 로그 기록에는 실패했습니다.\n\n%s" % e)
+        for row in rows:                   # 다음 입력을 위해 최근 단가를 갱신
+            q, w = row.get("Q"), row.get("W")
+            if q and w is not None:
+                self.price_map[str(q)] = w
+        # 상태 라벨에 전체 경로를 넣으면 길이 때문에 하단 버튼이 화면 밖으로
+        # 밀려 사라지는 문제가 있어(가로 한 줄 배치), 경로 없이 완료 사실만
+        # 짧게 표시한다. 실제 저장 위치는 완료 팝업에서 확인할 수 있다.
+        self.status.config(text="생성 완료 (%d행)" % len(self.lines))
+        messagebox.showinfo("완료", "%d행이 생성되었습니다.\n전체 로그에 누적 저장되었습니다.\n\n%s"
+                             % (len(self.lines), out))
+
+        # 주문 파일 생성은 이미 끝났으니, FSC매핑 동기화는 실패해도
+        # 이번 생성 자체를 실패로 만들지 않는다(안내만 한다).
+        self._sync_new_fsc_map_rows()
+
+    def _sync_new_fsc_map_rows(self):
+        """이번에 생성한 라인들을 FSC매핑 시트에 반영한다.
+
+        - 조합(사업장/DEVICE/대공정/설비사/세부공정/Q-code)이 FSC매핑에
+          아직 없으면 새 행으로 추가한다.
+        - 이미 있는 조합인데 이번에 쓰인 FSC가 그 조합의 현재 추천값
+          (이력의 마지막 값)과 다르면, 다음 빈 이력 열에 새 FSC를 이어
+          붙인다(같은 조합이 이번 배치에 여러 번 나오고 그때마다 값이
+          바뀌면 순서대로 이어붙인다). 다음부터는 이 새 값이 추천된다.
+        """
+        if not self.md:
+            return
+        new_rows, seen_new = [], set()
+        history_updates = []
+        row_offsets, pending_tail = {}, {}
+        for d in self.lines:
+            opt = d.get("_opt", {})
+            site, device = opt.get("site", "").strip(), opt.get("device", "").strip()
+            process, vendor = opt.get("process", "").strip(), opt.get("vendor", "").strip()
+            subproc, qcode = opt.get("subproc", "").strip(), opt.get("qcode", "").strip()
+            des = opt.get("des", "").strip()
+            fsc = str(d.get("Q", "")).strip()
+            if not (site and device and process and vendor and qcode and fsc):
+                continue
+            key = _fsc_map_key(site, device, process, vendor, subproc, qcode)
+            entry = self.md.fsc_map.get(key)
+
+            if entry is None:
+                if key in seen_new:
+                    continue
+                seen_new.add(key)
+                new_rows.append({"site": site, "device": device, "process": process,
+                                 "vendor": vendor, "subproc": subproc, "qcode": qcode,
+                                 "des": des, "fsc": fsc})
+                continue
+
+            tail = pending_tail.get(key, entry["history"][-1] if entry["history"] else "")
+            if _norm_plain(fsc) == _norm_plain(tail):
+                continue
+            row_num = entry["row"]
+            offset = row_offsets.get(row_num, len(entry["history"]))
+            history_updates.append({"row": row_num,
+                                    "col": self.md.fsc_map_fsc_col + offset, "fsc": fsc})
+            row_offsets[row_num] = offset + 1
+            pending_tail[key] = fsc
+
+        if not new_rows and not history_updates:
+            return
+
+        try:
+            added, updated = _sync_fsc_map_file(
+                self.master_path.get(), new_rows, history_updates)
+        except Exception as e:
+            messagebox.showwarning(
+                "안내",
+                "FSC매핑 시트를 갱신하지 못했습니다.\n"
+                "파일이 다른 프로그램(엑셀 등)에서 열려 있지는 않은지 "
+                "확인한 뒤 다시 생성해 보세요.\n\n%s" % e)
+            return
+
+        if added or updated:
+            try:
+                self.md = MasterData(self.master_path.get())
+                self._fill_option_combos()
+            except Exception:
+                pass
+            parts = []
+            if added:
+                parts.append("새로운 조합 %d건 추가" % added)
+            if updated:
+                parts.append("기존 조합에 새 FSC 이력 %d건 추가" % updated)
+            messagebox.showinfo("안내", "FSC매핑 시트를 갱신했습니다.\n" + ", ".join(parts))
+
+    # ---------- 설정 저장 / 복원
+    def _settings_path(self):
+        return os.path.join(app_dir(), SETTINGS_NAME)
+
+    def _save_settings(self, silent=False):
+        # 고객PO일자/가격결정일(G, J)은 항상 '작성 당일'이어야 하므로
+        # 공통값 고정 여부와 상관없이 저장/복원 대상에서 제외한다.
+        data = {"master": self.master_path.get(),
+                "common": {k: v.get() for k, v in self.common_vars.items()
+                          if k not in ("G", "J")}}
+        try:
+            with open(self._settings_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            if not silent:
+                self.status.config(text="공통값을 고정했습니다.")
+        except Exception:
+            pass
+
+    def _load_settings(self):
+        try:
+            with open(self._settings_path(), encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        for k, v in data.get("common", {}).items():
+            if k in ("G", "J"):
+                continue
+            if k in self.common_vars:
+                self.common_vars[k].set(v)
+
+
+if __name__ == "__main__":
+    App().mainloop()

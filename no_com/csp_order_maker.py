@@ -1245,6 +1245,14 @@ class PickerDialog(tk.Toplevel):
         ent.pack(side="left", padx=6)
         ent.focus_set()
         self.var.trace_add("write", lambda *_: self._refresh())
+        # 한글 등 조합형 IME로 입력할 때는 글자 조합이 끝나기 전까지
+        # StringVar의 write 트레이스가 안 올라오는 경우가 있어(예: 자모를
+        # 조합하는 중에는 변수가 갱신되지 않다가, 다음 글자로 넘어가야
+        # 비로소 갱신됨) 그동안은 실시간 검색이 안 되는 것처럼 보인다.
+        # 트레이스만으로는 못 잡는 그 구간을 짧은 주기로 직접 확인해서
+        # 메꾼다.
+        self._search_poll_text = self.var.get()
+        self._poll_search_ime()
         self.count = ttk.Label(top, text="")
         self.count.pack(side="left", padx=6)
 
@@ -1323,7 +1331,19 @@ class PickerDialog(tk.Toplevel):
         단순 문자열이든 둘 다 받는다."""
         return v.get("level") if isinstance(v, dict) else v
 
+    def _poll_search_ime(self):
+        """IME 조합 중이라 트레이스가 안 올라온 사이에도, 검색창 텍스트가
+        실제로 바뀌어 있으면 잡아내서 다시 그린다."""
+        if not self.winfo_exists():
+            return
+        text = self.var.get()
+        if text != self._search_poll_text:
+            self._search_poll_text = text
+            self._refresh()
+        self.after(120, self._poll_search_ime)
+
     def _refresh(self):
+        self._search_poll_text = self.var.get()
         kw = self.var.get().strip().lower()
         self.tree.delete(*self.tree.get_children())
         self._iid_to_row = {}

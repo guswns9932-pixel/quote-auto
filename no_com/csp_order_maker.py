@@ -444,91 +444,100 @@ def _sync_fsc_map_file(template_path, new_rows, history_updates):
     return len(new_rows), len(history_updates)
 
 
-def _xlsx_set_cell(row_el, col, row_num, text):
-    """row_el(<row>) 안에서 열 번호 col에 해당하는 <c>를 텍스트로
-    설정한다. 이미 그 칸에 <c>가 있으면(예: 이력이 없음을 나타내는
-    잔여 0 값) 내용만 바꿔치기하고(스타일 등 다른 속성은 그대로 둔다),
-    없으면 열 순서를 지켜 새로 끼워 넣는다."""
-    existing, insert_before = None, None
-    for c_el in list(row_el):
-        letter = "".join(ch for ch in c_el.get("r", "") if ch.isalpha())
-        if not letter:
-            continue
-        c_col = column_index_from_string(letter)
-        if c_col == col:
-            existing = c_el
-            break
-        if c_col > col and insert_before is None:
-            insert_before = c_el
+def _xml_escape_text(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    if existing is not None:
-        for child in list(existing):
-            existing.remove(child)
-        existing.set("t", "inlineStr")
-        is_el = ET.SubElement(existing, f"{{{_NS_MAIN}}}is")
-        t_el = ET.SubElement(is_el, f"{{{_NS_MAIN}}}t")
-        t_el.text = text
-        if text != text.strip():
-            t_el.set(f"{{{_NS_XML}}}space", "preserve")
-        return
+
+def _inline_str_cell_xml(col, row_num, text):
+    ref = "%s%d" % (get_column_letter(col), row_num)
+    space_attr = ' xml:space="preserve"' if text != text.strip() else ""
+    return '<c r="%s" t="inlineStr"><is><t%s>%s</t></is></c>' % (
+        ref, space_attr, _xml_escape_text(text))
+
+
+def _xlsx_set_cell_text(xml, row_num, col, text):
+    """시트 XML 텍스트(문자열) 안에서 특정 행(row_num)의 특정 열(col)
+    칸을 텍스트 값으로 설정한다. 이미 그 칸에 <c>가 있으면(예: 이력이
+    없음을 나타내는 잔여 0 값) 그 <c> 하나만 통째로 교체하고, 없으면
+    열 순서를 지켜 새로 끼워 넣는다. 그 행/그 칸 밖의 XML은 문자 하나
+    바뀌지 않는다."""
+    row_pat = re.compile(r'(<row r="%d"[^>]*>)(.*?)(</row>)' % row_num, re.DOTALL)
+    m = row_pat.search(xml)
+    if not m:
+        return xml
+    open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
 
     ref = "%s%d" % (get_column_letter(col), row_num)
-    c_el = ET.Element(f"{{{_NS_MAIN}}}c", {"r": ref, "t": "inlineStr"})
-    is_el = ET.SubElement(c_el, f"{{{_NS_MAIN}}}is")
-    t_el = ET.SubElement(is_el, f"{{{_NS_MAIN}}}t")
-    t_el.text = text
-    if text != text.strip():
-        t_el.set(f"{{{_NS_XML}}}space", "preserve")
-    if insert_before is not None:
-        row_el.insert(list(row_el).index(insert_before), c_el)
+    new_cell = _inline_str_cell_xml(col, row_num, text)
+    cell_pat = re.compile(r'<c r="%s"(?:[^>]*/>|[^>]*>.*?</c>)' % re.escape(ref), re.DOTALL)
+    cm = cell_pat.search(inner)
+    if cm:
+        new_inner = inner[:cm.start()] + new_cell + inner[cm.end():]
     else:
-        row_el.append(c_el)
+        insert_pos = len(inner)
+        for pm in re.finditer(r'<c r="([A-Z]+)%d"' % row_num, inner):
+            if column_index_from_string(pm.group(1)) > col:
+                insert_pos = pm.start()
+                break
+        new_inner = inner[:insert_pos] + new_cell + inner[insert_pos:]
+
+    return xml[:m.start()] + open_tag + new_inner + close_tag + xml[m.end():]
 
 
 def _xlsx_update_fsc_map_xml(path, sheet_part, start_row, max_col, new_rows, col_map,
                              history_updates):
-    """xlsx zip 안의 시트 XML 텍스트에 새 <row>를 추가하고/또는 기존
-    <row>의 이력 칸을 갱신한다. col_map은 {필드명: 열 번호(1-based)
-    또는 None} — 값이 없는 필드는 그 칸을 아예 비워 둔다."""
-    ET.register_namespace("", _NS_MAIN)
+    """xlsx zip 안의 시트 XML에 새 <row>를 추가하고/또는 기존 <row>의
+    이력 칸을 갱신한다. col_map은 {필드명: 열 번호(1-based) 또는 None}
+    — 값이 없는 필드는 그 칸을 아예 비워 둔다.
+
+    ★ ElementTree로 전체 문서를 파싱해 다시 직렬화하지 않는다 ★ —
+    실제로 그렇게 했다가 파일이 열리지 않는 문제를 겪었다: 이 시트의
+    루트 태그에는 mc:Ignorable="x14ac xr xr2 xr3" 처럼 접두어 이름을
+    "문자열 값"으로 나열하는 속성이 있는데, x14ac/xr2/xr3 네임스페이스는
+    실제 태그·속성에는 전혀 쓰이지 않고 그 문자열 안에서만 언급된다.
+    ElementTree는 이런 문자열까지 이해하지 못해서, 다시 저장할 때 실제로
+    "쓰인" 네임스페이스만 남기고 나머지 선언을 통째로 지워버리며(mc→ns1,
+    xr→ns2처럼 이름도 바뀜), 그 결과 mc:Ignorable 값이 가리키는 접두어와
+    실제 선언이 어긋나 엑셀이 파일을 손상된 것으로 인식했다(첨부해주신
+    파일로 재현·확인함). 그래서 시트 XML을 순수 텍스트로만 다루고, 건드
+    리는 셀/행 밖의 내용은 글자 하나도 바꾸지 않는다.
+    """
     with zipfile.ZipFile(path, "r") as zin:
         data = {name: zin.read(name) for name in zin.namelist()}
 
-    root = ET.fromstring(data[sheet_part])
-    sheet_data = root.find(f"{{{_NS_MAIN}}}sheetData")
-    dim_el = root.find(f"{{{_NS_MAIN}}}dimension")
+    xml = data[sheet_part].decode("utf-8")
 
     # 1) 이미 있는 행에 새 FSC 이력 칸을 채운다.
-    if history_updates:
-        rows_by_num = {int(r.get("r")): r for r in
-                       sheet_data.findall(f"{{{_NS_MAIN}}}row")}
-        for upd in history_updates:
-            row_el = rows_by_num.get(upd["row"])
-            if row_el is None:
-                continue
-            _xlsx_set_cell(row_el, upd["col"], upd["row"], str(upd["fsc"]))
+    for upd in history_updates:
+        xml = _xlsx_set_cell_text(xml, upd["row"], upd["col"], str(upd["fsc"]))
 
     # 2) 새로운 조합을 새 행으로 추가한다.
     row_num = start_row
+    cells_order = sorted(((c, f) for f, c in col_map.items() if c), key=lambda x: x[0])
+    new_row_chunks = []
     for values in new_rows:
         row_num += 1
-        row_el = ET.SubElement(sheet_data, f"{{{_NS_MAIN}}}row",
-                               {"r": str(row_num), "spans": "1:%d" % max_col})
-        cells = sorted(((c, f) for f, c in col_map.items() if c), key=lambda x: x[0])
-        for col, field in cells:
+        cell_xml = []
+        for col, field in cells_order:
             text = str(values.get(field, "") or "")
             if not text:
                 continue
-            _xlsx_set_cell(row_el, col, row_num, text)
+            cell_xml.append(_inline_str_cell_xml(col, row_num, text))
+        new_row_chunks.append('<row r="%d" spans="1:%d">%s</row>' %
+                              (row_num, max_col, "".join(cell_xml)))
 
-    if dim_el is not None:
-        ref = dim_el.get("ref", "")
-        if ":" in ref:
-            start_ref = ref.split(":")[0]
-            dim_el.set("ref", "%s:%s%d" % (start_ref, get_column_letter(max_col),
-                                           max(row_num, start_row)))
+    if new_row_chunks:
+        marker = "</sheetData>"
+        idx = xml.rindex(marker)
+        xml = xml[:idx] + "".join(new_row_chunks) + xml[idx:]
 
-    data[sheet_part] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    xml = re.sub(
+        r'<dimension ref="([^":]+):[^"]+"\s*/>',
+        lambda dm: '<dimension ref="%s:%s%d"/>' % (
+            dm.group(1), get_column_letter(max_col), max(row_num, start_row)),
+        xml, count=1)
+
+    data[sheet_part] = xml.encode("utf-8")
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
         for name, content in data.items():

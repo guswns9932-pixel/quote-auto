@@ -318,16 +318,21 @@ def fsc_recommend(fsc_map, fsc_map_5key, site, device, process, vendor, subproc,
     DEVICE/대공정/설비사/Q-code)이 일치하면 "후보" 추천을 먼저 주고,
     세부공정까지 정확히 일치하면 "확정" 추천으로 격상한다.
 
-    반환: {"fsc": 추천 자재코드, "confirmed": bool} 또는 일치하는 조합이
-    전혀 없으면 None. confirmed=True는 6개 조건 전부 일치, False는
-    세부공정만 다른 5개 조건 일치.
+    반환: {"fsc": 추천 자재코드, "confirmed": bool, "prev": 이전 추천 코드
+    또는 None} 또는 일치하는 조합이 전혀 없으면 None. confirmed=True는
+    6개 조건 전부 일치, False는 세부공정만 다른 5개 조건 일치. prev는
+    같은 조합(6키)의 이력에서 현재 추천 바로 앞에 있던 값 — 동일조건에
+    새 FSC가 등록되면서 추천이 바뀐 경우, 방금까지 추천되던 코드를
+    가리킨다(6키가 정확히 일치할 때만 의미가 있다).
     """
     entry6 = fsc_map.get(_fsc_map_key(site, device, process, vendor, subproc, qcode))
     if entry6 and entry6.get("history"):
-        return {"fsc": entry6["history"][-1], "confirmed": True}
+        history = entry6["history"]
+        prev = history[-2] if len(history) >= 2 else None
+        return {"fsc": history[-1], "confirmed": True, "prev": prev}
     entry5 = fsc_map_5key.get(_fsc_map_key5(site, device, process, vendor, qcode))
     if entry5:
-        return {"fsc": entry5["fsc"], "confirmed": False}
+        return {"fsc": entry5["fsc"], "confirmed": False, "prev": None}
     return None
 
 
@@ -1188,7 +1193,8 @@ class PickerDialog(tk.Toplevel):
 
     def __init__(self, parent, title, columns, widths, rows, key_index=0, initial="",
                  highlight_keys=None, warn_levels=None, recommended_fsc=None,
-                 recommend_confirmed=True, show_recommend_col=False, note=None):
+                 recommend_confirmed=True, previous_fsc=None, show_recommend_col=False,
+                 note=None):
         """
         note : 검색줄 아래에 한 줄로 보여줄 안내 문구(예: 목록이 이미
           어떤 조건으로 걸러져 있는지). 지정하지 않으면 표시하지 않는다.
@@ -1207,6 +1213,10 @@ class PickerDialog(tk.Toplevel):
         recommend_confirmed : recommended_fsc가 세부공정까지 포함한 조건과
           정확히 일치해 나온 값이면 True(확정 ⭐), 세부공정을 제외한
           나머지 조건만 일치해 나온 후보값이면 False(후보 ☆).
+        previous_fsc : 같은 조합(6키)에 새 FSC가 등록되면서 추천이 바뀌기
+          바로 전까지 추천되던 코드. "추천" 열에 △이전으로 표시한다 —
+          방금까지 쓰던 코드를 찾기 쉽게 하기 위함. recommended_fsc가
+          확정(⭐)일 때만 의미가 있다.
         show_recommend_col : "추천" 열 자체를 보여줄지. 지정하지 않으면
           recommended_fsc가 있을 때만 보여준다(호출부가 항상 이 열을
           띄우고 싶으면 True로 명시한다).
@@ -1223,7 +1233,9 @@ class PickerDialog(tk.Toplevel):
         self._warn_levels = {str(k): v for k, v in (warn_levels or {}).items()}
         self._recommended = str(recommended_fsc) if recommended_fsc else None
         self._recommend_confirmed = recommend_confirmed
-        self._show_recommend_col = show_recommend_col or self._recommended is not None
+        self._previous_fsc = str(previous_fsc) if previous_fsc else None
+        self._show_recommend_col = (show_recommend_col or self._recommended is not None
+                                    or self._previous_fsc is not None)
         self._iid_to_row = {}
 
         rows = list(rows)
@@ -1232,16 +1244,19 @@ class PickerDialog(tk.Toplevel):
             key = str(r[key_index])
             if key == self._recommended:
                 return 0 if self._recommend_confirmed else 1
+            if key == self._previous_fsc:
+                return 2
             level = self._level_of(self._warn_levels.get(key))
             if level == "red":
-                return 2
-            if level == "orange":
                 return 3
-            if key in self._highlight_keys:
+            if level == "orange":
                 return 4
-            return 5
+            if key in self._highlight_keys:
+                return 5
+            return 6
 
-        if self._highlight_keys or self._warn_levels or self._recommended:
+        if (self._highlight_keys or self._warn_levels or self._recommended
+                or self._previous_fsc):
             # 안정 정렬이므로 각 우선순위 그룹 내 원래 순서는 유지된다.
             rows.sort(key=_priority)
         self._rows = rows
@@ -1274,7 +1289,8 @@ class PickerDialog(tk.Toplevel):
             if self._note:
                 ttk.Label(hints, text=self._note, foreground="#555555").pack(anchor="w")
             if self._show_recommend_col:
-                ttk.Label(hints, text="⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치",
+                ttk.Label(hints, text="⭐ 확정 = 세부공정까지 일치 / ☆ 후보 = 나머지 조건만 일치"
+                          " / △이전 = 방금까지 추천되던 코드",
                           foreground="#1565C0").pack(anchor="w")
             if self._highlight_keys:
                 ttk.Label(hints, text="초록색 = 이전 주문 이력 있음",
@@ -1370,6 +1386,8 @@ class PickerDialog(tk.Toplevel):
             if self._show_recommend_col:
                 if self._recommended and key == self._recommended:
                     extra_vals.append("⭐ 확정" if self._recommend_confirmed else "☆ 후보")
+                elif self._previous_fsc and key == self._previous_fsc:
+                    extra_vals.append("△이전")
                 else:
                     extra_vals.append("")
             if self._show_review_col:
@@ -2381,6 +2399,7 @@ class App(tk.Tk):
                            warn_levels=warn_levels,
                            recommended_fsc=rec["fsc"] if rec else None,
                            recommend_confirmed=rec["confirmed"] if rec else True,
+                           previous_fsc=rec.get("prev") if rec else None,
                            show_recommend_col=True, note=note)
         self.wait_window(dlg)
         if dlg.result:

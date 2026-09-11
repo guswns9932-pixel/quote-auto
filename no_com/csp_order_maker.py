@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import json
+import shutil
 import zipfile
 import subprocess
 import datetime as dt
@@ -328,6 +329,156 @@ def fsc_recommend(fsc_map, fsc_map_5key, site, device, process, vendor, subproc,
     if entry5:
         return {"fsc": entry5["fsc"], "confirmed": False}
     return None
+
+
+_NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _xlsx_sheet_part(path, sheet_name):
+    """워크북 안에서 시트 이름에 해당하는 실제 zip 내부 경로
+    (예: xl/worksheets/sheet11.xml)를 workbook.xml + 관계 파일로 찾는다.
+    시트를 못 찾으면 None."""
+    with zipfile.ZipFile(path, "r") as z:
+        wb_root = ET.fromstring(z.read("xl/workbook.xml"))
+        rels_root = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+    rid = None
+    for sheet_el in wb_root.iter(f"{{{_NS_MAIN}}}sheet"):
+        if sheet_el.get("name") == sheet_name:
+            rid = sheet_el.get(f"{{{_NS_R}}}id")
+            break
+    if not rid:
+        return None
+    for rel_el in rels_root:
+        if rel_el.get("Id") == rid:
+            target = rel_el.get("Target", "")
+            return target if target.startswith("xl/") else "xl/" + target
+    return None
+
+
+def _append_fsc_map_rows(template_path, rows):
+    """FSC매핑 시트에 없는 새로운 조합을 새 행으로 추가하고 저장한다.
+
+    rows는 {"site","device","process","vendor","subproc","qcode","des","fsc"}
+    키를 가진 dict 목록 — 이미 FSC매핑에 있는 조합인지는 호출부에서
+    걸러서 보낸다(여기서는 그냥 추가만 한다).
+
+    ★ openpyxl로 전체를 다시 읽고 저장하지 않는다 ★ — 실제 FSC매핑
+    시트의 사업장/DEVICE 열은 외부(현재 연결 안 된) 워크북을 참조하는
+    VLOOKUP 수식이고, 그 계산된 값이 수식과 함께 셀 XML에 캐시돼 있다.
+    openpyxl은 수식을 계산하지 않으므로, 이 시트를 openpyxl로 열었다가
+    그대로 다시 저장하기만 해도 그 캐시된 값이 사라져(수식은 남지만
+    "결과 없음" 상태가 됨) 기존 631개 행의 사업장/DEVICE가 전부 빈
+    칸이 되는 것을 실제로 재현해서 확인했다. 그래서 zip 안의 해당
+    시트 XML 텍스트만 직접 파싱해 새 <row>만 끼워 넣고, 그 외의 모든
+    내용(다른 시트, 이 시트의 기존 셀·수식 캐시값, 스타일 등)은 완전히
+    그대로 둔다.
+
+    template_path는 여러 사용자가 공유하는 마스터 파일이라 직접
+    덮어쓴다. 저장 전 같은 폴더의 Backup/ 밑에 타임스탬프를 붙여
+    원본을 복사해두고, 저장 자체가 실패하면(다른 프로그램에서 파일을
+    열어둔 경우 등) 방금 만든 백업을 지우고 예외를 그대로 올린다
+    (원본이 그대로 남아 있으니 백업이 따로 필요 없다).
+
+    반환: 실제로 추가한 행 수(항상 len(rows)와 같다 — 실패 시 예외).
+    """
+    if not rows:
+        return 0
+
+    # 열 위치는 안전한 read_only 모드로만 확인한다(저장하지 않으므로
+    # 기존 내용에 전혀 영향이 없다).
+    wb_ro = load_workbook(template_path, read_only=True, data_only=True)
+    try:
+        if "FSC매핑" not in wb_ro.sheetnames:
+            return 0
+        ws_ro = wb_ro["FSC매핑"]
+        col_map = {
+            "site": _find_header_col(ws_ro, 1, "사업장"),
+            "device": _find_header_col(ws_ro, 1, "DEVICE"),
+            "process": _find_header_col(ws_ro, 1, "대공정"),
+            "vendor": _find_header_col(ws_ro, 1, "설비사"),
+            "subproc": _find_header_col(ws_ro, 1, "세부공정"),
+            "qcode": (_find_header_col(ws_ro, 1, "Q-code")
+                     or _find_header_col(ws_ro, 1, "Qcode")),
+            "des": _find_header_col(ws_ro, 1, "DES"),
+            "fsc": _find_header_col(ws_ro, 1, "FSC"),
+        }
+        max_row = ws_ro.max_row
+        max_col = max(ws_ro.max_column, max(c for c in col_map.values() if c) or 0)
+    finally:
+        wb_ro.close()
+
+    required = ("site", "device", "process", "vendor", "qcode", "fsc")
+    if not all(col_map.get(k) for k in required):
+        return 0
+
+    sheet_part = _xlsx_sheet_part(template_path, "FSC매핑")
+    if not sheet_part:
+        return 0
+
+    backup_dir = os.path.join(os.path.dirname(template_path) or ".", "Backup")
+    os.makedirs(backup_dir, exist_ok=True)
+    base, ext = os.path.splitext(os.path.basename(template_path))
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(backup_dir, "%s.backup_%s%s" % (base, stamp, ext))
+    n = 1
+    while os.path.exists(backup_path):
+        n += 1
+        backup_path = os.path.join(backup_dir, "%s.backup_%s_%d%s" % (base, stamp, n, ext))
+    shutil.copy2(template_path, backup_path)
+
+    try:
+        _xlsx_append_rows_raw(template_path, sheet_part, max_row, max_col, rows, col_map)
+    except Exception:
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
+        raise
+    return len(rows)
+
+
+def _xlsx_append_rows_raw(path, sheet_part, start_row, max_col, rows, col_map):
+    """xlsx zip 안의 시트 XML 텍스트에 새 <row> 엘리먼트를 직접 추가한다.
+    col_map은 {필드명: 열 번호(1-based) 또는 None}. 값이 없는 필드는 그
+    칸을 아예 비워 둔다(그 열이 없거나 이번 행에 값이 없는 경우)."""
+    ET.register_namespace("", _NS_MAIN)
+    with zipfile.ZipFile(path, "r") as zin:
+        data = {name: zin.read(name) for name in zin.namelist()}
+
+    root = ET.fromstring(data[sheet_part])
+    sheet_data = root.find(f"{{{_NS_MAIN}}}sheetData")
+    dim_el = root.find(f"{{{_NS_MAIN}}}dimension")
+
+    row_num = start_row
+    for values in rows:
+        row_num += 1
+        row_el = ET.SubElement(sheet_data, f"{{{_NS_MAIN}}}row",
+                               {"r": str(row_num), "spans": "1:%d" % max_col})
+        cells = sorted(((c, f) for f, c in col_map.items() if c), key=lambda x: x[0])
+        for col, field in cells:
+            text = str(values.get(field, "") or "")
+            if not text:
+                continue
+            c_el = ET.SubElement(row_el, f"{{{_NS_MAIN}}}c",
+                                 {"r": "%s%d" % (get_column_letter(col), row_num),
+                                  "t": "inlineStr"})
+            is_el = ET.SubElement(c_el, f"{{{_NS_MAIN}}}is")
+            t_el = ET.SubElement(is_el, f"{{{_NS_MAIN}}}t")
+            t_el.text = text
+            if text != text.strip():
+                t_el.set(f"{{{_NS_XML}}}space", "preserve")
+
+    if dim_el is not None:
+        ref = dim_el.get("ref", "")
+        if ":" in ref:
+            start_ref = ref.split(":")[0]
+            dim_el.set("ref", "%s:%s%d" % (start_ref, get_column_letter(max_col), row_num))
+
+    data[sheet_part] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, content in data.items():
+            zout.writestr(name, content)
 
 
 # ---------------------------------------------------------------- 마스터 데이터
@@ -1898,7 +2049,7 @@ class App(tk.Tk):
 
     def _current_option_fields(self):
         return {k: self.option_vars[k].get() for k in
-                ("site", "device", "process", "vendor", "subproc", "qcode")}
+                ("site", "device", "process", "vendor", "subproc", "qcode", "des")}
 
     def _on_option_field_changed(self):
         """사업장/DEVICE/대공정/설비사 콤보박스 값이 바뀔 때마다 CIP 알람과
@@ -2511,6 +2662,57 @@ class App(tk.Tk):
         self.status.config(text="생성 완료 (%d행)" % len(self.lines))
         messagebox.showinfo("완료", "%d행이 생성되었습니다.\n전체 로그에 누적 저장되었습니다.\n\n%s"
                              % (len(self.lines), out))
+
+        # 주문 파일 생성은 이미 끝났으니, FSC매핑 동기화는 실패해도
+        # 이번 생성 자체를 실패로 만들지 않는다(안내만 한다).
+        self._sync_new_fsc_map_rows()
+
+    def _sync_new_fsc_map_rows(self):
+        """이번에 생성한 라인들의 조합(사업장/DEVICE/대공정/설비사/세부공정/
+        Q-code) 중 FSC매핑 시트에 아직 없는 새로운 조합이 있으면 새 행으로
+        추가한다. 이미 등록된 조합은 건드리지 않는다 — 그 조합에 이번엔
+        다른 FSC가 쓰였어도 이력을 갱신하지는 않는다(그건 별도 기능)."""
+        if not self.md:
+            return
+        new_rows, seen = [], set()
+        for d in self.lines:
+            opt = d.get("_opt", {})
+            site, device = opt.get("site", "").strip(), opt.get("device", "").strip()
+            process, vendor = opt.get("process", "").strip(), opt.get("vendor", "").strip()
+            subproc, qcode = opt.get("subproc", "").strip(), opt.get("qcode", "").strip()
+            des = opt.get("des", "").strip()
+            fsc = str(d.get("Q", "")).strip()
+            if not (site and device and process and vendor and qcode and fsc):
+                continue
+            key = _fsc_map_key(site, device, process, vendor, subproc, qcode)
+            if key in self.md.fsc_map or key in seen:
+                continue
+            seen.add(key)
+            new_rows.append({"site": site, "device": device, "process": process,
+                             "vendor": vendor, "subproc": subproc, "qcode": qcode,
+                             "des": des, "fsc": fsc})
+
+        if not new_rows:
+            return
+
+        try:
+            added = _append_fsc_map_rows(self.master_path.get(), new_rows)
+        except Exception as e:
+            messagebox.showwarning(
+                "안내",
+                "FSC매핑 시트에 새 조합을 추가하지 못했습니다.\n"
+                "파일이 다른 프로그램(엑셀 등)에서 열려 있지는 않은지 "
+                "확인한 뒤 다시 생성해 보세요.\n\n%s" % e)
+            return
+
+        if added:
+            try:
+                self.md = MasterData(self.master_path.get())
+                self._fill_option_combos()
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "안내", "FSC매핑 시트에 새로운 조합 %d건을 추가했습니다." % added)
 
     # ---------- 설정 저장 / 복원
     def _settings_path(self):

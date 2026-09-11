@@ -355,23 +355,26 @@ def _xlsx_sheet_part(path, sheet_name):
     return None
 
 
-def _append_fsc_map_rows(template_path, rows):
-    """FSC매핑 시트에 없는 새로운 조합을 새 행으로 추가하고 저장한다.
+def _sync_fsc_map_file(template_path, new_rows, history_updates):
+    """FSC매핑 시트를 갱신한다 — 둘 다 한 번의 백업/저장으로 함께 적용한다.
 
-    rows는 {"site","device","process","vendor","subproc","qcode","des","fsc"}
-    키를 가진 dict 목록 — 이미 FSC매핑에 있는 조합인지는 호출부에서
-    걸러서 보낸다(여기서는 그냥 추가만 한다).
+    new_rows        : 새로 추가할 조합 행. {"site","device","process",
+                       "vendor","subproc","qcode","des","fsc"} 키를 가진
+                       dict 목록 — 이미 FSC매핑에 있는 조합인지는 호출부
+                       에서 걸러서 보낸다(여기서는 그냥 추가만 한다).
+    history_updates  : 이미 있는 행에 새 FSC 이력을 추가할 목록.
+                       [{"row": 엑셀 행번호, "col": 열 번호, "fsc": 값}, ...]
 
     ★ openpyxl로 전체를 다시 읽고 저장하지 않는다 ★ — 실제 FSC매핑
     시트의 사업장/DEVICE 열은 외부(현재 연결 안 된) 워크북을 참조하는
     VLOOKUP 수식이고, 그 계산된 값이 수식과 함께 셀 XML에 캐시돼 있다.
     openpyxl은 수식을 계산하지 않으므로, 이 시트를 openpyxl로 열었다가
     그대로 다시 저장하기만 해도 그 캐시된 값이 사라져(수식은 남지만
-    "결과 없음" 상태가 됨) 기존 631개 행의 사업장/DEVICE가 전부 빈
-    칸이 되는 것을 실제로 재현해서 확인했다. 그래서 zip 안의 해당
-    시트 XML 텍스트만 직접 파싱해 새 <row>만 끼워 넣고, 그 외의 모든
-    내용(다른 시트, 이 시트의 기존 셀·수식 캐시값, 스타일 등)은 완전히
-    그대로 둔다.
+    "결과 없음" 상태가 됨) 기존 행들의 사업장/DEVICE가 전부 빈 칸이
+    되는 것을 실제로 재현해서 확인했다. 그래서 zip 안의 해당 시트 XML
+    텍스트만 직접 파싱해 필요한 <row>/<c>만 추가·수정하고, 그 외의
+    모든 내용(다른 시트, 이 시트의 기존 셀·수식 캐시값, 스타일 등)은
+    완전히 그대로 둔다.
 
     template_path는 여러 사용자가 공유하는 마스터 파일이라 직접
     덮어쓴다. 저장 전 같은 폴더의 Backup/ 밑에 타임스탬프를 붙여
@@ -379,17 +382,17 @@ def _append_fsc_map_rows(template_path, rows):
     열어둔 경우 등) 방금 만든 백업을 지우고 예외를 그대로 올린다
     (원본이 그대로 남아 있으니 백업이 따로 필요 없다).
 
-    반환: 실제로 추가한 행 수(항상 len(rows)와 같다 — 실패 시 예외).
+    반환: (추가한 새 행 수, 갱신한 이력 칸 수).
     """
-    if not rows:
-        return 0
+    if not new_rows and not history_updates:
+        return 0, 0
 
     # 열 위치는 안전한 read_only 모드로만 확인한다(저장하지 않으므로
     # 기존 내용에 전혀 영향이 없다).
     wb_ro = load_workbook(template_path, read_only=True, data_only=True)
     try:
         if "FSC매핑" not in wb_ro.sheetnames:
-            return 0
+            return 0, 0
         ws_ro = wb_ro["FSC매핑"]
         col_map = {
             "site": _find_header_col(ws_ro, 1, "사업장"),
@@ -403,17 +406,20 @@ def _append_fsc_map_rows(template_path, rows):
             "fsc": _find_header_col(ws_ro, 1, "FSC"),
         }
         max_row = ws_ro.max_row
-        max_col = max(ws_ro.max_column, max(c for c in col_map.values() if c) or 0)
+        max_col = max(ws_ro.max_column, max(c for c in col_map.values() if c) or 0,
+                      max((u["col"] for u in history_updates), default=0))
     finally:
         wb_ro.close()
 
     required = ("site", "device", "process", "vendor", "qcode", "fsc")
-    if not all(col_map.get(k) for k in required):
-        return 0
+    if new_rows and not all(col_map.get(k) for k in required):
+        new_rows = []
+    if not new_rows and not history_updates:
+        return 0, 0
 
     sheet_part = _xlsx_sheet_part(template_path, "FSC매핑")
     if not sheet_part:
-        return 0
+        return 0, 0
 
     backup_dir = os.path.join(os.path.dirname(template_path) or ".", "Backup")
     os.makedirs(backup_dir, exist_ok=True)
@@ -427,20 +433,63 @@ def _append_fsc_map_rows(template_path, rows):
     shutil.copy2(template_path, backup_path)
 
     try:
-        _xlsx_append_rows_raw(template_path, sheet_part, max_row, max_col, rows, col_map)
+        _xlsx_update_fsc_map_xml(template_path, sheet_part, max_row, max_col,
+                                 new_rows, col_map, history_updates)
     except Exception:
         try:
             os.remove(backup_path)
         except OSError:
             pass
         raise
-    return len(rows)
+    return len(new_rows), len(history_updates)
 
 
-def _xlsx_append_rows_raw(path, sheet_part, start_row, max_col, rows, col_map):
-    """xlsx zip 안의 시트 XML 텍스트에 새 <row> 엘리먼트를 직접 추가한다.
-    col_map은 {필드명: 열 번호(1-based) 또는 None}. 값이 없는 필드는 그
-    칸을 아예 비워 둔다(그 열이 없거나 이번 행에 값이 없는 경우)."""
+def _xlsx_set_cell(row_el, col, row_num, text):
+    """row_el(<row>) 안에서 열 번호 col에 해당하는 <c>를 텍스트로
+    설정한다. 이미 그 칸에 <c>가 있으면(예: 이력이 없음을 나타내는
+    잔여 0 값) 내용만 바꿔치기하고(스타일 등 다른 속성은 그대로 둔다),
+    없으면 열 순서를 지켜 새로 끼워 넣는다."""
+    existing, insert_before = None, None
+    for c_el in list(row_el):
+        letter = "".join(ch for ch in c_el.get("r", "") if ch.isalpha())
+        if not letter:
+            continue
+        c_col = column_index_from_string(letter)
+        if c_col == col:
+            existing = c_el
+            break
+        if c_col > col and insert_before is None:
+            insert_before = c_el
+
+    if existing is not None:
+        for child in list(existing):
+            existing.remove(child)
+        existing.set("t", "inlineStr")
+        is_el = ET.SubElement(existing, f"{{{_NS_MAIN}}}is")
+        t_el = ET.SubElement(is_el, f"{{{_NS_MAIN}}}t")
+        t_el.text = text
+        if text != text.strip():
+            t_el.set(f"{{{_NS_XML}}}space", "preserve")
+        return
+
+    ref = "%s%d" % (get_column_letter(col), row_num)
+    c_el = ET.Element(f"{{{_NS_MAIN}}}c", {"r": ref, "t": "inlineStr"})
+    is_el = ET.SubElement(c_el, f"{{{_NS_MAIN}}}is")
+    t_el = ET.SubElement(is_el, f"{{{_NS_MAIN}}}t")
+    t_el.text = text
+    if text != text.strip():
+        t_el.set(f"{{{_NS_XML}}}space", "preserve")
+    if insert_before is not None:
+        row_el.insert(list(row_el).index(insert_before), c_el)
+    else:
+        row_el.append(c_el)
+
+
+def _xlsx_update_fsc_map_xml(path, sheet_part, start_row, max_col, new_rows, col_map,
+                             history_updates):
+    """xlsx zip 안의 시트 XML 텍스트에 새 <row>를 추가하고/또는 기존
+    <row>의 이력 칸을 갱신한다. col_map은 {필드명: 열 번호(1-based)
+    또는 None} — 값이 없는 필드는 그 칸을 아예 비워 둔다."""
     ET.register_namespace("", _NS_MAIN)
     with zipfile.ZipFile(path, "r") as zin:
         data = {name: zin.read(name) for name in zin.namelist()}
@@ -449,8 +498,19 @@ def _xlsx_append_rows_raw(path, sheet_part, start_row, max_col, rows, col_map):
     sheet_data = root.find(f"{{{_NS_MAIN}}}sheetData")
     dim_el = root.find(f"{{{_NS_MAIN}}}dimension")
 
+    # 1) 이미 있는 행에 새 FSC 이력 칸을 채운다.
+    if history_updates:
+        rows_by_num = {int(r.get("r")): r for r in
+                       sheet_data.findall(f"{{{_NS_MAIN}}}row")}
+        for upd in history_updates:
+            row_el = rows_by_num.get(upd["row"])
+            if row_el is None:
+                continue
+            _xlsx_set_cell(row_el, upd["col"], upd["row"], str(upd["fsc"]))
+
+    # 2) 새로운 조합을 새 행으로 추가한다.
     row_num = start_row
-    for values in rows:
+    for values in new_rows:
         row_num += 1
         row_el = ET.SubElement(sheet_data, f"{{{_NS_MAIN}}}row",
                                {"r": str(row_num), "spans": "1:%d" % max_col})
@@ -459,20 +519,14 @@ def _xlsx_append_rows_raw(path, sheet_part, start_row, max_col, rows, col_map):
             text = str(values.get(field, "") or "")
             if not text:
                 continue
-            c_el = ET.SubElement(row_el, f"{{{_NS_MAIN}}}c",
-                                 {"r": "%s%d" % (get_column_letter(col), row_num),
-                                  "t": "inlineStr"})
-            is_el = ET.SubElement(c_el, f"{{{_NS_MAIN}}}is")
-            t_el = ET.SubElement(is_el, f"{{{_NS_MAIN}}}t")
-            t_el.text = text
-            if text != text.strip():
-                t_el.set(f"{{{_NS_XML}}}space", "preserve")
+            _xlsx_set_cell(row_el, col, row_num, text)
 
     if dim_el is not None:
         ref = dim_el.get("ref", "")
         if ":" in ref:
             start_ref = ref.split(":")[0]
-            dim_el.set("ref", "%s:%s%d" % (start_ref, get_column_letter(max_col), row_num))
+            dim_el.set("ref", "%s:%s%d" % (start_ref, get_column_letter(max_col),
+                                           max(row_num, start_row)))
 
     data[sheet_part] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
 
@@ -2668,13 +2722,20 @@ class App(tk.Tk):
         self._sync_new_fsc_map_rows()
 
     def _sync_new_fsc_map_rows(self):
-        """이번에 생성한 라인들의 조합(사업장/DEVICE/대공정/설비사/세부공정/
-        Q-code) 중 FSC매핑 시트에 아직 없는 새로운 조합이 있으면 새 행으로
-        추가한다. 이미 등록된 조합은 건드리지 않는다 — 그 조합에 이번엔
-        다른 FSC가 쓰였어도 이력을 갱신하지는 않는다(그건 별도 기능)."""
+        """이번에 생성한 라인들을 FSC매핑 시트에 반영한다.
+
+        - 조합(사업장/DEVICE/대공정/설비사/세부공정/Q-code)이 FSC매핑에
+          아직 없으면 새 행으로 추가한다.
+        - 이미 있는 조합인데 이번에 쓰인 FSC가 그 조합의 현재 추천값
+          (이력의 마지막 값)과 다르면, 다음 빈 이력 열에 새 FSC를 이어
+          붙인다(같은 조합이 이번 배치에 여러 번 나오고 그때마다 값이
+          바뀌면 순서대로 이어붙인다). 다음부터는 이 새 값이 추천된다.
+        """
         if not self.md:
             return
-        new_rows, seen = [], set()
+        new_rows, seen_new = [], set()
+        history_updates = []
+        row_offsets, pending_tail = {}, {}
         for d in self.lines:
             opt = d.get("_opt", {})
             site, device = opt.get("site", "").strip(), opt.get("device", "").strip()
@@ -2685,34 +2746,53 @@ class App(tk.Tk):
             if not (site and device and process and vendor and qcode and fsc):
                 continue
             key = _fsc_map_key(site, device, process, vendor, subproc, qcode)
-            if key in self.md.fsc_map or key in seen:
-                continue
-            seen.add(key)
-            new_rows.append({"site": site, "device": device, "process": process,
-                             "vendor": vendor, "subproc": subproc, "qcode": qcode,
-                             "des": des, "fsc": fsc})
+            entry = self.md.fsc_map.get(key)
 
-        if not new_rows:
+            if entry is None:
+                if key in seen_new:
+                    continue
+                seen_new.add(key)
+                new_rows.append({"site": site, "device": device, "process": process,
+                                 "vendor": vendor, "subproc": subproc, "qcode": qcode,
+                                 "des": des, "fsc": fsc})
+                continue
+
+            tail = pending_tail.get(key, entry["history"][-1] if entry["history"] else "")
+            if _norm_plain(fsc) == _norm_plain(tail):
+                continue
+            row_num = entry["row"]
+            offset = row_offsets.get(row_num, len(entry["history"]))
+            history_updates.append({"row": row_num,
+                                    "col": self.md.fsc_map_fsc_col + offset, "fsc": fsc})
+            row_offsets[row_num] = offset + 1
+            pending_tail[key] = fsc
+
+        if not new_rows and not history_updates:
             return
 
         try:
-            added = _append_fsc_map_rows(self.master_path.get(), new_rows)
+            added, updated = _sync_fsc_map_file(
+                self.master_path.get(), new_rows, history_updates)
         except Exception as e:
             messagebox.showwarning(
                 "안내",
-                "FSC매핑 시트에 새 조합을 추가하지 못했습니다.\n"
+                "FSC매핑 시트를 갱신하지 못했습니다.\n"
                 "파일이 다른 프로그램(엑셀 등)에서 열려 있지는 않은지 "
                 "확인한 뒤 다시 생성해 보세요.\n\n%s" % e)
             return
 
-        if added:
+        if added or updated:
             try:
                 self.md = MasterData(self.master_path.get())
                 self._fill_option_combos()
             except Exception:
                 pass
-            messagebox.showinfo(
-                "안내", "FSC매핑 시트에 새로운 조합 %d건을 추가했습니다." % added)
+            parts = []
+            if added:
+                parts.append("새로운 조합 %d건 추가" % added)
+            if updated:
+                parts.append("기존 조합에 새 FSC 이력 %d건 추가" % updated)
+            messagebox.showinfo("안내", "FSC매핑 시트를 갱신했습니다.\n" + ", ".join(parts))
 
     # ---------- 설정 저장 / 복원
     def _settings_path(self):

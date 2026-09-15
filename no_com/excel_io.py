@@ -459,17 +459,56 @@ def _hide_rows(ws: Worksheet, start: int, end: int, filled_count: int) -> None:
         ws.row_dimensions[start + i].hidden = (i >= filled_count)
 
 
-# 생성물에서 삭제하는 내부 참조 시트.
-#
-# veryHidden 은 '숨김'일 뿐 파일에는 그대로 남는다. 엑셀에서 숨기기 해제하거나
-# 압축을 풀면 그대로 읽히므로, 대외비로 나가는 견적서에 전사 단가표가 실려 나간다.
-# 아래 세 시트는 앱이 STEP1 에서 읽어 쓰는 입력 자료일 뿐 생성물에는 불필요하고,
-# 통합양식 ver.1.8 기준으로 어떤 수식·정의된이름·데이터유효성·조건부서식도
-# 이들을 참조하지 않는 것을 확인했다.
-#
-# ※ 'Pump 단가표' / '악세서리 단가표' 는 사양서·입고검수확인서 수식이 VLOOKUP 으로
-#    참조하므로 절대 삭제하면 안 된다(삭제 시 #REF!).
-_DROP_SHEETS = ("품목", "코드매핑", "용량 및 등급")
+def _referenced_sheets(wb, names: List[str]) -> set:
+    """names 시트들이 수식으로 참조하는 시트를 전이적으로 모아 돌려준다.
+
+    통합양식 ver.2.0 기준으로 정의된이름·데이터유효성·조건부서식에는
+    시트 간 참조가 없고 INDIRECT 도 쓰이지 않는 것을 확인했으므로,
+    수식 문자열만 훑으면 의존 관계가 전부 잡힌다. 템플릿이 바뀌어
+    참조가 늘어나도 실행 시점에 다시 계산하므로 목록을 손댈 필요가 없다.
+    """
+    sheet_names = list(wb.sheetnames)
+    patterns = [(nm, re.compile(r"'?" + re.escape(nm) + r"'?!")) for nm in sheet_names]
+
+    def _direct(title: str) -> set:
+        ws = wb[title]
+        found = set()
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if not isinstance(v, str) or not v.startswith("="):
+                    continue
+                for nm, pat in patterns:
+                    if nm != title and nm not in found and pat.search(v):
+                        found.add(nm)
+        return found
+
+    need, stack = set(names), [n for n in names if n in sheet_names]
+    while stack:
+        for dep in _direct(stack.pop()):
+            if dep not in need:
+                need.add(dep)
+                stack.append(dep)
+    return need
+
+
+def _keep_only_sheets(wb, keep: List[str]) -> None:
+    """keep(+ keep 이 수식으로 참조하는 시트)만 남기고 나머지는 '삭제'한다.
+
+    이전에는 veryHidden 으로 숨기기만 했는데, 숨김은 파일 안에 그대로
+    남는 것이라 ① 대외비 견적서에 전사 단가표·코드매핑이 실려 나가고
+    ② 용량도 전혀 줄지 않았다(견적서 1건 994KB 중 실제 문서 내용은 4%).
+    """
+    need = _referenced_sheets(wb, keep)
+    for name in list(wb.sheetnames):
+        if name in need:
+            wb[name].sheet_state = "visible" if name in keep else "veryHidden"
+        elif len(wb.sheetnames) > 1:
+            try:
+                del wb[name]
+            except Exception as e:
+                logger.warning("시트 삭제 실패 (%s): %s", name, e)
+                wb[name].sheet_state = "veryHidden"
 
 
 _VML_RELTYPE = ("http://schemas.openxmlformats.org/officeDocument/2006/"
@@ -590,23 +629,6 @@ def restore_header_footer_images(src_template: str, out_path: str) -> int:
         except OSError:
             pass
         return 0
-
-
-def _drop_internal_sheets(wb) -> None:
-    """대외비 유출·용량 축소를 위해 내부 참조 시트를 삭제한다."""
-    for name in _DROP_SHEETS:
-        if name in wb.sheetnames:
-            try:
-                del wb[name]
-            except Exception as e:
-                logger.warning("시트 삭제 실패 (%s): %s", name, e)
-
-
-def _show_only_sheets(wb, keep: List[str]) -> None:
-    """keep 목록에 없는 시트를 veryHidden으로 설정."""
-    keep_set = set(keep)
-    for name in wb.sheetnames:
-        wb[name].sheet_state = "visible" if name in keep_set else "veryHidden"
 
 
 def _reset_sheet_selections(wb) -> None:
@@ -921,8 +943,7 @@ def _fill_domestic(state: QuoteState,
     _hide_rows(ws_sign, DOM.SIGN_START, DOM.SIGN_END, filled)
 
     # ⑧ 불필요한 시트 숨기기
-    _drop_internal_sheets(wb)
-    _show_only_sheets(wb, [
+    _keep_only_sheets(wb, [
         SheetName.SPEC, SheetName.SIGN_SPEC,
         SheetName.INCOMING, SheetName.REQ_COPY,
     ])
@@ -997,8 +1018,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
 
     wb.calculation.fullCalcOnLoad = True
     _hide_rows(ws, CN.RACK_START, CN.RACK_END, len(out_list))
-    _drop_internal_sheets(wb)
-    _show_only_sheets(wb, [SheetName.QUOTE_CN])
+    _keep_only_sheets(wb, [SheetName.QUOTE_CN])
     _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
@@ -1068,8 +1088,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
 
     wb.calculation.fullCalcOnLoad = True
     _hide_rows(ws, US.RACK_START, US.RACK_END, len(out_list))
-    _drop_internal_sheets(wb)
-    _show_only_sheets(wb, [SheetName.QUOTE_US])
+    _keep_only_sheets(wb, [SheetName.QUOTE_US])
     _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
@@ -1347,8 +1366,7 @@ def _generate_cover_impl(
         ws_data.row_dimensions[2 + i].hidden   = blank
 
     wb.calculation.fullCalcOnLoad = True
-    _drop_internal_sheets(wb)
-    _show_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
+    _keep_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
 
     # 열릴 때 COVER 시트만 활성 탭으로 — 여러 시트가 tabSelected=True 상태로
     # 저장되면 Excel이 '그룹' 모드로 파일을 열어버린다.

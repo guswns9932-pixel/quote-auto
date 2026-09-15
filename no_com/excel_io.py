@@ -459,6 +459,92 @@ def _hide_rows(ws: Worksheet, start: int, end: int, filled_count: int) -> None:
         ws.row_dimensions[start + i].hidden = (i >= filled_count)
 
 
+def _follow_mirror(ws, value: Any, depth: int = 3) -> Any:
+    """'=E4' 처럼 같은 시트의 셀 하나만 가리키는 수식이면 그 셀을 따라간다.
+
+    Pump 단가표의 G/X/AA 열이 이런 미러 수식(G=C, X=E, AA=F)이다.
+    openpyxl 은 수식을 계산하지 않으므로 캐시된 계산값을 쓸 수도 있지만,
+    실측 결과 X열 캐시가 원본과 어긋난 행이 2건 있었다. 엑셀은 파일을 열 때
+    재계산(fullCalcOnLoad)하므로 캐시가 아니라 원본을 따라가야 지금과 같은
+    값이 나온다.
+    """
+    for _ in range(depth):
+        if not (isinstance(value, str) and value.startswith("=")):
+            return value
+        m = re.fullmatch(r"=\$?([A-Z]{1,3})\$?(\d+)", value.strip())
+        if not m:
+            return None
+        value = ws[f"{m.group(1)}{m.group(2)}"].value
+    return None
+
+
+def _vlookup_text(v: Any) -> str:
+    """VLOOKUP 의 비교 대상/결과를 원본 그대로 다룬다.
+
+    s() 처럼 앞뒤 공백을 털면 안 된다 — 단가표에는 모델명 'DD1055L '(뒤 공백),
+    분류 'Gate Valve\\n\\n'(줄바꿈) 같은 값이 실제로 들어 있어서, 털어버리면
+    지금 인쇄되는 사양서 내용과 달라진다.
+    """
+    if v is None:
+        return ""
+    return v if isinstance(v, str) else str(v)
+
+
+def _build_price_lookups(wb) -> Dict[str, Dict[str, Any]]:
+    """사양서·입고검수확인서가 VLOOKUP 으로 참조하던 단가표 조회를 파이썬으로 옮긴다.
+
+    VLOOKUP(.., 0) 과 똑같이 '처음 일치하는 행'만 쓴다(단가표에 같은 키가
+    여러 번 나오는 행이 실제로 있다).
+
+    반환 키 — 각 값은 {조회키: 결과} dict:
+      code_model  Q-Code → 모델명            (사양서!A15)
+      model_price 모델명 → 단가              (사양서!F15)
+      code_spec   Q-Code → 규격(용량外)       (사양서!B15, X열=E열)
+      code_dry    Q-Code → DRY/BOOSTER      (입고검수확인서!D17)
+      code_cap    Q-Code → 규격              (입고검수확인서!D18)
+      code_motor  Q-Code → MOTOR TYPE       (입고검수확인서!D19)
+      spec_class  규격   → 분류              (사양서!A17:A41)
+
+    결과는 워크북에 캐시한다. 일괄 생성은 워크북 하나를 여러 건에 재사용하는데,
+    첫 건에서 값을 굳히고 나면 단가표를 참조하는 수식이 사라져 그 시트가
+    삭제되고, 두 번째 건부터는 조회가 전부 비어 잘못된 견적서가 나간다
+    (실측: 2건째부터 분류가 "1", 모델명이 "미등록 Q-Code" 로 떨어짐).
+    """
+    cached = getattr(wb, "_lot_price_lookups", None)
+    if cached is not None:
+        return cached
+
+    out = {k: {} for k in ("code_model", "model_price", "code_spec",
+                           "code_dry", "code_cap", "code_motor", "spec_class")}
+
+    if "Pump 단가표" in wb.sheetnames:
+        ws = wb["Pump 단가표"]
+        for row in ws.iter_rows():
+            def val(letter: str) -> str:
+                cell = ws[f"{letter}{row[0].row}"]
+                return _vlookup_text(_follow_mirror(ws, cell.value))
+            code, model = val("C"), val("F")
+            if code:
+                out["code_model"].setdefault(code, model)
+                out["code_spec"].setdefault(code, val("E"))        # X열 = E열
+                out["code_dry"].setdefault(code, val("W"))
+                out["code_cap"].setdefault(code, val("Z"))
+                out["code_motor"].setdefault(code, val("AA"))
+            if model:
+                out["model_price"].setdefault(
+                    model, to_float(_follow_mirror(ws, ws[f"K{row[0].row}"].value)))
+
+    if "악세서리 단가표" in wb.sheetnames:
+        ws = wb["악세서리 단가표"]
+        for row in ws.iter_rows(max_col=17, values_only=True):
+            spec = _vlookup_text(row[3])                           # D열 규격
+            if spec:
+                out["spec_class"].setdefault(spec, _vlookup_text(row[16]))   # Q열 분류
+
+    wb._lot_price_lookups = out
+    return out
+
+
 def _referenced_sheets(wb, names: List[str]) -> set:
     """names 시트들이 수식으로 참조하는 시트를 전이적으로 모아 돌려준다.
 
@@ -933,6 +1019,32 @@ def _fill_domestic(state: QuoteState,
     copy_ws.cell(2, 19).value = int(s_val)        # S: 견적단가 (=사양서!F43)
     copy_ws.cell(2, 20).value = int(t_val)        # T: 견적금액 (=S2*H2)
     copy_ws.cell(2, 21).value = int(u_val)        # U: 견적단가(Check)
+
+    # ⑤-b 단가표 VLOOKUP 수식 → 계산값 직접 기입 ─────────────────────────
+    # 사양서·입고검수확인서가 'Pump 단가표'/'악세서리 단가표' 를 VLOOKUP 하는
+    # 수식 31개를 값으로 바꾼다. 이 수식들 때문에 대외비 견적서에 전사 단가표를
+    # 통째로 실어 보내야 했다(빼면 #REF!). 값으로 굳히면 단가표를 지울 수 있다.
+    #
+    # VLOOKUP 결과와 한 글자도 달라지면 안 되므로, 조회는 단가표 원본에서
+    # 그대로 하고 IFERROR 기본값("미등록 Q-Code"/"-"/"0"/"1" 등)도 수식에
+    # 적힌 문자열을 그대로 쓴다.
+    lk = _build_price_lookups(wb)
+    qcode = _vlookup_text(rd.get("F"))                        # 견적의뢰복사본!F2
+    a15 = lk["code_model"].get(qcode) or "미등록 Q-Code"
+    ws_spec["A15"] = a15
+    ws_spec["B15"] = lk["code_spec"].get(qcode) or "-"
+    # F15 는 credit 이 있으면 위에서 이미 p_unit_net 을 기입했다. 없을 때만
+    # 단가표 조회값을 넣는다 — 지금 동작(수식 결과)과 같게 유지하기 위함이다.
+    if not pump_credits:
+        ws_spec[f"{DOM.COL_PRICE}15"] = _won(lk["model_price"].get(a15, 0))
+
+    for i in range(DOM.SPEC_START, DOM.SPEC_END + 1):          # A17:A41
+        spec = _vlookup_text(ws_spec[f"{DOM.COL_SPEC}{i}"].value)
+        ws_spec[f"A{i}"] = lk["spec_class"].get(spec) or "1"
+
+    ws_incoming["D17"] = lk["code_dry"].get(qcode) or "의뢰파일DATA"
+    ws_incoming["D18"] = lk["code_cap"].get(qcode) or "확인필요"
+    ws_incoming["D19"] = lk["code_motor"].get(qcode) or "확인필요"
 
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True

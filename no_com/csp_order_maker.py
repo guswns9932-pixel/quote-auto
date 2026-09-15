@@ -122,33 +122,52 @@ def _h(v):
     return re.sub(r"[\s\-\.\*]+", "", str(v).strip()).upper()
 
 
-def _find_header_col(ws, header_row, label, max_col=30):
+def _header_grid(ws, rows=_CIP_HEADER_SCAN_ROWS, cols=_CIP_MAX_COL):
+    """헤더 영역을 한 번만 읽어 정규화된 2차원 리스트로 돌려준다.
+
+    read_only 워크시트에서 ws.cell(r, c) 임의 접근은 호출마다 XML 스트림을
+    처음부터 다시 훑어 O(n²)이 된다. 헤더 한 칸 찾자고 시트를 수백 번 다시
+    읽던 것이 통합양식 로드 1.28초 중 0.65초를 차지했다(실측). 아래 찾기
+    함수들은 전부 이 격자를 받아서 메모리에서만 뒤진다.
+    """
+    grid = [["" for _ in range(cols)] for _ in range(rows)]
+    for r, row in enumerate(ws.iter_rows(min_row=1, max_row=rows,
+                                         max_col=cols, values_only=True)):
+        if r >= rows:
+            break
+        for c, v in enumerate(row):
+            if c < cols:
+                grid[r][c] = _h(v)
+    return grid
+
+
+def _find_header_col(grid, header_row, label):
     """단일 헤더 행에서 label과 일치하는 열 번호(1-based)를 찾는다.
     (FSC매핑 시트처럼 헤더가 한 줄뿐인 단순한 표에 쓴다 — CIP 시트처럼
     병합된 여러 줄 헤더가 필요하면 _find_cip_col/_find_cip_subheader_col
     을 쓴다.)"""
     target = _h(label)
-    if not target:
+    if not target or header_row > len(grid):
         return None
-    for c in range(1, max_col + 1):
-        if _h(ws.cell(row=header_row, column=c).value) == target:
+    for c, v in enumerate(grid[header_row - 1], start=1):
+        if v == target:
             return c
     return None
 
 
-def _find_cip_col(ws, label):
+def _find_cip_col(grid, label):
     """헤더 행들 중 어느 셀이든 label과 일치하면 그 열 번호(1-based)를 반환."""
     target = _h(label)
     if not target:
         return None
-    for r in range(1, _CIP_HEADER_SCAN_ROWS + 1):
-        for c in range(1, _CIP_MAX_COL + 1):
-            if _h(ws.cell(row=r, column=c).value) == target:
+    for row in grid:
+        for c, v in enumerate(row, start=1):
+            if v == target:
                 return c
     return None
 
 
-def _find_cip_subheader_col(ws, section_label, sub_label):
+def _find_cip_subheader_col(grid, section_label, sub_label):
     """병합된 섹션 헤더(예: 'AS-IS') 아래에 있는 서브헤더(예: 'FSC') 열을 찾는다.
 
     read_only 모드로 열면 병합 셀 정보를 읽을 수 없어(맨 왼쪽 셀에만 값이
@@ -158,19 +177,17 @@ def _find_cip_subheader_col(ws, section_label, sub_label):
     """
     section_target = _h(section_label)
     sub_target = _h(sub_label)
-    for r in range(1, _CIP_HEADER_SCAN_ROWS + 1):
+    for r, row in enumerate(grid):
         filled, last = [], ""
-        for c in range(1, _CIP_MAX_COL + 1):
-            v = _h(ws.cell(row=r, column=c).value)
+        for v in row:
             if v:
                 last = v
             filled.append(last)
         if section_target not in filled:
             continue
-        for r2 in range(r + 1, min(r + 3, _CIP_HEADER_SCAN_ROWS) + 1):
-            for c in range(1, _CIP_MAX_COL + 1):
-                if (filled[c - 1] == section_target
-                        and _h(ws.cell(row=r2, column=c).value) == sub_target):
+        for r2 in range(r + 1, min(r + 3, len(grid) - 1) + 1):
+            for c, v in enumerate(filled, start=1):
+                if v == section_target and grid[r2][c - 1] == sub_target:
                     return c
     return None
 
@@ -399,16 +416,17 @@ def _sync_fsc_map_file(template_path, new_rows, history_updates):
         if "FSC매핑" not in wb_ro.sheetnames:
             return 0, 0
         ws_ro = wb_ro["FSC매핑"]
+        hdr = _header_grid(ws_ro, rows=1, cols=30)
         col_map = {
-            "site": _find_header_col(ws_ro, 1, "사업장"),
-            "device": _find_header_col(ws_ro, 1, "DEVICE"),
-            "process": _find_header_col(ws_ro, 1, "대공정"),
-            "vendor": _find_header_col(ws_ro, 1, "설비사"),
-            "subproc": _find_header_col(ws_ro, 1, "세부공정"),
-            "qcode": (_find_header_col(ws_ro, 1, "Q-code")
-                     or _find_header_col(ws_ro, 1, "Qcode")),
-            "des": _find_header_col(ws_ro, 1, "DES"),
-            "fsc": _find_header_col(ws_ro, 1, "FSC"),
+            "site": _find_header_col(hdr, 1, "사업장"),
+            "device": _find_header_col(hdr, 1, "DEVICE"),
+            "process": _find_header_col(hdr, 1, "대공정"),
+            "vendor": _find_header_col(hdr, 1, "설비사"),
+            "subproc": _find_header_col(hdr, 1, "세부공정"),
+            "qcode": (_find_header_col(hdr, 1, "Q-code")
+                     or _find_header_col(hdr, 1, "Qcode")),
+            "des": _find_header_col(hdr, 1, "DES"),
+            "fsc": _find_header_col(hdr, 1, "FSC"),
         }
         max_row = ws_ro.max_row
         max_col = max(ws_ro.max_column, max(c for c in col_map.values() if c) or 0,
@@ -683,14 +701,15 @@ class MasterData:
                 ws = wb["CIP"]
                 # 열 위치를 하드코딩하지 않고 헤더 텍스트로 찾는다 — 열 순서가
                 # 바뀌어도, 열이 추가/삭제돼도 그대로 동작한다.
-                col_no      = _find_cip_col(ws, "No.") or _find_cip_col(ws, "No")
-                col_site    = _find_cip_col(ws, "사업장")
-                col_device  = _find_cip_col(ws, "DEVICE")
-                col_process = _find_cip_col(ws, "대공정")
-                col_vendor  = _find_cip_col(ws, "설비사")
-                col_subproc = _find_cip_col(ws, "세부공정")
-                col_fsc     = _find_cip_subheader_col(ws, "AS-IS", "FSC")
-                col_tobe    = _find_cip_subheader_col(ws, "TO-BE", "FSC")
+                hdr         = _header_grid(ws)
+                col_no      = _find_cip_col(hdr, "No.") or _find_cip_col(hdr, "No")
+                col_site    = _find_cip_col(hdr, "사업장")
+                col_device  = _find_cip_col(hdr, "DEVICE")
+                col_process = _find_cip_col(hdr, "대공정")
+                col_vendor  = _find_cip_col(hdr, "설비사")
+                col_subproc = _find_cip_col(hdr, "세부공정")
+                col_fsc     = _find_cip_subheader_col(hdr, "AS-IS", "FSC")
+                col_tobe    = _find_cip_subheader_col(hdr, "TO-BE", "FSC")
 
                 cip_rows = []
                 if col_no and col_fsc:
@@ -716,14 +735,15 @@ class MasterData:
 
             if "FSC매핑" in wb.sheetnames:
                 ws = wb["FSC매핑"]
-                col_site    = _find_header_col(ws, 1, "사업장")
-                col_device  = _find_header_col(ws, 1, "DEVICE")
-                col_process = _find_header_col(ws, 1, "대공정")
-                col_vendor  = _find_header_col(ws, 1, "설비사")
-                col_subproc = _find_header_col(ws, 1, "세부공정")
-                col_qcode   = _find_header_col(ws, 1, "Q-code") or _find_header_col(ws, 1, "Qcode")
-                col_des     = _find_header_col(ws, 1, "DES")
-                col_fsc     = _find_header_col(ws, 1, "FSC")
+                hdr         = _header_grid(ws, rows=1, cols=30)
+                col_site    = _find_header_col(hdr, 1, "사업장")
+                col_device  = _find_header_col(hdr, 1, "DEVICE")
+                col_process = _find_header_col(hdr, 1, "대공정")
+                col_vendor  = _find_header_col(hdr, 1, "설비사")
+                col_subproc = _find_header_col(hdr, 1, "세부공정")
+                col_qcode   = _find_header_col(hdr, 1, "Q-code") or _find_header_col(hdr, 1, "Qcode")
+                col_des     = _find_header_col(hdr, 1, "DES")
+                col_fsc     = _find_header_col(hdr, 1, "FSC")
 
                 def _hist_val(v):
                     """FSC 이력 칸이 '진짜' 값인지 판단한다. 일부 행에 남아있는

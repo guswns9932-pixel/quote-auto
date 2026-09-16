@@ -1773,6 +1773,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
         # 첫 파일은 이미 열리면서 재계산이 돌지만, 두 번째 파일부터는 빠진다.
         _apply_calc_manual(app)
         ms_prep = ms_cap = ms_save = 0.0
+        bytes_saved = 0
         try:
             # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처.
             # 이름 조회 + Visible 확인을 한 번만 하고 ws 프록시를 그대로 들고 있는다
@@ -1844,6 +1845,10 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                         # 저장/전송 속도가 낫다(기본값 6 대비 체감 저하 없음).
                         img.save(_dst, "PNG", compress_level=1)
                         png_paths.append(_dst)
+                        try:
+                            bytes_saved += os.path.getsize(_dst)
+                        except OSError:
+                            pass
                     else:
                         logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
                     ms_save += (time.perf_counter() - _t) * 1000
@@ -1861,9 +1866,11 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
             except Exception:
                 pass
             logger.info(
-                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 저장 %.0f, 시트 %d개)",
+                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 저장 %.0f, "
+                "시트 %d개, PNG %.1fMB)",
                 os.path.basename(xlsx_path), ms_open + ms_prep + ms_cap + ms_save,
-                ms_open, ms_prep, ms_cap, ms_save, len(png_paths))
+                ms_open, ms_prep, ms_cap, ms_save, len(png_paths),
+                bytes_saved / 1024 / 1024)
         return png_paths
 
     if xl_app is not None:

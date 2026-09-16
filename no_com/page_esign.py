@@ -9,6 +9,7 @@ import glob
 import logging
 import os
 import shutil
+import tempfile
 import threading
 import traceback
 from typing import List, Optional
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 import app_settings
-from core import ensure_dir, unique_path
+from core import unique_path
 from widgets import PdfView, SignatureItem, PasswordDialog, tint_button
 from page_common import _friendly_error_msg, _natural_key, _ScrollableErrorDialog
 
@@ -320,7 +321,11 @@ class ESignPage(QWidget):
         self.file_list.blockSignals(False)
 
         self._cleanup_tmp()
-        tmp = ensure_dir(os.path.join(base, "_esign_tmp_pdf"))
+        # 캡처 PNG 는 작업이 끝나면 지우는 임시 파일이다. 예전엔 선택한
+        # 엑셀과 같은 폴더(대개 네트워크 드라이브)에 썼는데, 그 탓에 저장도
+        # 읽기(미리보기·PDF 빌드)도 전부 SMB 왕복이었다(실측: 파일당 저장만
+        # 270~330ms). 로컬 임시 폴더로 옮긴다.
+        tmp = tempfile.mkdtemp(prefix="esign_")
         self._tmp_dir = tmp
 
         self._load_progress = QProgressDialog("변환 준비 중...", "취소", 0, len(paths), self)

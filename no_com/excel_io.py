@@ -1587,19 +1587,21 @@ class ExcelCOM:
             logger.info("Excel COM 세션 시작: %.0fms", (time.perf_counter() - _t0) * 1000)
             self._excel.Visible = False
             self._excel.DisplayAlerts = False
-            # 자동화 스위치: 이 세션에서 여는 워크북(이 앱이 만든 파일)은
-            # 전부 fullCalcOnLoad=True 가 저장되어 있어, 스위치 없이 열면
-            # Workbooks.Open 마다 전체 재계산이 돈다 — 파일 수만큼 반복되는
-            # 비용이라 가장 이득이 큰 최적화다. 세션 종료 시 프로세스 자체를
-            # Quit() 하므로 복원할 필요는 없다.
-            try:
-                self._excel.Calculation = -4135     # xlCalculationManual
-                self._excel.EnableEvents = False
-                self._excel.ScreenUpdating = False
-            except Exception:
-                # 일부 Excel 버전/보안 정책에서 속성 설정이 막힐 수 있다.
-                # 최적화일 뿐 필수 기능이 아니므로 실패해도 세션은 계속한다.
-                logger.warning("Excel 자동화 스위치 설정 실패 — 계속 진행", exc_info=True)
+            # 자동화 스위치. 하나씩 따로 건다 — 한 덩어리 try 로 묶었더니
+            # 맨 앞의 Calculation 이 실패하면서 뒤의 둘까지 통째로 건너뛰어,
+            # 실사용 환경에서 스위치가 하나도 안 걸리고 있었다(실측 로그).
+            #
+            # Calculation 은 여기서 걸지 않는다: 워크북이 하나도 열려 있지
+            # 않으면 Excel 이 설정을 거부한다("Application 클래스 중
+            # Calculation 속성을 설정할 수 없습니다"). 첫 워크북을 연 뒤에
+            # _apply_calc_manual() 로 건다.
+            for _name, _value in (("EnableEvents", False), ("ScreenUpdating", False)):
+                try:
+                    setattr(self._excel, _name, _value)
+                except Exception:
+                    # 일부 Excel 버전/보안 정책에서 속성 설정이 막힐 수 있다.
+                    # 최적화일 뿐 필수 기능이 아니므로 실패해도 세션은 계속한다.
+                    logger.warning("Excel %s 설정 실패 — 계속 진행", _name)
         except BaseException:
             # DispatchEx 실패(Excel 미설치·손상) 시 __exit__ 가 호출되지 않으므로
             # 여기서 아파트먼트를 되돌리지 않으면 호출할 때마다 하나씩 누수된다.
@@ -1702,6 +1704,21 @@ def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
         return _process(xl.app)
 
 
+def _apply_calc_manual(app) -> None:
+    """Excel 재계산을 수동으로 돌린다 — 반드시 워크북을 연 뒤에 호출한다.
+
+    이 앱이 만드는 파일은 전부 fullCalcOnLoad=True 로 저장되므로, 수동으로
+    돌려놓지 않으면 Workbooks.Open 마다 전체 재계산이 돈다(파일 수만큼
+    반복되는 비용). 그런데 Application.Calculation 은 워크북이 하나도 열려
+    있지 않으면 설정이 거부되어, 세션 시작 시점에 걸려던 기존 코드는 항상
+    실패하고 있었다.
+    """
+    try:
+        app.Calculation = -4135      # xlCalculationManual
+    except Exception:
+        pass
+
+
 def _print_area_range(ws):
     """PrintArea(R1C1 또는 A1 형식)를 Range 객체로 반환. 없으면 UsedRange."""
     import re
@@ -1752,6 +1769,9 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
         t_open = time.perf_counter()
         wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
         ms_open = (time.perf_counter() - t_open) * 1000
+        # 워크북이 열린 지금이라야 걸 수 있다(위 함수 설명 참고).
+        # 첫 파일은 이미 열리면서 재계산이 돌지만, 두 번째 파일부터는 빠진다.
+        _apply_calc_manual(app)
         ms_prep = ms_cap = ms_save = 0.0
         try:
             # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처.

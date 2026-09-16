@@ -24,6 +24,7 @@ import re
 import shutil
 import stat
 import threading
+import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1580,8 +1581,10 @@ class ExcelCOM:
         if not _ensure_com():
             raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
         pythoncom.CoInitialize()
+        _t0 = time.perf_counter()
         try:
             self._excel = win32.DispatchEx("Excel.Application")
+            logger.info("Excel COM 세션 시작: %.0fms", (time.perf_counter() - _t0) * 1000)
             self._excel.Visible = False
             self._excel.DisplayAlerts = False
             # 자동화 스위치: 이 세션에서 여는 워크북(이 앱이 만든 파일)은
@@ -1743,7 +1746,13 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
     png_paths: List[str] = []
 
     def _process(app) -> List[str]:
+        # 구간별 시간을 로그에 남긴다. 이 경로는 전부 Excel COM 왕복이라
+        # 개발 PC 에서 재현·측정할 수가 없어서, 실제 사용 환경의
+        # quote_app.log 를 보고 어디가 느린지 판단하기 위한 계측이다.
+        t_open = time.perf_counter()
         wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
+        ms_open = (time.perf_counter() - t_open) * 1000
+        ms_prep = ms_cap = ms_save = 0.0
         try:
             # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처.
             # 이름 조회 + Visible 확인을 한 번만 하고 ws 프록시를 그대로 들고 있는다
@@ -1776,6 +1785,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                 png_path = os.path.join(
                     tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
                 try:
+                    _t = time.perf_counter()
                     ws.Activate()
                     # 페이지 나누기 미리보기 → 기본 보기로 전환 후 캡처.
                     # [주의] View 는 창 속성이지만, 시트마다 마지막 저장 시점의
@@ -1789,6 +1799,8 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     except Exception:
                         pass
                     rng = _print_area_range(ws)
+                    ms_prep += (time.perf_counter() - _t) * 1000
+                    _t = time.perf_counter()
                     rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
                     img = ImageGrab.grabclipboard()
                     # ── 클립보드 즉시 해제 ──────────────────────────────────────
@@ -1798,6 +1810,8 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     # Windows가 이 핸들을 해제하려다 액세스 위반 → Excel 전체 종료.
                     # 이미지를 읽은 직후 클립보드를 비워 이 경로를 차단한다.
                     _clear_clipboard()
+                    ms_cap += (time.perf_counter() - _t) * 1000
+                    _t = time.perf_counter()
                     if img is not None:
                         # 이전 세션 잠금 파일이 남아 있으면 삭제 시도 후 저장
                         _dst = png_path
@@ -1812,6 +1826,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                         png_paths.append(_dst)
                     else:
                         logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
+                    ms_save += (time.perf_counter() - _t) * 1000
                 except Exception as e:
                     logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
                 if progress_cb is not None:
@@ -1825,6 +1840,10 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                 wb.Close(False)
             except Exception:
                 pass
+            logger.info(
+                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 저장 %.0f, 시트 %d개)",
+                os.path.basename(xlsx_path), ms_open + ms_prep + ms_cap + ms_save,
+                ms_open, ms_prep, ms_cap, ms_save, len(png_paths))
         return png_paths
 
     if xl_app is not None:

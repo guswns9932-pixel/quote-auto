@@ -316,6 +316,16 @@ class Step5Manager:
         self._set_amt(row, self._get_float(row, 3) * self._get_float(row, 4))
 
     # ── 행 추가 ─────────────────────────────────
+    def _has_spec(self, spec: str) -> bool:
+        """STEP5 에 이미 같은 spec 행이 있는지 확인 (TOTAL/CREDIT 행 제외)."""
+        last = self.step5_table.rowCount() - 1
+        for r in range(last):
+            if self._is_total(r) or self._is_credit(r): continue
+            it = self.step5_table.item(r, 2)
+            if it and it.text().strip() == spec.strip():
+                return True
+        return False
+
     def _add_row(self, category: str, spec: str, qty: float, unit_price: float) -> None:
         """같은 spec 이면 수량 누적, 없으면 TOTAL 행 위에 새 행 삽입."""
         self._ensure_total()
@@ -1235,12 +1245,29 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         f_class = s(rd.get("F")); qty = to_float(rd.get("H"))
         if f_class:
             matches = self.state.items_by_class.get(f_class, [])
+            added, skipped = 0, 0
             for row_data in matches:
                 spec = s(row_data.get("B")); price = float(row_data.get("C", 0))
-                if spec: self._add_row("PUMP", spec, qty, price)
-            if matches:
-                self._log(f"PUMP 자동: 분류={f_class}, {len(matches)}개, 수량={fmt_qty(qty)}")
+                if not spec:
+                    continue
+                # _add_row 는 "같은 spec 이면 수량 누적"이 기본 동작이다(STEP5에서
+                # 사용자가 수동으로 수량을 늘릴 때 쓰라고 만든 기능). 그런데 이
+                # 더블클릭 자동 추가는 같은 의뢰행을 두 번 클릭하거나, 같은
+                # Q-Code(=같은 PUMP 모델)를 쓰는 다른 의뢰행을 확인차 또 클릭해도
+                # 그대로 호출되므로, 누적을 그대로 적용하면 PUMP 수량이 조용히
+                # 배가되어 실제로 견적금액이 2배로 나간 사고가 있었다. 자동
+                # 추가는 이미 있는 spec 이면 새로 더하지 않고 건너뛴다.
+                if self._has_spec(spec):
+                    skipped += 1
+                    continue
+                self._add_row("PUMP", spec, qty, price)
+                added += 1
+            if added:
+                self._log(f"PUMP 자동: 분류={f_class}, {added}개, 수량={fmt_qty(qty)}")
                 self._sync_step4_highlight()
+            if skipped:
+                self._log(f"PUMP 자동 건너뜀: 분류={f_class}, 이미 담긴 품목 {skipped}개 "
+                           f"— 같은 항목을 두 번 담지 않도록 수량 누적을 막았습니다")
         self._log(f"더블클릭 → 공정={self.cb_process.currentText()} / 설비사={self.cb_vendor.currentText()} / 5D={self.ed_code.text()}")
 
     # ══════════════════════════════════════════

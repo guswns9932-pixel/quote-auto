@@ -74,30 +74,57 @@ class _ImageCache:
             self._blobs = {}
 
 
-class _ExcelLoaderThread(QThread):
-    """전자서명 페이지용: Excel 시트를 CopyPicture로 캡처 (ExportAsFixedFormat 미사용 → RenameFile 없음)."""
+class _ExcelWorkerThread(QThread):
+    """전자서명 페이지가 살아 있는 동안 Excel COM 세션을 쥐고 있는 워커.
+
+    페이지가 열리자마자 백그라운드로 Excel 을 띄워 두고, 사용자가 엑셀을
+    고르면 이미 준비된 세션으로 바로 캡처를 시작한다. 예전에는 "엑셀 Load"
+    를 누른 뒤에야 DispatchEx 를 했고, 그 기동에만 실측 1.1~1.2초가
+    진행 다이얼로그 앞에 그대로 얹혀 있었다.
+
+    [왜 스레드를 나누지 않는가]
+    COM 객체는 만들어진 아파트먼트(=스레드)에 묶여 있어서, 다른 스레드에서
+    쓰려면 인터페이스를 마샬링해야 한다. "미리 띄우는 스레드"와 "캡처하는
+    스레드"를 따로 두면 그 마샬링이 필요해지고, 실패하면 보이지 않는
+    EXCEL.EXE 가 남는 골치 아픈 경로가 생긴다. 그래서 이 스레드 하나가
+    세션 생성 → 캡처 → 종료까지 전부 맡고, 작업이 없을 때는 이벤트에서
+    잠들어 있는다.
+
+    캡처는 CopyPicture 로 한다(ExportAsFixedFormat/PrintOut 미사용 →
+    RenameFile 없음).
+    """
+    ready          = Signal(bool)                      # COM 세션 준비 완료(성공 여부)
     progress       = Signal(int, int, str)             # (완료 파일수, 전체 파일수, 현재파일명)
     sheet_progress = Signal(int, int, str, int, int, str)
     # (파일idx, 파일전체, 파일명, 완료시트수, 전체시트수, 시트명) — 파일 안에서의 세부 진행
+    job_done       = Signal(object, object)            # (sheet_pngs, png_blobs)
 
-    def __init__(self, paths: List[str], tmp_dir: str, parent=None) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.paths      = paths
-        self.tmp_dir    = tmp_dir
-        self.sheet_pngs : List[List[str]] = []   # 파일별 PNG 키 리스트
-        # 캡처한 PNG 를 디스크가 아니라 여기에 bytes 로 담는다. 임시 폴더를
-        # 쓰던 시절엔 네트워크 드라이브에 썼다가 곧바로 다시 읽었는데,
-        # 이미지는 이미 메모리에 있으므로 그 왕복이 통째로 불필요했다.
-        # PNG 1장이 30~100KB 수준이라 수백 장이어도 수십 MB 다.
-        self.png_blobs  : dict = {}
-        self._cancel    = False
+        self._job    : Optional[tuple] = None
+        self._wake   = threading.Event()
+        self._lock   = threading.Lock()
+        self._stop   = False
+        self._cancel = False
+
+    def submit(self, paths: List[str], tmp_dir: str) -> None:
+        """캡처할 파일 목록을 워커에 넘긴다(GUI 스레드에서 호출)."""
+        with self._lock:
+            self._job = (list(paths), tmp_dir)
+        self._cancel = False
+        self._wake.set()
 
     def cancel(self) -> None:
         self._cancel = True
 
+    def shutdown(self) -> None:
+        """루프를 깨워 종료시킨다 → run() 의 finally 에서 Excel 이 Quit 된다."""
+        self._stop = True
+        self._cancel = True
+        self._wake.set()
+
     def run(self) -> None:
         import excel_io
-        total = len(self.paths)
         com_ctx = excel_io.ExcelCOM()
         xl_app = None
         try:
@@ -105,34 +132,58 @@ class _ExcelLoaderThread(QThread):
             xl_app = com_ctx.app
         except Exception as e:
             logger.error("Excel COM 초기화 실패: %s", e, exc_info=True)
+        # 실패해도 계속 간다 — excel_capture_sheets_to_pngs 가 xl_app=None 이면
+        # 파일마다 자체 ExcelCOM 을 쓰는 폴백 경로를 갖고 있다(느릴 뿐 동작함).
+        self.ready.emit(xl_app is not None)
 
         try:
-            for i, xlsx in enumerate(self.paths):
-                if self._cancel:
+            while not self._stop:
+                self._wake.wait()
+                self._wake.clear()
+                if self._stop:
                     break
-                self.progress.emit(i, total, os.path.basename(xlsx))
-                fname = os.path.basename(xlsx)
-
-                def _sheet_cb(done, sheet_total, sheet_name, _i=i, _fname=fname):
-                    self.sheet_progress.emit(_i, total, _fname, done, sheet_total, sheet_name)
-
-                try:
-                    pngs = excel_io.excel_capture_sheets_to_pngs(
-                        xlsx, self.tmp_dir, i + 1, xl_app,
-                        progress_cb=_sheet_cb,
-                        should_cancel=lambda: self._cancel,
-                        blob_sink=self.png_blobs)
-                    self.sheet_pngs.append(pngs)
-                except Exception as e:
-                    logger.error("시트 캡처 실패 (%s): %s", xlsx, e, exc_info=True)
-                    self.sheet_pngs.append([])
+                with self._lock:
+                    job, self._job = self._job, None
+                if job is None:
+                    continue
+                self._capture_all(excel_io, xl_app, *job)
         finally:
             try:
                 com_ctx.__exit__(None, None, None)
             except Exception:
                 pass
 
-        self.progress.emit(len(self.sheet_pngs), total, "완료")
+    def _capture_all(self, excel_io, xl_app, paths: List[str], tmp_dir: str) -> None:
+        sheet_pngs: List[List[str]] = []
+        # 캡처한 PNG 를 디스크가 아니라 여기에 bytes 로 담는다. 임시 폴더를
+        # 쓰던 시절엔 네트워크 드라이브에 썼다가 곧바로 다시 읽었는데,
+        # 이미지는 이미 메모리에 있으므로 그 왕복이 통째로 불필요했다.
+        # PNG 1장이 30~100KB 수준이라 수백 장이어도 수십 MB 다.
+        png_blobs: dict = {}
+        total = len(paths)
+        try:
+            for i, xlsx in enumerate(paths):
+                if self._cancel:
+                    break
+                fname = os.path.basename(xlsx)
+                self.progress.emit(i, total, fname)
+
+                def _sheet_cb(done, sheet_total, sheet_name, _i=i, _fname=fname):
+                    self.sheet_progress.emit(_i, total, _fname, done, sheet_total, sheet_name)
+
+                try:
+                    pngs = excel_io.excel_capture_sheets_to_pngs(
+                        xlsx, tmp_dir, i + 1, xl_app,
+                        progress_cb=_sheet_cb,
+                        should_cancel=lambda: self._cancel,
+                        blob_sink=png_blobs)
+                    sheet_pngs.append(pngs)
+                except Exception as e:
+                    logger.error("시트 캡처 실패 (%s): %s", xlsx, e, exc_info=True)
+                    sheet_pngs.append([])
+        finally:
+            self.progress.emit(len(sheet_pngs), total, "완료")
+            self.job_done.emit(sheet_pngs, png_blobs)
 
 
 # ══════════════════════════════════════════════
@@ -167,7 +218,7 @@ class ESignPage(QWidget):
         self._image_cache   : _ImageCache = _ImageCache()
         self._bg_item              = None
         self._shown_key     : Optional[tuple] = None
-        self._loader_thread    : Optional[_ExcelLoaderThread] = None
+        self._worker           : Optional[_ExcelWorkerThread] = None
         self._load_progress    : Optional[QProgressDialog]   = None
         self._pdf_thread        : Optional["_PdfBuildThread"] = None
         self._pdf_progress      : Optional[QProgressDialog]   = None
@@ -175,6 +226,61 @@ class ESignPage(QWidget):
         self._com_init_timer   : Optional[QTimer]            = None
         self._com_init_ok      : bool                        = False
         self._build_ui()
+        # 페이지가 뜨자마자 Excel 을 백그라운드로 띄워 둔다. 사용자가 서명을
+        # 고르고 엑셀을 선택하는 동안 기동이 끝나므로, "엑셀 Load" 앞에
+        # 붙던 1초 남짓의 COM 기동이 체감에서 사라진다.
+        self._start_worker()
+
+    # ── Excel 워커 (COM 세션 예열) ─────────────────────────────
+    def _start_worker(self) -> None:
+        """Excel COM 세션을 쥘 워커를 띄운다. 이미 살아 있으면 아무것도 안 한다."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._com_init_ok = False
+        w = _ExcelWorkerThread(self)
+        w.ready.connect(self._on_com_ready)
+        w.progress.connect(self._on_load_progress)
+        w.sheet_progress.connect(self._on_sheet_progress)
+        w.job_done.connect(self._on_job_done)
+        self._worker = w
+        # DispatchEx 가 무한 블로킹하는 경우(Office 활성화 창 대기 등)를 잡는다.
+        # 예열 중에는 사용자가 기다리고 있는 게 아니므로 대화창은 띄우지 않고,
+        # 실제로 "엑셀 Load" 를 눌렀을 때만 알린다.
+        self._arm_com_timer()
+        w.start()
+
+    def _arm_com_timer(self) -> None:
+        if self._com_init_timer is None:
+            self._com_init_timer = QTimer(self)
+            self._com_init_timer.setSingleShot(True)
+            self._com_init_timer.timeout.connect(self._on_com_init_timeout)
+        self._com_init_timer.start(30_000)
+
+    def _stop_com_timer(self) -> None:
+        if self._com_init_timer is not None:
+            self._com_init_timer.stop()
+
+    def _on_com_ready(self, ok: bool) -> None:
+        self._com_init_ok = True
+        self._stop_com_timer()
+        if not ok:
+            # 세션 없이도 파일마다 자체 COM 으로 동작은 한다 — 느릴 뿐이다.
+            logger.warning("Excel COM 예열 실패 — 파일별 세션으로 동작합니다")
+
+    def shutdown(self) -> None:
+        """창이 닫히거나 페이지가 교체될 때 Excel 세션을 정리한다.
+
+        이걸 빠뜨리면 보이지 않는 EXCEL.EXE 가 남아 파일 잠금을 쥔다.
+        """
+        self._stop_com_timer()
+        w, self._worker = self._worker, None
+        if w is None:
+            return
+        w.shutdown()
+        if not w.wait(10_000):
+            logger.warning("Excel 워커가 10초 내에 종료되지 않음 — 강제 종료")
+            w.terminate()
+            w.wait(3000)
 
     @staticmethod
     def _action_btn(label: str, slot) -> QPushButton:
@@ -311,7 +417,9 @@ class ESignPage(QWidget):
         if not excel_io._ensure_com():
             QMessageBox.critical(self, "오류", "Excel COM이 없습니다.")
             return
-        if self._loader_thread and self._loader_thread.isRunning():
+        # 워커는 페이지가 열려 있는 동안 계속 살아 있으므로 isRunning() 으로는
+        # 로딩 중인지 알 수 없다 — 진행 다이얼로그의 존재로 판단한다.
+        if self._load_progress is not None:
             QMessageBox.information(self, "안내", "이미 로딩 중입니다.")
             return
         start = app_settings.get_dir(app_settings.Key.ESIGN_DIR)
@@ -360,35 +468,31 @@ class ESignPage(QWidget):
         self._load_progress.setMinimumDuration(0)
         self._load_progress.setValue(0)
 
-        self._loader_thread = _ExcelLoaderThread(paths, tmp, self)
-        self._loader_thread.progress.connect(self._on_load_progress)
-        self._loader_thread.sheet_progress.connect(self._on_sheet_progress)
-        self._loader_thread.finished.connect(self._on_load_finished)
-        self._load_progress.canceled.connect(self._loader_thread.cancel)
+        # 워커는 페이지가 열릴 때 이미 떠 있다. 예열이 실패해 스레드가 죽어
+        # 있으면(초기화 타임아웃 등) 여기서 한 번 더 살려 본다.
+        self._start_worker()
+        self._load_progress.canceled.connect(self._worker.cancel)
 
-        # COM DispatchEx 무한 블로킹 방지: 30초 내 첫 progress 없으면 강제 종료
+        # 예열이 아직 안 끝났거나 첫 파일 열기가 무한 블로킹하는 경우를 잡는다.
+        # 이번엔 "첫 progress" 를 기준으로 다시 감시한다.
         self._com_init_ok = False
-        self._com_init_timer = QTimer(self)
-        self._com_init_timer.setSingleShot(True)
-        self._com_init_timer.timeout.connect(self._on_com_init_timeout)
-        self._com_init_timer.start(30_000)
+        self._arm_com_timer()
 
         self.btn_code.setEnabled(False)
         self.btn_excel.setEnabled(False)
         self.btn_save.setEnabled(False)
-        self._loader_thread.start()
+        self._worker.submit(paths, tmp)
 
     def _on_load_progress(self, done: int, total: int, fname: str) -> None:
         if self._load_progress is None:
             return
-        # COM init 성공 확인 → 타임아웃 타이머 해제
+        # 첫 progress 도착 → 타임아웃 타이머 해제
         if not self._com_init_ok:
             self._com_init_ok = True
-            if self._com_init_timer:
-                self._com_init_timer.stop()
+            self._stop_com_timer()
         self._load_progress.setValue(done)
         # setValue(max) 가 QProgressDialog 자동 닫기(hide)를 트리거하고,
-        # hide() 중 Qt 이벤트가 재진입해 _on_load_finished 가 동기 실행될 수 있다.
+        # hide() 중 Qt 이벤트가 재진입해 _on_job_done 이 동기 실행될 수 있다.
         # 그 경우 _load_progress 가 None 으로 바뀌므로 재확인 후 접근한다.
         if self._load_progress is None:
             return
@@ -407,16 +511,24 @@ class ESignPage(QWidget):
             f"변환 중 ({file_idx + 1}/{file_total}): {fname} — 시트 {sheet_done}/{sheet_total}: {sheet_name}")
 
     def _on_com_init_timeout(self) -> None:
-        """Excel COM DispatchEx가 30초 내에 응답하지 않으면 스레드를 강제 종료한다."""
+        """Excel COM 이 30초 내에 응답하지 않으면 워커를 강제 종료한다.
+
+        예열 중(사용자가 아직 아무것도 안 누른 상태)이라면 조용히 워커만
+        정리한다 — 기다리는 사람이 없는데 대화창을 띄울 이유가 없고, 실제로
+        엑셀을 로드할 때 다시 시도된다. 로드 중이었다면 안내까지 띄운다.
+        """
         if self._com_init_ok:
             return
-        logger.error("Excel COM 초기화 30초 타임아웃 — 스레드 강제 종료")
-        if self._loader_thread and self._loader_thread.isRunning():
-            self._loader_thread.terminate()
-            self._loader_thread.wait(3000)
-        if self._load_progress:
-            self._load_progress.close()
-            self._load_progress = None
+        waiting = self._load_progress is not None
+        logger.error("Excel COM 초기화 30초 타임아웃 — 워커 강제 종료 (로드 중=%s)", waiting)
+        w, self._worker = self._worker, None
+        if w is not None and w.isRunning():
+            w.terminate()
+            w.wait(3000)
+        if not waiting:
+            return
+        self._load_progress.close()
+        self._load_progress = None
         self.btn_code.setEnabled(True)
         self.btn_excel.setEnabled(True)
         self.btn_save.setEnabled(True)
@@ -430,19 +542,18 @@ class ESignPage(QWidget):
             "Excel을 직접 열어 완료한 뒤 다시 시도하세요."
         )
 
-    def _on_load_finished(self) -> None:
-        if self._com_init_timer:
-            self._com_init_timer.stop()
+    def _on_job_done(self, sheet_pngs: list, png_blobs: dict) -> None:
+        self._stop_com_timer()
         if self._load_progress:
             self._load_progress.close()
             self._load_progress = None
         self.btn_code.setEnabled(True)
         self.btn_excel.setEnabled(True)
         self.btn_save.setEnabled(True)
-        self._sheet_pngs = self._loader_thread.sheet_pngs
+        self._sheet_pngs = sheet_pngs
         # 캡처 스레드가 메모리에 담아 둔 PNG bytes 를 캐시에 넘긴다.
         # 이후 _render 와 PDF 빌드는 전부 이 캐시만 보고 디스크를 건드리지 않는다.
-        self._image_cache.set_blobs(self._loader_thread.png_blobs)
+        self._image_cache.set_blobs(png_blobs)
         while len(self._sheet_pngs) < len(self._files):
             self._sheet_pngs.append([])
         self.btn_excel.setEnabled(True)

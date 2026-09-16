@@ -471,7 +471,19 @@ class _PageWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         app_settings.save_geometry(self._geo_key, self)
+        self._shutdown_page()
         super().closeEvent(event)
+
+    def _shutdown_page(self) -> None:
+        """페이지가 백그라운드 자원(전자서명의 Excel COM 세션 등)을 쥐고 있으면
+        정리한다. 빠뜨리면 보이지 않는 EXCEL.EXE 가 남아 파일 잠금을 쥔다."""
+        fn = getattr(self._page, "shutdown", None)
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception:
+            logger.warning("페이지 정리 실패", exc_info=True)
 
     def _reset(self) -> None:
         try:
@@ -481,6 +493,9 @@ class _PageWindow(QMainWindow):
                 import importlib
                 mod = importlib.import_module(self._mod_name)
                 cls = getattr(mod, self._cls_name)
+                # 새 페이지를 만들기 전에 옛 페이지의 자원을 먼저 반납한다
+                # (전자서명은 Excel 세션을 쥐고 있어 두 개가 겹치면 안 된다).
+                self._shutdown_page()
                 new_page = cls()
                 self.setCentralWidget(new_page)
                 self._page.deleteLater()
@@ -544,6 +559,16 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         app_settings.save_geometry("MainWindow", self)
+        # 자식 창을 명시적으로 닫아 closeEvent 를 태운다. 부모가 닫힐 때
+        # Qt 는 자식 창을 숨기기만 해서, 그냥 두면 _PageWindow 의 정리
+        # (전자서명의 Excel 세션 종료)가 실행되지 않는다.
+        for attr in ("_quote_win", "_esign_win"):
+            win = getattr(self, attr, None)
+            if win is not None:
+                try:
+                    win.close()
+                except Exception:
+                    logger.warning("%s 닫기 실패", attr, exc_info=True)
         super().closeEvent(event)
 
 

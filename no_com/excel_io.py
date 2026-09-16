@@ -1572,7 +1572,9 @@ def export_cover_data_sheet(*args, **kwargs) -> str:
 class ExcelCOM:
     """
     Excel COM 세션 컨텍스트 매니저.
-    _ExcelLoaderThread(전자서명 시트 캡처)가 공유 Application 객체로 사용한다.
+    _ExcelWorkerThread(전자서명 시트 캡처)가 공유 Application 객체로 사용한다.
+    그 워커는 페이지가 열려 있는 내내 이 세션을 쥐고 있다 — COM 객체는
+    만들어진 스레드에서만 안전하므로 생성·사용·종료가 모두 한 스레드다.
     """
 
     def __init__(self) -> None:

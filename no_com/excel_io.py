@@ -17,6 +17,7 @@ Excel 입출력 전담 모듈.
 
 from __future__ import annotations
 
+import io
 import logging
 import math
 import os
@@ -1731,7 +1732,7 @@ def _print_area_range(ws):
 
 def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                                   xl_app=None, progress_cb=None,
-                                  should_cancel=None) -> List[str]:
+                                  should_cancel=None, blob_sink=None) -> List[str]:
     """
     xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
     ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
@@ -1740,7 +1741,13 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
     progress_cb  : (완료 시트수, 전체 시트수, 시트명) 콜백. 시트 캡처가 끝날 때마다 호출.
     should_cancel: 인자 없이 bool 반환하는 콜백. True 면 남은 시트를 건너뛰고 지금까지
                    캡처한 것만 반환한다 (파일 단위보다 촘촘한 취소 체크).
-    반환: 저장된 PNG 경로 리스트 (순서 = ESIGN_TARGET 순서)
+    blob_sink    : dict 를 넘기면 PNG 를 파일로 쓰지 않고 이 dict 에 bytes 로 담는다
+                   ({키: PNG bytes}). 반환 리스트에는 경로 대신 그 키가 들어간다.
+                   캡처 결과는 이미 메모리(PIL Image)에 있는데 굳이 네트워크
+                   드라이브에 썼다가 다시 읽을 이유가 없어서 만든 경로다
+                   — 실측상 저장 구간이 전체의 20%(장당 ~90ms)였다.
+                   None 이면 기존처럼 tmp_dir 에 파일로 저장한다.
+    반환: PNG 경로(또는 blob_sink 키) 리스트 (순서 = ESIGN_TARGET 순서)
     """
     try:
         from PIL import ImageGrab
@@ -1819,21 +1826,29 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
                     ms_cap += (time.perf_counter() - _t) * 1000
                     _t = time.perf_counter()
                     if img is not None:
-                        # 이전 세션 잠금 파일이 남아 있으면 삭제 시도 후 저장
-                        _dst = png_path
-                        if os.path.exists(_dst):
+                        # compress_level=1: 잠깐 쓰고 버릴 이미지라 압축률보다
+                        # 인코딩 속도가 낫다(기본값 6 대비 체감 저하 없음).
+                        if blob_sink is not None:
+                            key = f"mem://{os.path.basename(png_path)}"
+                            buf = io.BytesIO()
+                            img.save(buf, "PNG", compress_level=1)
+                            blob_sink[key] = buf.getvalue()
+                            png_paths.append(key)
+                            bytes_saved += len(blob_sink[key])
+                        else:
+                            # 이전 세션 잠금 파일이 남아 있으면 삭제 시도 후 저장
+                            _dst = png_path
+                            if os.path.exists(_dst):
+                                try:
+                                    os.remove(_dst)
+                                except OSError:
+                                    _dst = unique_path(_dst)
+                            img.save(_dst, "PNG", compress_level=1)
+                            png_paths.append(_dst)
                             try:
-                                os.remove(_dst)
+                                bytes_saved += os.path.getsize(_dst)
                             except OSError:
-                                _dst = unique_path(_dst)
-                        # compress_level=1: 잠깐 쓰고 지울 임시 파일이라 압축률보다
-                        # 저장/전송 속도가 낫다(기본값 6 대비 체감 저하 없음).
-                        img.save(_dst, "PNG", compress_level=1)
-                        png_paths.append(_dst)
-                        try:
-                            bytes_saved += os.path.getsize(_dst)
-                        except OSError:
-                            pass
+                                pass
                     else:
                         logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
                     ms_save += (time.perf_counter() - _t) * 1000
@@ -1851,7 +1866,7 @@ def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
             except Exception:
                 pass
             logger.info(
-                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 저장 %.0f, "
+                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 인코딩 %.0f, "
                 "시트 %d개, PNG %.1fMB)",
                 os.path.basename(xlsx_path), ms_open + ms_prep + ms_cap + ms_save,
                 ms_open, ms_prep, ms_cap, ms_save, len(png_paths),

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 import app_settings
-from core import ensure_dir, unique_path
+from core import unique_path
 from widgets import PdfView, SignatureItem, PasswordDialog, tint_button
 from page_common import _friendly_error_msg, _natural_key, _ScrollableErrorDialog
 
@@ -34,30 +34,44 @@ logger = logging.getLogger("QuoteApp")
 class _ImageCache:
     """캡처한 PNG 를 QImage 로 캐싱한다.
 
-    페이지 이동(_render)과 PDF 빌드(_PdfBuildThread)가 같은 파일을 각자
-    디스크에서 다시 읽던 것을 없애기 위한 공유 캐시. PDF 빌드는 백그라운드
+    페이지 이동(_render)과 PDF 빌드(_PdfBuildThread)가 같은 이미지를 각자
+    다시 디코드하던 것을 없애기 위한 공유 캐시. PDF 빌드는 백그라운드
     스레드에서 이 캐시를 읽고(캐시 미스 시) 채워 넣으므로 락으로 보호한다.
     QImage 자체는 Qt 문서상 어느 스레드에서 만들고 다뤄도 안전하다
     (QPixmap 과 달리 GUI 스레드 전용이 아니다).
+
+    키는 보통 캡처 스레드가 메모리에 담아 둔 PNG bytes 의 키(mem://…)다.
+    blobs 에 없는 키는 파일 경로로 보고 디스크에서 읽는다.
     """
 
     def __init__(self) -> None:
         self._data: dict = {}
+        self._blobs: dict = {}
         self._lock = threading.Lock()
 
-    def get(self, path: str) -> QImage:
+    def set_blobs(self, blobs: dict) -> None:
         with self._lock:
-            img = self._data.get(path)
+            self._blobs = blobs or {}
+
+    def get(self, key: str) -> QImage:
+        with self._lock:
+            img = self._data.get(key)
+            blob = None if img is not None else self._blobs.get(key)
         if img is not None:
             return img
-        img = QImage(path)
+        if blob is not None:
+            img = QImage()
+            img.loadFromData(QByteArray(blob), "PNG")
+        else:
+            img = QImage(key)
         with self._lock:
-            self._data.setdefault(path, img)
-            return self._data[path]
+            self._data.setdefault(key, img)
+            return self._data[key]
 
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+            self._blobs = {}
 
 
 class _ExcelLoaderThread(QThread):
@@ -70,7 +84,12 @@ class _ExcelLoaderThread(QThread):
         super().__init__(parent)
         self.paths      = paths
         self.tmp_dir    = tmp_dir
-        self.sheet_pngs : List[List[str]] = []   # 파일별 PNG 경로 리스트
+        self.sheet_pngs : List[List[str]] = []   # 파일별 PNG 키 리스트
+        # 캡처한 PNG 를 디스크가 아니라 여기에 bytes 로 담는다. 임시 폴더를
+        # 쓰던 시절엔 네트워크 드라이브에 썼다가 곧바로 다시 읽었는데,
+        # 이미지는 이미 메모리에 있으므로 그 왕복이 통째로 불필요했다.
+        # PNG 1장이 30~100KB 수준이라 수백 장이어도 수십 MB 다.
+        self.png_blobs  : dict = {}
         self._cancel    = False
 
     def cancel(self) -> None:
@@ -101,7 +120,8 @@ class _ExcelLoaderThread(QThread):
                     pngs = excel_io.excel_capture_sheets_to_pngs(
                         xlsx, self.tmp_dir, i + 1, xl_app,
                         progress_cb=_sheet_cb,
-                        should_cancel=lambda: self._cancel)
+                        should_cancel=lambda: self._cancel,
+                        blob_sink=self.png_blobs)
                     self.sheet_pngs.append(pngs)
                 except Exception as e:
                     logger.error("시트 캡처 실패 (%s): %s", xlsx, e, exc_info=True)
@@ -320,10 +340,19 @@ class ESignPage(QWidget):
         self.file_list.blockSignals(False)
 
         self._cleanup_tmp()
-        # 캡처 PNG 는 선택한 엑셀과 같은 폴더에 만든다. 로컬 디스크 쓰기가
-        # 막혀 있는 환경이라 임시 폴더를 로컬로 옮길 수 없다.
-        tmp = ensure_dir(os.path.join(base, "_esign_tmp_pdf"))
-        self._tmp_dir = tmp
+        # 캡처 PNG 는 이제 메모리에만 담으므로 임시 폴더를 만들지 않는다.
+        # (예전엔 로컬 디스크 쓰기가 막힌 환경이라 선택한 엑셀 옆에 만들었는데,
+        #  그 네트워크 쓰기가 캡처 시간의 20% 였다.) 경로는 캡처 키 이름을
+        # 만들 때만 쓰이고 실제로 생성되지는 않는다.
+        tmp = os.path.join(base, "_esign_tmp_pdf")
+        self._tmp_dir = None
+        # 구버전이 남긴 임시 폴더가 있으면 정리한다(이제 다시 만들지 않으므로
+        # 여기서 지워 주지 않으면 네트워크 드라이브에 계속 남는다).
+        if os.path.isdir(tmp):
+            try:
+                shutil.rmtree(tmp)
+            except Exception as e:
+                logger.warning("구버전 tmp 폴더 삭제 실패: %s", e)
 
         self._load_progress = QProgressDialog("변환 준비 중...", "취소", 0, len(paths), self)
         self._load_progress.setWindowTitle("엑셀 → PDF 변환")
@@ -411,6 +440,9 @@ class ESignPage(QWidget):
         self.btn_excel.setEnabled(True)
         self.btn_save.setEnabled(True)
         self._sheet_pngs = self._loader_thread.sheet_pngs
+        # 캡처 스레드가 메모리에 담아 둔 PNG bytes 를 캐시에 넘긴다.
+        # 이후 _render 와 PDF 빌드는 전부 이 캐시만 보고 디스크를 건드리지 않는다.
+        self._image_cache.set_blobs(self._loader_thread.png_blobs)
         while len(self._sheet_pngs) < len(self._files):
             self._sheet_pngs.append([])
         self.btn_excel.setEnabled(True)
@@ -628,8 +660,8 @@ class _PdfBuildThread(QThread):
 
         for done_i, (fi, pno, png_path, overlays) in enumerate(self.plan):
             self.progress.emit(done_i, total)
-            if not os.path.exists(png_path):
-                continue
+            # 캡처 결과는 메모리 캐시(mem:// 키)에 있으므로 존재 확인은
+            # 디코드 결과로 한다 — 경로가 아니라 키라 os.path.exists 는 못 쓴다.
             base = self.image_cache.get(png_path)
             if base.isNull():
                 continue

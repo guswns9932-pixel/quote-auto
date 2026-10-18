@@ -370,6 +370,8 @@ def append_code_map_rows(
 
     backup_dir = ensure_dir(os.path.join(os.path.dirname(template_path) or ".", "Backup"))
     base, ext = os.path.splitext(os.path.basename(template_path))
+    if not base.startswith("대외비_"):
+        base = f"대외비_{base}"
     backup_path = unique_path(
         os.path.join(backup_dir, f"{base}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
     )

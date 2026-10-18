@@ -36,7 +36,9 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 APP_TITLE = "CSP 주문접수 업로드 파일 생성기  (alpha v0.2)"
 TEMPLATE_NAME = "CSP_주문접수_업로드_통합양식.xlsx"
 SETTINGS_NAME = "csp_order_maker_settings.json"
-LOG_NAME = "CSP_주문접수_전체로그.xlsx"
+LOG_NAME = "대외비_CSP_주문접수_전체로그.xlsx"
+# 대외비_ 접두 도입 전에 만들어진 로그 — 단가 이력을 이어 읽기 위해 계속 후보에 넣는다.
+LEGACY_LOG_NAME = "CSP_주문접수_전체로그.xlsx"
 UPLOAD_DIR_NAME = "CSP 주문접수 UPLOAD"
 
 # ---------------------------------------------------------------- 양식 정의
@@ -447,6 +449,8 @@ def _sync_fsc_map_file(template_path, new_rows, history_updates):
     backup_dir = os.path.join(os.path.dirname(template_path) or ".", "Backup")
     os.makedirs(backup_dir, exist_ok=True)
     base, ext = os.path.splitext(os.path.basename(template_path))
+    if not base.startswith("대외비_"):
+        base = "대외비_" + base
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(backup_dir, "%s.backup_%s%s" % (base, stamp, ext))
     n = 1
@@ -1143,9 +1147,12 @@ def safe_append_log(rows, source_name):
 def _log_file_candidates():
     """upload_dir 안의 로그 파일들을 모두 찾는다 (쓰기 충돌로 번호가 붙어
     따로 생성된 파일들 포함)."""
-    base, ext = os.path.splitext(LOG_NAME)
     folder = upload_dir()
-    pattern = re.compile(r"^%s(_\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    names = []
+    for log_name in (LOG_NAME, LEGACY_LOG_NAME):
+        base, ext = os.path.splitext(log_name)
+        names.append(r"%s(_\d+)?%s" % (re.escape(base), re.escape(ext)))
+    pattern = re.compile(r"^(?:%s)$" % "|".join(names))
     return [os.path.join(folder, name) for name in os.listdir(folder)
             if pattern.match(name)]
 
@@ -2757,11 +2764,11 @@ class App(tk.Tk):
 
         out_dir = upload_dir()
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = os.path.join(out_dir, "CSP_주문접수_%s.xlsx" % stamp)
+        out = os.path.join(out_dir, "대외비_CSP_주문접수_%s.xlsx" % stamp)
         n = 1
         while os.path.exists(out):        # 같은 초에 두 번 생성되는 경우 대비
             n += 1
-            out = os.path.join(out_dir, "CSP_주문접수_%s_%d.xlsx" % (stamp, n))
+            out = os.path.join(out_dir, "대외비_CSP_주문접수_%s_%d.xlsx" % (stamp, n))
         rows = self._build_rows(common)
         try:
             build_output(self.master_path.get(), rows, out)

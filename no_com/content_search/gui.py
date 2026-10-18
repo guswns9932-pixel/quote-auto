@@ -731,6 +731,7 @@ class ContentSearchApp(tk.Tk):
         save_path = filedialog.asksaveasfilename(
             title="검색 결과 CSV 저장",
             defaultextension=".csv",
+            initialfile="대외비_키워드검색결과.csv",
             filetypes=[("CSV 파일", "*.csv")]
         )
         if not save_path:

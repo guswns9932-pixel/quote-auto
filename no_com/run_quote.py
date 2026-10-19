@@ -5,5 +5,9 @@ from __future__ import annotations
 from app_runner import run_qt_page
 
 
-if __name__ == "__main__":
+def main() -> None:
     run_qt_page("견적서작성", "page_quote", "QuoteBuilderPage")
+
+
+if __name__ == "__main__":
+    main()

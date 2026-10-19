@@ -7,6 +7,7 @@ Python 미설치 환경에서도 동작 (Python 인터프리터 포함).
 사용법
 ------
   python build_onedir.py                # 이름 프롬프트
+  python build_onedir.py 견적자동화 --single   # exe 1개(해시 1개)로 전부 포함
   python build_onedir.py 견적자동화     # → dist/견적자동화/견적자동화.exe (런처)
                                         #    + 견적자동화_quote/_esign/_search/_csp.exe
   python build_onedir.py 견적자동화 icon.ico
@@ -23,10 +24,12 @@ import sys
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# --single: exe 1개(해시 1개)에 런처+전 앱을 담는 모드. 기본은 앱별 exe 5개.
+SINGLE = "--single" in sys.argv[1:]
 
 
 def _get_args():
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--single"]
     if args:
         app_name = args[0].strip()
         icon     = args[1].strip() if len(args) >= 2 else ""
@@ -60,6 +63,7 @@ from PyInstaller.utils.hooks import collect_all
 
 HERE = Path(r"@HERE@")
 APP_NAME = "@APP_NAME@"
+SINGLE = @SINGLE@   # True: exe 하나(해시 1개)에 런처+4개 앱 전부 포함
 ICON = r"@ICON@" or None
 
 # 앱마다 별도 exe 를 만들되 한 폴더(onedir)에 모은다. 앱별로 필요한 의존성만
@@ -217,6 +221,17 @@ _PROFILES = [
     ),
 ]
 
+if SINGLE:
+    # 모든 앱을 exe 하나에 합친다. 실행 모드는 app_main.py 가 인자로 분기한다.
+    _merged = dict(script="app_main.py", exe=APP_NAME, hidden=[], binaries=[], datas=[])
+    for _p in _PROFILES:
+        _merged["hidden"] += _p["hidden"] + [_p["script"].replace(".py", "")]
+        _merged["binaries"] += _p["binaries"]
+        _merged["datas"] += _p["datas"]
+    _merged["hidden"] += ["main", "run_quote", "run_esign", "run_search", "run_csp"]
+    _merged["excludes"] = list(_COMMON_EXCLUDES)
+    _PROFILES = [_merged]
+
 _exes = []
 _collect_args = []
 for _p in _PROFILES:
@@ -255,11 +270,12 @@ coll = COLLECT(
 '''
 
 
-def _make_spec(app_name: str, icon: str) -> str:
+def _make_spec(app_name: str, icon: str, single: bool = False) -> str:
     return (_SPEC_TEMPLATE
             .replace("@HERE@", HERE)
             .replace("@APP_NAME@", app_name)
-            .replace("@ICON@", icon))
+            .replace("@ICON@", icon)
+            .replace("@SINGLE@", "True" if single else "False"))
 
 
 def _create_icon() -> str:
@@ -381,7 +397,7 @@ def main():
     work_dir  = os.path.join(HERE, "build")
 
     with open(spec_path, "w", encoding="utf-8") as f:
-        f.write(_make_spec(app_name, icon))
+        f.write(_make_spec(app_name, icon, SINGLE))
 
     log_path = os.path.join(HERE, f"_build_{app_name}.log")
     cmd = [
@@ -438,7 +454,10 @@ def main():
         print()
         print(f"  배포  : dist/{app_name}/ 폴더 전체를 압축해서 전달")
         print(f"  실행  : {app_name}.exe 더블클릭 (Python 불필요)")
-        print(f"  인가  : exe 5개({app_name}.exe, _quote/_esign/_search/_csp) 해시 각각 제출")
+        if SINGLE:
+            print(f"  인가  : {app_name}.exe 단일 파일 해시 제출 (단일 exe 모드)")
+        else:
+            print(f"  인가  : exe 5개({app_name}.exe, _quote/_esign/_search/_csp) 해시 각각 제출")
         print(f"{'='*54}\n")
     else:
         print(f"\n빌드 실패 (exit code={returncode})")

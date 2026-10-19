@@ -10,5 +10,9 @@ def _factory():
     return App()
 
 
-if __name__ == "__main__":
+def main() -> None:
     run_tk_app("CSP UPLOAD 자동화", _factory)
+
+
+if __name__ == "__main__":
+    main()

@@ -209,6 +209,8 @@ class QuoteState:
     us_info : Dict[str, Any]  = field(default_factory=dict)
 
     last_output_dir : Optional[str] = None
+    # User-selected document root; independent of executable/version directory.
+    output_root     : Optional[str] = None
     investor_name   : str            = "채승철"
     warranty_years  : int            = 2
 

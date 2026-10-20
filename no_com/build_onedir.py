@@ -14,8 +14,9 @@ Python 미설치 환경에서도 동작 (Python 인터프리터 포함).
 
 배포 방법
 ---------
-  dist/견적자동화/ 폴더 전체를 압축해서 전달 (exe 5개가 한 폴더에 함께 있어야 함)
-  수령자는 압축 해제 후 견적자동화.exe(런처) 실행
+  dist/견적자동화-install/ 폴더 전체를 공유 폴더에 게시.
+  각 PC에서 Install.cmd 로 로컬 설치 후 바탕화면 QuoteAuto 바로가기로 실행.
+  업데이트도 같은 설치 절차를 사용하며, 평소 실행은 공유 배포본을 읽지 않는다.
 """
 
 import math
@@ -444,6 +445,12 @@ def main():
     if returncode == 0:
         out_dir = os.path.join(dist_dir, app_name)
         exe     = os.path.join(out_dir, f"{app_name}.exe")
+        from package_local import package_local
+        try:
+            install_dir = package_local(out_dir, app_name)
+        except Exception as e:
+            print(f"로컬 설치 패키지 생성 실패: {e}")
+            sys.exit(1)
         size_mb = sum(
             os.path.getsize(os.path.join(r, f))
             for r, _, fs in os.walk(out_dir) for f in fs
@@ -452,8 +459,9 @@ def main():
         print(f"  완료  : {exe}")
         print(f"  크기  : {size_mb:.1f} MB (폴더 전체)")
         print()
-        print(f"  배포  : dist/{app_name}/ 폴더 전체를 압축해서 전달")
-        print(f"  실행  : {app_name}.exe 더블클릭 (Python 불필요)")
+        print(f"  배포  : {install_dir} 폴더 전체를 공유 폴더에 게시")
+        print("  설치  : 각 PC에서 Install.cmd 실행 (새 버전 업데이트도 동일)")
+        print("  실행  : 바탕화면 QuoteAuto 바로가기 — 로컬 실행, Python 불필요")
         if SINGLE:
             print(f"  인가  : {app_name}.exe 단일 파일 해시 제출 (단일 exe 모드)")
         else:

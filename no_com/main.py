@@ -102,6 +102,12 @@ def _launch_app(key: str, parent: Optional[QWidget] = None) -> None:
 # 또는 여러 앱에 걸친 변경사항.
 WHATS_NEW = [
     {
+        "id": "2026-10-20-local-install",
+        "app": "launcher",
+        "title": "내 PC에서 빠르게 실행",
+        "desc": "PC에 설치해 실행하고, 견적서는 원하는 클라우드 폴더에 저장할 수 있습니다.",
+    },
+    {
         "id": "2026-08-05-window-split",
         "app": "quote",
         "title": "창 분리 + 컬럼 확장",

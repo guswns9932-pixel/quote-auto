@@ -115,6 +115,7 @@ class Key:
     TEMPLATE_PATH   = "paths/template"
     REQUEST_PATH    = "paths/request"
     OUTPUT_DIR      = "paths/output_dir"
+    OUTPUT_ROOT     = "paths/output_root"
     ESIGN_DIR       = "paths/esign_dir"
     AUTOLOAD_TEMPLATE = "quote/autoload_template"
     LAST_SEEN_UPDATE  = "app/last_seen_update"

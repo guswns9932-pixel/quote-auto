@@ -30,6 +30,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
+from app_paths import default_output_dir
+from document_work import prepare_quote, publish_quote
 from openpyxl.worksheet.worksheet import Worksheet
 
 from core import (
@@ -867,7 +869,7 @@ def _fill_domestic(state: QuoteState,
     investor_fn = safe_filename(s(rd.get("J")))
     tool       = safe_filename(s(rd.get("Z")))
     folder = ensure_dir(
-        os.path.join(exe_dir(), "견적서", f"{ymd}_LOT베큠_{lineproc}_{investor_fn}")
+        os.path.join(state.output_root or default_output_dir(), f"{ymd}_LOT베큠_{lineproc}_{investor_fn}")
     )
     path = unique_path(
         os.path.join(folder, f"대외비_{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor_fn}_{tool}.xlsx")
@@ -1100,7 +1102,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     line   = safe_filename(info.get("line", ""))
     tool   = safe_filename(info.get("tool", ""))
     folder = ensure_dir(
-        os.path.join(exe_dir(), "견적서", f"{ymd}_중국_SCS_{line}")
+        os.path.join(state.output_root or default_output_dir(), f"{ymd}_중국_SCS_{line}")
     )
     path = unique_path(
         os.path.join(folder, f"대외비_{ymd}_중국_SCS_{line}_{tool}.xlsx")
@@ -1170,7 +1172,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     site   = safe_filename(info.get("site", ""))
     tool   = safe_filename(info.get("tool", ""))
     folder = ensure_dir(
-        os.path.join(exe_dir(), "견적서", f"{ymd}_미국_{site}")
+        os.path.join(state.output_root or default_output_dir(), f"{ymd}_미국_{site}")
     )
     path = unique_path(
         os.path.join(folder, f"대외비_{ymd}_{site}_{tool}_Quotation.xlsx")
@@ -1237,7 +1239,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
 # 공개 API: 견적서 생성
 # ═══════════════════════════════════════════════════════════════
 
-def generate_quote(
+def _generate_quote_local(
     state   : QuoteState,
     qtype   : str,
     items   : List[Dict[str, Any]],
@@ -1258,7 +1260,7 @@ def generate_quote(
     return out
 
 
-def generate_quote_multi(
+def _generate_quote_multi_local(
     state        : QuoteState,
     items        : List[Dict[str, Any]],
     request_rows : List[Dict[str, Any]],
@@ -1336,6 +1338,43 @@ def generate_quote_multi(
                     pass
 
     return results
+
+
+def generate_quote(state, qtype, items, rd) -> str:
+    """Generate using local snapshots; copy only the completed result to storage."""
+    work, local = prepare_quote(state)
+    try:
+        path = _generate_quote_local(local, qtype, items, rd)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    # A failed upload leaves the completed local file available for recovery.
+    out = publish_quote(path, local, state.output_root or default_output_dir())
+    shutil.rmtree(work, ignore_errors=True)
+    return out
+
+
+def generate_quote_multi(state, items, request_rows, progress_cb=None):
+    work, local = prepare_quote(state)
+    try:
+        results = _generate_quote_multi_local(local, items, request_rows, progress_cb)
+    except BaseException:
+        # Keep completed files if an unexpected batch-level failure occurs.
+        logger.error("일괄 생성 중단. 로컬 작업 폴더: %s", work)
+        raise
+    published = []
+    failed_upload = False
+    for rd, path, error in results:
+        if path:
+            try:
+                path = publish_quote(path, local, state.output_root or default_output_dir())
+            except Exception as exc:
+                path, error = "", str(exc)
+                failed_upload = True
+        published.append((rd, path, error))
+    if not failed_upload:
+        shutil.rmtree(work, ignore_errors=True)
+    return published
 
 
 def _generate_cover_impl(

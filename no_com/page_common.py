@@ -36,6 +36,12 @@ def _friendly_error_msg(exc: BaseException) -> Tuple[str, str]:
     """예외 유형을 분석해 (사용자 메시지, 해결 힌트) 한국어 튜플을 반환한다."""
     msg = str(exc)
     type_name = type(exc).__name__
+    from document_work import DocumentPublishError
+    if isinstance(exc, DocumentPublishError):
+        return (
+            "견적서는 완성되었지만 선택한 폴더에 저장하지 못했습니다.",
+            f"공유 폴더 연결을 확인한 뒤 다음 파일을 복사해 주세요:\n{exc.local_path}",
+        )
 
     if isinstance(exc, PermissionError) or "WinError 32" in msg or "being used by another process" in msg:
         return (

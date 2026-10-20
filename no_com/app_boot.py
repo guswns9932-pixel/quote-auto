@@ -13,6 +13,7 @@ import logging.handlers
 import os
 import sys
 import traceback
+from app_paths import log_dir
 
 # ──────────────────────────────────────────────
 # 로거 초기화
@@ -42,17 +43,21 @@ def _setup_logging() -> None:
 
         # 파일 로그 — console=False 빌드에서도 충돌 원인 추적 가능
         try:
-            _exe_dir = (
-                os.path.dirname(os.path.abspath(sys.executable))
-                if getattr(sys, "frozen", False)
-                else os.path.dirname(os.path.abspath(__file__))
-            )
-            # 클라우드(공유 서버)에서 로그가 무한히 쌓여 자원을 먹지 않도록
-            # 총량에 상한을 둔다: 파일 1개 최대 _LOG_MAX_BYTES, 직전본 1개만 보관
-            # (합계 ≤ 2배). 평소엔 INFO 이상만 남기고, DEBUG 까지 필요하면
-            # 환경변수 QUOTE_APP_DEBUG_LOG=1. delay=True 라 기록할 것이 생기기
-            # 전에는 파일을 만들지도 않는다.
-            log_path = os.path.join(_exe_dir, "quote_app.log")
+            # Each process owns its rotating log; no shared-drive writes or
+            # cross-process rotation. Retain at most 20 inactive files at startup.
+            directory = log_dir()
+            old = []
+            for path in directory.glob("quote_app-*.log*"):
+                try:
+                    old.append((path.stat().st_mtime, path))
+                except OSError:
+                    pass  # Another process may rotate/clean while we start.
+            for _, path in sorted(old, reverse=True)[20:]:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass  # On Windows an active writer keeps its file open.
+            log_path = str(directory / f"quote_app-{os.getpid()}.log")
             _trim_oversized_log(log_path)
             fh = logging.handlers.RotatingFileHandler(
                 log_path, maxBytes=_LOG_MAX_BYTES, backupCount=1,
@@ -82,7 +87,7 @@ def _setup_exception_hook() -> None:
             QMessageBox.critical(
                 None, "치명적 오류",
                 f"예상치 못한 오류가 발생했습니다:\n\n{exc_value}\n\n"
-                "프로그램 폴더의 quote_app.log 에서 자세한 내용을 확인하세요.",
+                f"로컬 로그 폴더에서 자세한 내용을 확인하세요:\n{log_dir()}",
             )
         except Exception:
             pass

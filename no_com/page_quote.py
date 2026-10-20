@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 import app_settings
+from app_paths import default_output_dir
 from core import (
     QuoteState, SheetName,
     exe_dir, fmt_krw, fmt_qty,
@@ -105,7 +106,7 @@ class _GenQuoteThread(QThread):
             import excel_io
             if self.qtype == "국내" and len(self.rds) >= 2:
                 def _cb(done, total, name):
-                    self.progress.emit(f"[{done}/{total}] 저장: {name}")
+                    self.progress.emit(f"[{done}/{total}] 로컬 생성: {name}")
                 results = excel_io.generate_quote_multi(
                     self.state, self.items, self.rds, progress_cb=_cb)
             else:
@@ -643,6 +644,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         """
         self.state.last_output_dir = (
             app_settings.get_dir(app_settings.Key.OUTPUT_DIR) or None)
+        self.state.output_root = app_settings.get_str(app_settings.Key.OUTPUT_ROOT) or None
 
         # 마지막 통합양식이 그대로 있으면 자동으로 다시 읽는다.
         # (백그라운드 스레드이므로 창 표시를 막지 않는다)
@@ -1733,6 +1735,14 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             idx = self._pick_rd_index()
             rds = [self.state.request_rows[idx]] if (idx >= 0 and self.state.request_rows) else [{}]
             self._pending_req_indices = [idx] if idx >= 0 else []
+        output_root = QFileDialog.getExistingDirectory(
+            self, "견적서 저장 폴더 선택 (클라우드·공유 폴더 선택 가능)",
+            self.state.output_root or self.state.last_output_dir or default_output_dir(),
+        )
+        if not output_root:
+            return
+        self.state.output_root = output_root
+        app_settings.set_str(app_settings.Key.OUTPUT_ROOT, output_root)
         self._log(f"견적서 생성 시작 ({qtype}, {len(rds)}건) …")
         self._set_gen_buttons(False)
         self._gen_qt_thread = _GenQuoteThread(self.state, qtype, items, rds, self)
@@ -1783,7 +1793,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
         if self._gen_cv_thread and self._gen_cv_thread.isRunning():
             QMessageBox.warning(self, "진행 중", "이미 갑지 생성 작업이 진행 중입니다."); return
-        start = self.state.last_output_dir or exe_dir()
+        start = self.state.last_output_dir or default_output_dir()
         paths, _ = QFileDialog.getOpenFileNames(self, "갑지 생성 대상 엑셀파일 (다중)", start, "Excel Files (*.xlsx)")
         if not paths: return
         folder = os.path.commonpath(paths)
@@ -1842,7 +1852,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         """갑지DATA 시트만 추출해 제출용 엑셀 파일로 저장."""
         import re as _re
         path, _ = QFileDialog.getOpenFileName(
-            self, "갑지를 선택하세요", self.state.last_output_dir or exe_dir(),
+            self, "갑지를 선택하세요", self.state.last_output_dir or default_output_dir(),
             "Excel Files (*.xlsx)")
         if not path:
             return

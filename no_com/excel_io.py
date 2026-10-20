@@ -327,6 +327,25 @@ def parse_code_map_sheet(ws: Worksheet) -> Dict[Tuple[str, str, str], List[Tuple
     return cmap
 
 
+_BACKUP_KEEP = 20
+
+
+def _prune_backups(backup_dir: str, base: str, keep: int = _BACKUP_KEEP) -> None:
+    """Backup/ 에 같은 양식의 백업이 끝없이 쌓이지 않도록 최신 keep 개만 남긴다.
+    정리 실패는 본 작업에 영향을 주지 않는다."""
+    try:
+        files = [os.path.join(backup_dir, n) for n in os.listdir(backup_dir)
+                 if n.startswith(base + ".backup_")]
+        files.sort(key=os.path.getmtime, reverse=True)
+        for p in files[keep:]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def append_code_map_rows(
     template_path: str,
     process: str,
@@ -376,6 +395,7 @@ def append_code_map_rows(
         os.path.join(backup_dir, f"{base}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
     )
     shutil.copy2(template_path, backup_path)
+    _prune_backups(backup_dir, base)
 
     row = ws.max_row + 1
     for spec, qty in added:

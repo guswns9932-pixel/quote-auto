@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,10 +52,7 @@ def safe_filename(text: str) -> str:
         return "-"
     for ch in '\\/:*?"<>|':
         t = t.replace(ch, "_")
-    # 셀 값의 줄바꿈·탭 등 제어문자는 WinError 123 의 원인 — 공백 하나로 정리
-    t = re.sub(r"[\x00-\x1f\x7f]+", " ", t)
-    # Windows 는 이름 끝의 점·공백을 허용하지 않는다
-    return t.strip(" .") or "-"
+    return t.strip() or "-"
 
 
 # ──────────────────────────────────────────────

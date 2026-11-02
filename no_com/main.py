@@ -33,11 +33,11 @@ logger = logging.getLogger("QuoteApp")
 
 
 # ──────────────────────────────────────────────
-# 앱 실행 (앱마다 별도 프로세스 / 별도 exe)
+# 앱 실행 (앱마다 별도 프로세스 — 같은 exe 를 인자로 재실행)
 # ──────────────────────────────────────────────
-# 키: 런처 버튼 → (라벨, exe 접미사, 개발 환경 스크립트)
-# frozen 일 때 exe 는 런처 exe 와 같은 폴더의 "<런처이름>_<접미사>.exe" 이고,
-# 없으면(단일 exe 빌드) 런처 exe 자신을 "--<접미사>" 인자로 재실행한다.
+# 키: 런처 버튼 → (라벨, 실행 인자 접미사, 개발 환경 스크립트)
+# frozen 일 때는 런처 exe 자신을 "--<접미사>" 인자로 다시 실행한다
+# (exe 하나 = 해시 하나에 런처와 모든 앱이 들어 있다 — app_main.py 가 분기).
 _APPS = {
     "quote":  ("견적서작성",        "quote",  "run_quote.py"),
     "esign":  ("전자서명",          "esign",  "run_esign.py"),
@@ -54,15 +54,11 @@ _launched_procs: dict = {}
 def _app_command(key: str) -> tuple:
     """(실행 명령, 존재해야 하는 파일 경로).
 
-    frozen 이면 런처 옆의 "<런처이름>_<접미사>.exe"(앱별 exe 빌드)를 쓰고,
-    없으면 자기 자신을 "--<접미사>" 로 재실행한다(단일 exe 빌드 — 해시 1개)."""
+    frozen 이면 자기 자신(exe 하나)을 "--<접미사>" 로 재실행한다.
+    같은 폴더에 예전 빌드의 "<이름>_quote.exe" 같은 파일이 남아 있어도 쓰지 않는다."""
     _label, suffix, script = _APPS[key]
     if getattr(sys, "frozen", False):
         exe = os.path.abspath(sys.executable)
-        stem = os.path.splitext(os.path.basename(exe))[0]
-        sibling = os.path.join(os.path.dirname(exe), f"{stem}_{suffix}.exe")
-        if os.path.exists(sibling):
-            return [sibling], sibling
         return [exe, f"--{suffix}"], exe
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), script)
     return [sys.executable, path], path

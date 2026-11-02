@@ -7,15 +7,13 @@ Python 미설치 환경에서도 동작 (Python 인터프리터 포함).
 사용법
 ------
   python build_onedir.py                # 이름 프롬프트
-  python build_onedir.py 견적자동화 --single   # exe 1개(해시 1개)로 전부 포함
-  python build_onedir.py 견적자동화     # → dist/견적자동화/견적자동화.exe (런처)
-                                        #    + 견적자동화_quote/_esign/_search/_csp.exe
+  python build_onedir.py 견적자동화     # → dist/견적자동화/견적자동화.exe (하나로 전부 실행)
   python build_onedir.py 견적자동화 icon.ico
 
 배포 방법
 ---------
-  dist/견적자동화/ 폴더 전체를 압축해서 전달 (exe 5개가 한 폴더에 함께 있어야 함)
-  수령자는 압축 해제 후 견적자동화.exe(런처) 실행
+  dist/견적자동화/ 폴더 전체를 압축해서 전달
+  수령자는 압축 해제 후 견적자동화.exe 실행
 """
 
 import math
@@ -24,8 +22,8 @@ import sys
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# --single: exe 1개(해시 1개)에 런처+전 앱을 담는 모드. 기본은 앱별 exe 5개.
-SINGLE = "--single" in sys.argv[1:]
+# exe 하나(해시 하나)에 런처와 모든 앱을 담는다. 실행 모드는 app_main.py 가
+# 인자(--quote 등)로 분기한다. (--single 인자는 예전 사용법과의 호환용으로 받기만 한다)
 
 
 def _get_args():
@@ -63,16 +61,11 @@ from PyInstaller.utils.hooks import collect_all
 
 HERE = Path(r"@HERE@")
 APP_NAME = "@APP_NAME@"
-SINGLE = @SINGLE@   # True: exe 하나(해시 1개)에 런처+4개 앱 전부 포함
 ICON = r"@ICON@" or None
 
-# 앱마다 별도 exe 를 만들되 한 폴더(onedir)에 모은다. 앱별로 필요한 의존성만
-# 실어서 런처·Tk 앱이 PySide6/fitz/selenium 등을 로드하지 않게 한다.
-#   <APP_NAME>.exe         런처 (PySide6 만)
-#   <APP_NAME>_quote.exe   견적서작성   (Qt + openpyxl + 전체 의존성)
-#   <APP_NAME>_esign.exe   전자서명     (Qt + fitz + PIL + win32com)
-#   <APP_NAME>_search.exe  키워드 검색기 (Tk + fitz/openpyxl 파서)
-#   <APP_NAME>_csp.exe     CSP UPLOAD   (Tk + openpyxl)
+# exe 하나(<APP_NAME>.exe)에 런처와 4개 앱(견적서작성·전자서명·키워드 검색기·
+# CSP UPLOAD)을 모두 담는다. 런처가 이 exe 를 --quote/--esign/--search/--csp
+# 인자로 다시 실행하고, app_main.py 가 인자를 보고 해당 앱만 띄운다.
 
 openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
 fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
@@ -156,7 +149,7 @@ _AUTOMATION_MODS = [
     "webdriver_manager", "webdriver_manager.chrome",
 ]
 
-# 앱별 프로필: (진입 스크립트, exe 이름, hiddenimports, excludes, binaries, datas)
+# 앱별 의존성 프로필 — 아래에서 하나로 합쳐 exe 하나에 담는다.
 _PROFILES = [
     dict(
         script="main.py", exe=APP_NAME,
@@ -221,8 +214,8 @@ _PROFILES = [
     ),
 ]
 
-if SINGLE:
-    # 모든 앱을 exe 하나에 합친다. 실행 모드는 app_main.py 가 인자로 분기한다.
+# 모든 앱을 exe 하나에 합친다. 실행 모드는 app_main.py 가 인자로 분기한다.
+if True:
     _merged = dict(script="app_main.py", exe=APP_NAME, hidden=[], binaries=[], datas=[])
     for _p in _PROFILES:
         _merged["hidden"] += _p["hidden"] + [_p["script"].replace(".py", "")]
@@ -270,12 +263,11 @@ coll = COLLECT(
 '''
 
 
-def _make_spec(app_name: str, icon: str, single: bool = False) -> str:
+def _make_spec(app_name: str, icon: str) -> str:
     return (_SPEC_TEMPLATE
             .replace("@HERE@", HERE)
             .replace("@APP_NAME@", app_name)
-            .replace("@ICON@", icon)
-            .replace("@SINGLE@", "True" if single else "False"))
+            .replace("@ICON@", icon))
 
 
 def _create_icon() -> str:
@@ -397,7 +389,7 @@ def main():
     work_dir  = os.path.join(HERE, "build")
 
     with open(spec_path, "w", encoding="utf-8") as f:
-        f.write(_make_spec(app_name, icon, SINGLE))
+        f.write(_make_spec(app_name, icon))
 
     log_path = os.path.join(HERE, f"_build_{app_name}.log")
     cmd = [
@@ -454,10 +446,7 @@ def main():
         print()
         print(f"  배포  : dist/{app_name}/ 폴더 전체를 압축해서 전달")
         print(f"  실행  : {app_name}.exe 더블클릭 (Python 불필요)")
-        if SINGLE:
-            print(f"  인가  : {app_name}.exe 단일 파일 해시 제출 (단일 exe 모드)")
-        else:
-            print(f"  인가  : exe 5개({app_name}.exe, _quote/_esign/_search/_csp) 해시 각각 제출")
+        print(f"  인가  : {app_name}.exe 단일 파일 해시 제출")
         print(f"{'='*54}\n")
     else:
         print(f"\n빌드 실패 (exit code={returncode})")

@@ -10,5 +10,9 @@ def _factory():
     return ContentSearchApp()
 
 
-if __name__ == "__main__":
+def main() -> None:
     run_tk_app("키워드 검색기", _factory)
+
+
+if __name__ == "__main__":
+    main()

@@ -36,7 +36,8 @@ logger = logging.getLogger("QuoteApp")
 # 앱 실행 (앱마다 별도 프로세스 / 별도 exe)
 # ──────────────────────────────────────────────
 # 키: 런처 버튼 → (라벨, exe 접미사, 개발 환경 스크립트)
-# frozen 일 때 exe 는 런처 exe 와 같은 폴더의 "<런처이름>_<접미사>.exe".
+# frozen 일 때 exe 는 런처 exe 와 같은 폴더의 "<런처이름>_<접미사>.exe" 이고,
+# 없으면(단일 exe 빌드) 런처 exe 자신을 "--<접미사>" 인자로 재실행한다.
 _APPS = {
     "quote":  ("견적서작성",        "quote",  "run_quote.py"),
     "esign":  ("전자서명",          "esign",  "run_esign.py"),
@@ -50,13 +51,21 @@ _APPS = {
 _launched_procs: dict = {}
 
 
-def _app_command(key: str) -> list:
+def _app_command(key: str) -> tuple:
+    """(실행 명령, 존재해야 하는 파일 경로).
+
+    frozen 이면 런처 옆의 "<런처이름>_<접미사>.exe"(앱별 exe 빌드)를 쓰고,
+    없으면 자기 자신을 "--<접미사>" 로 재실행한다(단일 exe 빌드 — 해시 1개)."""
     _label, suffix, script = _APPS[key]
     if getattr(sys, "frozen", False):
         exe = os.path.abspath(sys.executable)
         stem = os.path.splitext(os.path.basename(exe))[0]
-        return [os.path.join(os.path.dirname(exe), f"{stem}_{suffix}.exe")]
-    return [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), script)]
+        sibling = os.path.join(os.path.dirname(exe), f"{stem}_{suffix}.exe")
+        if os.path.exists(sibling):
+            return [sibling], sibling
+        return [exe, f"--{suffix}"], exe
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), script)
+    return [sys.executable, path], path
 
 
 def _launch_app(key: str, parent: Optional[QWidget] = None) -> None:
@@ -65,11 +74,11 @@ def _launch_app(key: str, parent: Optional[QWidget] = None) -> None:
     if proc is not None and proc.poll() is None:
         logger.info("%s가 이미 실행 중이라 재실행을 건너뜀", label)
         return
-    cmd = _app_command(key)
-    if not os.path.exists(cmd[-1]):
-        logger.error("%s 실행 파일 없음: %s", label, cmd[-1])
+    cmd, must_exist = _app_command(key)
+    if not os.path.exists(must_exist):
+        logger.error("%s 실행 파일 없음: %s", label, must_exist)
         QMessageBox.critical(parent, f"{label} 오류",
-                             f"실행 파일을 찾을 수 없습니다.\n{cmd[-1]}")
+                             f"실행 파일을 찾을 수 없습니다.\n{must_exist}")
         return
     try:
         _launched_procs[key] = subprocess.Popen(cmd)

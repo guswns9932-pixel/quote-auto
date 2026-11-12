@@ -1009,7 +1009,8 @@ def _map_output_columns(tpl_ws):
     """COLUMNS 의 각 키가 양식 Sheet1 의 몇 번째 열(1-based)인지 헤더 글자로 찾는다.
     찾지 못하는 항목이 있으면 엉뚱한 열에 쓰지 않도록 오류로 멈춘다."""
     by_header = {}
-    for idx in range(1, len(COLUMNS) + 1):
+    # 양식에 열이 추가되어 뒤로 밀린 헤더도 찾도록 양식의 마지막 열까지 본다.
+    for idx in range(1, max(tpl_ws.max_column, len(COLUMNS)) + 1):
         name = _norm_out_header(tpl_ws.cell(row=1, column=idx).value)
         if name and name not in by_header:
             by_header[name] = idx
@@ -1047,7 +1048,7 @@ def build_output(template_path, rows, out_path):
     col_of = _map_output_columns(tws)
 
     # --- 헤더행 : 원본 서식 그대로 복사
-    for idx, (key, header, _) in enumerate(COLUMNS, start=1):
+    for idx in range(1, max(tws.max_column, len(COLUMNS)) + 1):
         src = tws.cell(row=1, column=idx)
         dst = ws.cell(row=1, column=idx, value=src.value)
         dst.font = Font(name=src.font.name, sz=src.font.sz, b=src.font.b,

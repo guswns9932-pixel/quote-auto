@@ -379,6 +379,24 @@ def _xlsx_sheet_part(path, sheet_name):
     return None
 
 
+_BACKUP_KEEP = 20
+
+
+def _prune_backups(backup_dir, base, keep=_BACKUP_KEEP):
+    """Backup/ 에 같은 양식의 백업이 끝없이 쌓이지 않도록 최신 keep 개만 남긴다."""
+    try:
+        files = [os.path.join(backup_dir, n) for n in os.listdir(backup_dir)
+                 if n.startswith(base + ".backup_")]
+        files.sort(key=os.path.getmtime, reverse=True)
+        for p in files[keep:]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def _sync_fsc_map_file(template_path, new_rows, history_updates):
     """FSC매핑 시트를 갱신한다 — 둘 다 한 번의 백업/저장으로 함께 적용한다.
 
@@ -458,6 +476,7 @@ def _sync_fsc_map_file(template_path, new_rows, history_updates):
         n += 1
         backup_path = os.path.join(backup_dir, "%s.backup_%s_%d%s" % (base, stamp, n, ext))
     shutil.copy2(template_path, backup_path)
+    _prune_backups(backup_dir, base)
 
     try:
         _xlsx_update_fsc_map_xml(template_path, sheet_part, max_row, max_col,

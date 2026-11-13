@@ -1371,7 +1371,7 @@ def _generate_cover_impl(
     _t0 = time.perf_counter()
     _com_ok = excel_com._ensure_com()
     _ms_load = (time.perf_counter() - _t0) * 1000
-    _ms_start = _ms_open = 0.0
+    _ms_start = _ms_open = _ms_wbopen = _ms_read = _ms_close = _ms_quit = 0.0
     if _com_ok:
         _xl = None
         _wb_c = _ws_c = None
@@ -1387,23 +1387,29 @@ def _generate_cover_impl(
                 _pkey = os.path.abspath(_p).lower()
                 _row: Dict[int, Any] = {}
                 try:
+                    _tt = time.perf_counter()
                     _wb_c = _xl.Workbooks.Open(
                         os.path.abspath(_p), ReadOnly=True, UpdateLinks=0, AddToMru=False
                     )
+                    _ms_wbopen += (time.perf_counter() - _tt) * 1000
                     try:
+                        _tt = time.perf_counter()
                         _ws_c = _wb_c.Worksheets(SheetName.REQ_COPY)
                         for _c in _FORMULA_COLS:
                             try:
                                 _row[_c] = _ws_c.Cells(2, _c).Value
                             except Exception:
                                 pass
+                        _ms_read += (time.perf_counter() - _tt) * 1000
                     finally:
                         _ws_c = None          # 시트 프록시 먼저 해제
+                        _tt = time.perf_counter()
                         try:
                             _wb_c.Close(False)
                         except Exception:
                             pass
                         _wb_c = None
+                        _ms_close += (time.perf_counter() - _tt) * 1000
                 except Exception as _e:
                     logger.warning("COM 수식값 읽기 실패 (%s): %s", _p, _e)
                 _com_vals[_pkey] = _row
@@ -1415,6 +1421,7 @@ def _generate_cover_impl(
             # CoUninitialize() 를 프록시 해제보다 먼저 부르면 그 뒤의 해제가
             # 이미 정리된 아파트먼트에서 일어나 보이지 않는 좀비 프로세스가 남는다.
             #   프록시 해제 → gc → Quit() → 참조 제거 → gc → CoUninitialize()
+            _tt = time.perf_counter()
             _clear_clipboard()
             _ws_c = None
             _wb_c = None
@@ -1431,6 +1438,7 @@ def _generate_cover_impl(
                 excel_com.pythoncom.CoUninitialize()
             except Exception:
                 pass
+            _ms_quit = (time.perf_counter() - _tt) * 1000
             _ms_open = (time.perf_counter() - _t0) * 1000 - _ms_load - _ms_start
     _t_fill = time.perf_counter()
 
@@ -1512,8 +1520,10 @@ def _generate_cover_impl(
     restore_header_footer_images(template_path, out_path)
     logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
                 out_path, write_row - 2, len(failed))
-    logger.info("갑지 소요: COM 로드 %.0fms / Excel 기동 %.0fms / 원본 열기·종료 %.0fms / "
+    logger.info("갑지 소요: COM 로드 %.0fms / Excel 기동 %.0fms / 원본 열기·종료 %.0fms "
+                "(파일 열기 %.0f, 값 읽기 %.0f, 파일 닫기 %.0f, Excel 종료 %.0f) / "
                 "갑지 작성·저장 %.0fms", _ms_load, _ms_start, _ms_open,
+                _ms_wbopen, _ms_read, _ms_close, _ms_quit,
                 (time.perf_counter() - _t_fill) * 1000)
     return out_path, failed
 

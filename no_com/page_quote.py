@@ -171,10 +171,18 @@ class ChinaOptionsDialog(QDialog):
         self._process = QLineEdit(cn.get("process", ""))
         self._tool    = QLineEdit(cn.get("tool", ""))
         self._line    = QLineEdit(cn.get("line", ""))
+        self._quote_no = QLineEdit(cn.get("quote_no", ""))
+        self._delivery = QLineEdit(cn.get("delivery", ""))
+        self._to       = QLineEdit(cn.get("to", ""))
+        for w in (self._quote_no, self._delivery, self._to):
+            w.setPlaceholderText("비우면 양식에 적힌 그대로")
         form.addRow("Maker",    self._maker)
         form.addRow("Process",  self._process)
         form.addRow("설비호기", self._tool)
         form.addRow("라인",     self._line)
+        form.addRow("Quote number",  self._quote_no)
+        form.addRow("Delivery date", self._delivery)
+        form.addRow("받는 사람(To)", self._to)
         root.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
@@ -184,6 +192,8 @@ class ChinaOptionsDialog(QDialog):
         self.state.cn_info = {
             "maker": self._maker.text().strip(), "process": self._process.text().strip(),
             "tool":  self._tool.text().strip(),  "line":    self._line.text().strip(),
+            "quote_no": self._quote_no.text().strip(), "delivery": self._delivery.text().strip(),
+            "to": self._to.text().strip(),
         }
 
 
@@ -226,6 +236,12 @@ class USOptionsDialog(QDialog):
         form.addRow("환율",          self._exchange)
         form.addRow("기준일(년/월)", ym_row)
         form.addRow("Site",          self._site)
+        self._quote_no = QLineEdit(us.get("quote_no", ""))
+        self._pr       = QLineEdit(us.get("pr", ""))
+        for w in (self._quote_no, self._pr):
+            w.setPlaceholderText("비우면 양식에 적힌 그대로")
+        form.addRow("Quote number",  self._quote_no)
+        form.addRow("PR",            self._pr)
         root.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
@@ -237,6 +253,7 @@ class USOptionsDialog(QDialog):
             "tool":  self._tool.text().strip(),  "exchange": float(self._exchange.value()),
             "base_ym": (int(self._year.value()), int(self._month.value())),
             "site": self._site.currentText(),
+            "quote_no": self._quote_no.text().strip(), "pr": self._pr.text().strip(),
         }
 
 

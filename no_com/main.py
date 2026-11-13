@@ -232,6 +232,11 @@ WHATS_NEW = [
         "app": "esign",
         "title": "전자서명 새 단장",
         "desc": "서명한 PDF가 선명해지고, 쪽 미리보기에서 서명 여부를 한눈에 봅니다.",
+    },    {
+        "id": "2026-11-14-quote-overseas-header",
+        "app": "quote",
+        "title": "미국·중국 견적서 입력 확대",
+        "desc": "옵션창에서 Quote number·PR 등을 넣고, 투자자·보증기간도 반영됩니다.",
     },
 ]
 

@@ -1132,6 +1132,15 @@ def _write_lines(ws, cfg: quote_config.QuoteConfig, prefix: str, start: int, end
         ws[f"{c_qty}{rr}"] = None if float(r.get("qty", 0)) == 0 else r["qty"]
 
 
+def _write_text(ws, cfg: quote_config.QuoteConfig, cell_key: str, text_key: str, **values) -> None:
+    """문구 규칙(text_key)에 값을 채워 cell_key 칸에 적는다.
+    값이 비어 있으면 아무것도 하지 않는다 — 양식에 적힌 '입력필요' 같은 표시를
+    빈칸으로 덮어쓰면 누락을 알아채기 어렵다."""
+    if any(s(v) == "" for v in values.values()):
+        return
+    ws[cfg[cell_key]] = cfg.text(text_key, **{k: s(v) for k, v in values.items()})
+
+
 def _credit_line(cr: Dict[str, Any]) -> Dict[str, Any]:
     return {"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]}
 
@@ -1155,6 +1164,10 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     ws[cfg["cn.cell_maker"]]   = info.get("maker", "")
     ws[cfg["cn.cell_process"]] = info.get("process", "")
     ws[cfg["cn.cell_tool"]]    = info.get("tool", "")
+    _write_text(ws, cfg, "cn.cell_to", "cn.to_text", 받는사람=info.get("to"))
+    _write_text(ws, cfg, "cn.cell_quote_no", "cn.quote_no_text", 견적번호=info.get("quote_no"))
+    _write_text(ws, cfg, "cn.cell_delivery", "cn.delivery_text", 납기=info.get("delivery"))
+    _write_text(ws, cfg, "cn.cell_warranty", "cn.warranty_text", 보증=state.warranty_years)
 
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
@@ -1209,6 +1222,11 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     # 글자가 아니라 날짜로 넣는다 — 양식 셀 서식(mmm-yy)이 글자에는 먹지 않아
     # "Nov-26" 이 아니라 "2026-11-1" 로 찍힌다.
     ws[cfg["us.cell_date"]] = datetime(int(y), int(m), 1)
+    _write_text(ws, cfg, "us.cell_investor", "us.investor_text",
+                투자자=s(state.investor_name) or cfg["default.investor"])
+    _write_text(ws, cfg, "us.cell_quote_no", "us.quote_no_text", 견적번호=info.get("quote_no"))
+    _write_text(ws, cfg, "us.cell_pr", "us.pr_text", PR=info.get("pr"))
+    _write_text(ws, cfg, "us.cell_warranty", "us.warranty_text", 보증=state.warranty_years)
 
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]

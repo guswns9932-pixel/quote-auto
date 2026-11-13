@@ -118,3 +118,31 @@ def test_cover_skips_excel_for_current_quotes(env, tmp_path):
     wb["견적의뢰복사본"].cell(2, 19).value = "=사양서!F43"     # 예전 버전처럼 수식으로
     wb.save(old)
     assert io._needs_excel_values(old) is True
+
+
+def test_us_and_china_header_fields(env):
+    """미국·중국 견적서 머리 부분: 입력한 값은 들어가고, 비운 값은 양식에 적힌 그대로 남는다."""
+    from openpyxl import load_workbook
+    io, st = env["io"], env["state"]
+    blank_us = {"site": "S", "tool": "T1", "maker": "M", "process": "P", "exchange": 1400, "base_ym": (2026, 11)}
+    blank_cn = {"line": "L", "tool": "T1", "maker": "M", "process": "P"}
+
+    # 아무것도 안 넣으면 양식 그대로 (투자자·보증기간은 기본값이 양식과 같다)
+    st.us_info, st.cn_info = dict(blank_us), dict(blank_cn)
+    us = load_workbook(io.generate_quote(st, "미국", env["items"], {}))["견적서_미국"]
+    assert (us["B3"].value, us["G6"].value, us["F8"].value, us["F7"].value) == (
+        "채승철 님 / 설비구매그룹", "입력필요", "PR : 입력필요", "Warranty : 2 Years after delivery")
+    cn = load_workbook(io.generate_quote(st, "중국", env["items"], {}))["견적서_중국"]
+    assert (cn["B3"].value, cn["G6"].value, cn["G10"].value, cn["G7"].value) == (
+        "Xi Li / Purchasing Dept", "입력필요", "입력필요", "2 Year after delivery")
+
+    # 넣은 값은 그 칸에 들어간다
+    st.investor_name, st.warranty_years = "홍길동", 3
+    st.us_info = dict(blank_us, quote_no="LOT-2611-01", pr="7300001234")
+    st.cn_info = dict(blank_cn, quote_no="CN-01", delivery="2026-12-20", to="Wang / Purchasing")
+    us = load_workbook(io.generate_quote(st, "미국", env["items"], {}))["견적서_미국"]
+    assert (us["B3"].value, us["G6"].value, us["F8"].value, us["F7"].value) == (
+        "홍길동 님 / 설비구매그룹", "LOT-2611-01", "PR : 7300001234", "Warranty : 3 Years after delivery")
+    cn = load_workbook(io.generate_quote(st, "중국", env["items"], {}))["견적서_중국"]
+    assert (cn["B3"].value, cn["G6"].value, cn["G10"].value, cn["G7"].value) == (
+        "Wang / Purchasing", "CN-01", "2026-12-20", "3 Year after delivery")

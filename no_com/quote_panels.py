@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu,
     QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -18,6 +18,7 @@ from PySide6.QtGui import QBrush, QColor
 
 import quote_review as rv
 from core import fmt_krw
+from widgets import InfoPopup
 
 # 상태별 색: (바탕, 테두리, 글자, 테두리 모양)
 _TONE = {
@@ -100,7 +101,7 @@ class DiagramPanel(QFrame):
         self.title = QLabel("구성 도식"); f = self.title.font(); f.setBold(True); f.setPointSize(11)
         self.title.setFont(f)
         top.addWidget(self.title); top.addStretch(1)
-        tip = QLabel("칸을 누르면 아래 표에서 그 품목이 선택됩니다")
+        tip = QLabel("누르면 아래 표에서 그 품목 선택  ·  우클릭하면 전체 내용")
         tip.setStyleSheet("color: #5C6475;")
         top.addWidget(tip)
         v.addLayout(top)
@@ -114,6 +115,7 @@ class DiagramPanel(QFrame):
         self._others = QHBoxLayout(self._others_host)
         self._others.setContentsMargins(0, 0, 0, 0); self._others.setSpacing(6)
         self._shown_n = -1
+        self._info: Optional[InfoPopup] = None
         self._refit_timer = QTimer(self); self._refit_timer.setSingleShot(True)
         self._refit_timer.setInterval(80)
         self._refit_timer.timeout.connect(self._refit_others)
@@ -130,6 +132,27 @@ class DiagramPanel(QFrame):
         legend.addStretch(1)
         v.addLayout(legend)
         self.show_review(None)
+
+    # ── 우클릭: 잘린 글자 전부 보기 ────────────────
+    @staticmethod
+    def full_text(slot: rv.Slot) -> str:
+        """칸에 다 못 적은 내용 전부 — 분류, 담긴 규격(여러 개면 한 줄에 하나), 수량·상태."""
+        lines = [slot.label]
+        lines += [p.strip() for p in slot.text.split(" + ")] if slot.specs else [slot.text]
+        if slot.note:
+            lines.append(slot.note)
+        return "\n".join(lines)
+
+    def _attach_info(self, button: QPushButton, slot: rv.Slot) -> None:
+        """칸·칩을 우클릭하면 전체 내용을 말풍선으로 띄운다(툴팁은 뜨기까지 기다려야 한다)."""
+        button.setContextMenuPolicy(Qt.CustomContextMenu)
+        button.customContextMenuRequested.connect(
+            lambda pos, b=button, s=slot: self.show_info(s, b.mapToGlobal(pos)))
+
+    def show_info(self, slot: rv.Slot, global_pos) -> None:
+        if self._info is None:
+            self._info = InfoPopup(self)
+        self._info.show_at(self.full_text(slot), global_pos + QPoint(12, 8))
 
     @staticmethod
     def _clear(layout) -> None:
@@ -153,6 +176,7 @@ class DiagramPanel(QFrame):
             f"border-radius: 5px; padding: 2px 6px; text-align: left; font-size: 11px; }}"
             f"QPushButton:hover {{ border-color: {NAVY}; }}")
         btn.slot = slot
+        self._attach_info(btn, slot)
         if slot.suggest:
             sp, q = slot.suggest
             btn.clicked.connect(lambda _=False, sp=sp, q=q: self.addSuggest.emit(sp, float(q)))
@@ -226,6 +250,7 @@ class DiagramPanel(QFrame):
             chip.setStyleSheet(f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {bd}; "
                                f"border-radius: 13px; padding: 0 10px; font-size: 11px; }}")
             chip.slot = s; chip.is_other = True
+            self._attach_info(chip, s)
             chip.clicked.connect(lambda _=False, sp=s.specs[0]: self.pickSpec.emit(sp))
             self.buttons.append(chip)
             self._others.addWidget(chip)

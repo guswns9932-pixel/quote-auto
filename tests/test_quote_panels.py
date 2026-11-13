@@ -102,3 +102,32 @@ def test_info_popup_closes_on_any_click_without_eating_it():
     QTest.keyClick(host, Qt.Key_Escape); app.processEvents()
     assert not popup.isVisible()
     host.close(); host.deleteLater(); app.processEvents()
+
+
+def test_right_click_shows_full_text_of_slots_and_chips():
+    """칸·칩에서 '…' 으로 잘린 글자는 우클릭하면 전부 보인다."""
+    app = QApplication.instance() or QApplication([])
+    from quote_panels import DiagramPanel
+    long_a = "Gate Valve (SSAGV-160, Protection) 아주 긴 이름의 품목"
+    long_b = "Gate Valve (SSAGV-125, Protection) 또 하나의 긴 이름"
+    long_c = "어느 칸에도 들어가지 않는 아주 긴 이름의 기타 옵션 품목"
+    items = [_it("PUMP", "P", 2, 100), _it("RACK", long_a, 1, 10), _it("RACK", long_b, 1, 10), _it("RACK", long_c, 3, 10)]
+    review = rv.analyze(items, "국내", 2, class_of={long_a: "Gate Valve", long_b: "Gate Valve"})
+    panel = DiagramPanel(); panel.resize(900, 300); panel.show(); app.processEvents()
+    panel.show_review(review); app.processEvents()
+
+    gate = next(b for b in panel.buttons if b.slot.label == "Gate Valve")
+    chip = next(b for b in panel.buttons if getattr(b, "is_other", False))
+    assert "…" in gate.text() and "…" in chip.text()                    # 화면에서는 잘려 있다
+    assert panel.full_text(gate.slot) == "\n".join(["Gate Valve", long_a, long_b, "수량 2"])
+    for b in (gate, chip):
+        assert b.contextMenuPolicy() == Qt.CustomContextMenu
+
+    gate.customContextMenuRequested.emit(QPoint(5, 5))                  # 우클릭
+    app.processEvents()
+    assert panel._info.isVisible() and long_a in panel._info.text() and long_b in panel._info.text()
+    chip.customContextMenuRequested.emit(QPoint(5, 5))
+    assert long_c in panel._info.text() and "수량 3" in panel._info.text()
+    QTest.mouseClick(gate, Qt.LeftButton); app.processEvents()          # 아무 데나 누르면 닫힌다
+    assert not panel._info.isVisible()
+    panel.close(); panel.deleteLater(); app.processEvents()

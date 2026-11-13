@@ -51,14 +51,30 @@ def test_more_chip_lists_hidden_items_and_selects_on_pick():
     assert picked == [hidden[1].text]
     assert more.contextMenuPolicy() == Qt.CustomContextMenu
 
-    # 넓어지면 더 많이 보이고, 다 들어가면 '외 n개' 가 사라진다
-    panel.resize(1300, 260); app.processEvents()
+    # 칩과 '외 n개' 가 실제로 화면에 보인다
+    assert all(b.isVisible() for b in chips) and more.isVisible()
+
+    # 가만히 두거나 높이만 바뀌면 다시 그리지 않는다 (끝없이 지웠다 그리며 꿀렁거리던 문제)
+    rebuilds = []
+    original = panel._fill_others
+    panel._fill_others = lambda: (rebuilds.append(1), original())[1]
+    for _ in range(5):
+        QTest.qWait(40)
+    panel.resize(700, 300); QTest.qWait(200)
+    assert rebuilds == []
+
+    # 넓어지면 더 많이 보이고, 다 들어가면 '외 n개' 가 사라진다 — 폭이 바뀔 때 한 번씩만 다시 그린다
+    panel.resize(1300, 300); QTest.qWait(200)
     wide = [b for b in panel.buttons if getattr(b, "is_other", False)]
-    assert len(wide) > len(chips)
-    panel.resize(4000, 260); app.processEvents()
+    assert len(wide) > len(chips) and len(rebuilds) == 1
+    panel.resize(4000, 300); QTest.qWait(200)
     assert panel.more_button is None and len([b for b in panel.buttons if getattr(b, "is_other", False)]) == 12
+    assert len(rebuilds) == 2
+    QTest.qWait(200)
+    assert len(rebuilds) == 2
+    panel._fill_others = original
     # 문제가 없으면 회색 테두리
-    panel.resize(700, 260); panel.show_review(_review(12)); app.processEvents()
+    panel.resize(700, 300); QTest.qWait(200); panel.show_review(_review(12)); app.processEvents()
     assert "#C62828" not in panel.more_button.styleSheet()
     panel.close(); panel.deleteLater(); app.processEvents()
 

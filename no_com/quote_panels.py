@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu,
     QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -107,8 +107,17 @@ class DiagramPanel(QFrame):
 
         self._flow = QHBoxLayout(); self._flow.setSpacing(4)
         self._base = QHBoxLayout(); self._base.setSpacing(6)
-        self._others = QHBoxLayout(); self._others.setSpacing(6)
-        v.addLayout(self._flow); v.addLayout(self._base); v.addLayout(self._others)
+        # 기타 옵션 줄은 높이를 고정한 틀 안에 둔다. 칩을 다시 늘어놓을 때 줄 높이가
+        # 흔들리면 패널 크기가 바뀌고, 그게 다시 '크기가 바뀌었다'는 신호가 되어
+        # 칩을 끝없이 지웠다 그리는 되먹임이 생긴다(화면이 꿀렁거리고 칩이 안 보였다).
+        self._others_host = QWidget(); self._others_host.setFixedHeight(30)
+        self._others = QHBoxLayout(self._others_host)
+        self._others.setContentsMargins(0, 0, 0, 0); self._others.setSpacing(6)
+        self._shown_n = -1
+        self._refit_timer = QTimer(self); self._refit_timer.setSingleShot(True)
+        self._refit_timer.setInterval(80)
+        self._refit_timer.timeout.connect(self._refit_others)
+        v.addLayout(self._flow); v.addLayout(self._base); v.addWidget(self._others_host)
 
         legend = QHBoxLayout(); legend.setSpacing(12)
         for state, text in _LEGEND:
@@ -203,18 +212,11 @@ class DiagramPanel(QFrame):
             none = QLabel("없음"); none.setStyleSheet("color: #5C6475;")
             self._others.addWidget(none)
             self._others.addStretch(1)
+            self._shown_n = 0
             return
 
-        # 들어갈 수 있는 칩 수: 칩 폭 = 글자 폭 + 안쪽 여백·테두리(26) + 간격
-        fm = self.fontMetrics()
-        gap = self._others.spacing()
-        room = max(self.width(), 500) - 20 - (fm.horizontalAdvance("기타 옵션") + 16) - 90   # 90 = '외 n개' 자리
-        n_show, used = 0, 0
-        for s in others:
-            w = fm.horizontalAdvance(self._chip_text(s)) + 26 + gap
-            if used + w > room and n_show > 0:
-                break
-            used += w; n_show += 1
+        n_show = self._count_fit(others)
+        self._shown_n = n_show
         shown, hidden = others[:n_show], others[n_show:]
 
         for s in shown:
@@ -256,10 +258,36 @@ class DiagramPanel(QFrame):
     def _open_more_menu(self, button: QPushButton) -> None:
         self.more_menu(button).exec(button.mapToGlobal(button.rect().bottomLeft()))
 
+    def _count_fit(self, others: List[rv.Slot]) -> int:
+        """지금 폭에 들어가는 칩 수. 칩 폭 = 글자 폭 + 안쪽 여백·테두리(26) + 간격."""
+        fm = self.fontMetrics()
+        gap = self._others.spacing()
+        width = self._others_host.width() if self._others_host.width() > 100 else max(self.width() - 20, 480)
+        room = width - (fm.horizontalAdvance("기타 옵션") + 16) - 90        # 90 = '외 n개' 자리
+        n_show, used = 0, 0
+        for s in others:
+            w = fm.horizontalAdvance(self._chip_text(s)) + 26 + gap
+            if used + w > room and n_show > 0:
+                break
+            used += w; n_show += 1
+        if n_show == len(others) - 1:            # 하나만 숨길 바에는: '외 1개' 자리에 그 하나가 들어가는지 본다
+            last = fm.horizontalAdvance(self._chip_text(others[-1])) + 26 + gap
+            if used + last <= room + 90:
+                n_show += 1
+        return n_show
+
+    def _refit_others(self) -> None:
+        """폭이 바뀌어 보일 수 있는 칩 수가 달라졌을 때만 다시 늘어놓는다."""
+        others = getattr(self, "_other_slots", [])
+        if others and self._count_fit(others) != self._shown_n:
+            self._fill_others()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if getattr(self, "_other_slots", None):
-            self._fill_others()          # 폭이 바뀌면 보이는 칩 수를 다시 맞춘다
+        # 높이만 바뀐 것은 상관없다. 폭이 바뀌었을 때만, 그것도 잠깐 모았다가 한 번만 맞춘다
+        # (여기서 곧바로 다시 그리면 크기 변경 도중에 또 크기를 바꾸게 된다).
+        if event.oldSize().width() != event.size().width() and getattr(self, "_other_slots", None):
+            self._refit_timer.start()
 
 
 # ══════════════════════════════════════════════

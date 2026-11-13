@@ -31,7 +31,8 @@ SETTINGS_SHEET = "설정"
 
 # (키, 기본값, 종류, 설명)
 #   종류: sheet=시트 이름, cell=셀 주소, col=열 문자, cols=열 범위 목록,
-#         row=행 번호, int=정수, text=문구, name=이름 규칙({자리표시} 사용)
+#         row=행 번호, int=정수, text=문구, name=이름 규칙({자리표시} 사용),
+#         list=쉼표로 나열한 목록
 _SPEC: List[Tuple[str, Any, str, str]] = [
     # ── 시트 이름 ──────────────────────────────────────────────
     ("sheet.items",      "품목",              "sheet", "품목(분류·규격·단가) 시트"),
@@ -171,6 +172,14 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     ("cover.rows",          30,  "int", "갑지에 실을 수 있는 견적 건수"),
     ("cover.data_last_col", "AA", "col", "갑지DATA: 견적의뢰복사본에서 옮겨 오는 마지막 열"),
 
+    # ── 구성 도식 (화면) ───────────────────────────────────────
+    # 품목 시트의 '분류' 이름을 쉼표로 나열한다. 이름 끝의 * 는 "수량이 CH 와 같아야 함",
+    # @PUMP 는 PUMP 품목을 뜻한다. 어디에도 없는 분류는 '기타 옵션' 으로 표시된다.
+    ("diagram.flow", "Gate Valve*, Metal Bellows*, @PUMP*, Hot N2 Transfer*", "list",
+     "도식 윗줄: 설비 → 배기 흐름 순서"),
+    ("diagram.base", "Pump Rack, Power Distribution Box, 성형 Bellows", "list",
+     "도식 아랫줄: 흐름 밖 구성품"),
+
     # ── 기본값 · 판별 ─────────────────────────────────────────
     ("default.investor",    "채승철", "text", "투자자 이름을 비워 두었을 때 쓰는 이름"),
     ("credit.pump_keyword", "Pump",  "text", "Credit 규격에 이 말이 있으면 Pump Credit 으로 본다"),
@@ -285,6 +294,11 @@ def _coerce(key: str, raw: Any) -> Any:
         if not text:
             raise ValueError("시트 이름이 비어 있습니다")
         return text
+    if kind == "list":
+        parts = [x.strip() for x in text.split(",") if x.strip()]
+        if not parts:
+            raise ValueError("목록이 비어 있습니다")
+        return ", ".join(parts)
     if kind == "name":
         try:
             text.format(**{p: "x" for p in _PLACEHOLDERS[key]})
@@ -322,6 +336,10 @@ class QuoteConfig:
     def at(self, col_key: str, row: int) -> str:
         """열 설정 + 행 번호 → 셀 주소. at('dom.col_spec', 17) → 'B17'"""
         return f"{self._values[col_key]}{row}"
+
+    def items(self, key: str) -> List[str]:
+        """쉼표로 나열한 목록 설정을 리스트로."""
+        return [x.strip() for x in str(self._values[key]).split(",") if x.strip()]
 
     def text(self, key: str, **values: Any) -> str:
         """문구·이름 규칙에 값을 채운다."""

@@ -83,7 +83,7 @@ def test_load_caches_until_file_changes(tmp_path):
 def test_every_key_is_used_by_the_code():
     """설정 항목을 만들어 놓고 코드가 안 읽으면 '고쳐도 안 바뀌는 설정'이 된다."""
     src = ""
-    for name in ("excel_io.py", "page_quote.py"):
+    for name in ("excel_io.py", "page_quote.py", "quote_review.py"):
         with open(os.path.join(NO_COM, name), encoding="utf-8") as f:
             src += f.read()
     prefixes = set(re.findall(r'"((?:codemap|copy)\.col_)" \+', src))       # 조립해서 쓰는 키

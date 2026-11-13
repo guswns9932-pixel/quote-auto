@@ -33,6 +33,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 import excel_com
+import quote_calc
 import quote_config
 from excel_com import _clear_clipboard
 from core import (
@@ -911,8 +912,9 @@ def _fill_domestic(state: QuoteState,
     if state.exh_size:
         ws_incoming[cfg["dom.cell_exh_size"]] = int(state.exh_size)
 
-    rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
-    credits    = [r for r in items if r["role"] == "CREDIT"]
+    # 금액 계산은 quote_calc 한곳에서 — 화면의 금액 미리보기와 같은 식을 쓴다
+    calc = quote_calc.domestic(items, to_float(rd.get("H")), cfg["credit.pump_keyword"])
+    rack_items, credits = calc.rack_items, calc.credits
 
     # ④ 기존 데이터 클리어
     for rr in range(spec_start, spec_end + 1):
@@ -935,25 +937,9 @@ def _fill_domestic(state: QuoteState,
     # 차감되도록 하고, 아래 라인은 표시 전용(G=0)으로 남긴다.
     #   · Rack Credit → 기존대로 G열에 실금액 (G16 에서 차감)
     #   · Pump Credit → F15 하드코딩 + 표시행 G=0 (이중 차감 방지)
-    pump_credits, rack_credits = _split_credits(credits, cfg)
-
-    pump_items      = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
-    pump_spec       = pump_items[0]["spec"] if pump_items else None
-    pump_amt        = sum(r["amt"] for r in pump_items)
-    rack_amt        = sum(r["amt"] for r in rack_items)
-    pump_credit_amt = sum(c["amt"] for c in pump_credits)   # 통상 음수
-    rack_credit_amt = sum(c["amt"] for c in rack_credits)   # 통상 음수
-
-    h_qty = to_float(rd.get("H"))
-    if h_qty <= 0:
-        h_qty = 1.0
-
-    # PUMP CH당 단가 — credit 반영 후 정수(원)로 확정한다.
-    # 소수점이 남으면 견적서에 13,900,000.333 같은 값이 찍히고,
-    # G15=E15*F15 결과도 원 단위로 떨어지지 않는다.
-    p_unit_net = round((pump_amt + pump_credit_amt) / h_qty)
-    # 표시용 CH당 Credit 단가 (음수)
-    _pump_credit_unit = round(pump_credit_amt / h_qty) if pump_credits else 0
+    pump_credits, rack_credits = calc.pump_credits, calc.rack_credits
+    pump_spec = calc.pump_spec
+    p_unit_net, _pump_credit_unit = calc.p_unit_net, calc.pump_credit_unit
 
     out_list = rack_items[:spec_rows]
     for cr in rack_credits:
@@ -1025,24 +1011,8 @@ def _fill_domestic(state: QuoteState,
     # ※ p_unit_net 은 이미 정수로 반올림했으므로 g15 도 그 값에서 직접 만든다.
     #   (A/h)*h 식으로 되돌리면 부동소수점 1 ulp 오차로 floor 가 1,000원
     #   낮게 떨어질 수 있다.
-    if pump_credits:
-        p_unit = p_unit_net                 # F15 에 실제로 쓴 값
-        g15    = p_unit_net * h_qty         # Excel 의 E15*F15 와 정확히 동일
-    else:
-        p_unit = round(pump_amt / h_qty) if h_qty else 0
-        g15    = pump_amt
-
-    g16   = rack_amt + rack_credit_amt      # Pump Credit 은 G열 0 이라 미포함
-    q_val = g16                             # Q2 = 사양서!G16
-
-    # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
-    s_raw = (g15 + g16) / h_qty
-    s_val = math.floor(s_raw / 1000) * 1000   # ROUNDDOWN(..., -3)
-    # T = S2 * H2
-    t_val = s_val * h_qty
-    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — 템플릿 수식 그대로 (Q2 경유로 credit 반영)
-    u_raw = (p_unit * h_qty + q_val) / h_qty
-    u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
+    p_unit, q_val = calc.p_unit, calc.g16          # P2 = 사양서!F15, Q2 = 사양서!G16
+    s_val, t_val, u_val = calc.unit, calc.total, calc.unit_check
 
     # 금액은 모두 원 단위 정수로 기입한다 — 소수점이 남으면 갑지·견적서에
     # 13,900,000.333 같은 값이 찍힌다.

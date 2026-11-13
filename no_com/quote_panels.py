@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu,
     QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 from PySide6.QtGui import QBrush, QColor
@@ -182,26 +182,84 @@ class DiagramPanel(QFrame):
             b = self._slot_button(s, tall=False); self.buttons.append(b)
             self._base.addWidget(b, 1)
 
+        self._other_slots = list(review.others)
+        self._fill_others()
+
+    # ── 기타 옵션 줄 ─────────────────────────────
+    @staticmethod
+    def _chip_text(s: rv.Slot) -> str:
+        return _short(s.text, 18) + ("  · 0원" if s.state == rv.BAD else "")
+
+    def _fill_others(self) -> None:
+        """도식에 자리가 없는 품목을 칩으로 늘어놓는다. 폭에 들어가는 만큼만 보이고,
+        나머지는 '외 n개' 칸에 묶는다 — 그 칸에 마우스를 올리거나 누르면 목록이 뜬다."""
+        self._clear(self._others)
+        self.buttons = [b for b in self.buttons if not getattr(b, "is_other", False)]
+        self.more_button: Optional[QPushButton] = None
+        others = getattr(self, "_other_slots", [])
         cap = QLabel("기타 옵션"); cap.setStyleSheet("color: #3C4557; font-weight: bold;")
         self._others.addWidget(cap)
-        if not review.others:
+        if not others:
             none = QLabel("없음"); none.setStyleSheet("color: #5C6475;")
             self._others.addWidget(none)
-        shown = review.others[:4]
+            self._others.addStretch(1)
+            return
+
+        # 들어갈 수 있는 칩 수: 칩 폭 = 글자 폭 + 안쪽 여백·테두리(26) + 간격
+        fm = self.fontMetrics()
+        gap = self._others.spacing()
+        room = max(self.width(), 500) - 20 - (fm.horizontalAdvance("기타 옵션") + 16) - 90   # 90 = '외 n개' 자리
+        n_show, used = 0, 0
+        for s in others:
+            w = fm.horizontalAdvance(self._chip_text(s)) + 26 + gap
+            if used + w > room and n_show > 0:
+                break
+            used += w; n_show += 1
+        shown, hidden = others[:n_show], others[n_show:]
+
         for s in shown:
             bg, bd, fg, _ = _TONE[s.state]
-            chip = QPushButton(_short(s.text, 18) + ("  · 0원" if s.state == rv.BAD else ""))
+            chip = QPushButton(self._chip_text(s))
             chip.setFixedHeight(26); chip.setToolTip(f"{s.label}\n{s.text}\n{s.note}")
             chip.setStyleSheet(f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {bd}; "
                                f"border-radius: 13px; padding: 0 10px; font-size: 11px; }}")
-            chip.slot = s
+            chip.slot = s; chip.is_other = True
             chip.clicked.connect(lambda _=False, sp=s.specs[0]: self.pickSpec.emit(sp))
             self.buttons.append(chip)
             self._others.addWidget(chip)
-        if len(review.others) > len(shown):
-            more = QLabel(f"외 {len(review.others) - len(shown)}개"); more.setStyleSheet("color: #5C6475;")
+        if hidden:
+            bad = any(s.state == rv.BAD for s in hidden)
+            more = QPushButton(f"외 {len(hidden)}개 ▾")
+            more.setFixedHeight(26)
+            more.setToolTip("\n".join(f"{s.text}  ·  {s.note}" + ("  ·  단가 0원" if s.state == rv.BAD else "")
+                                      for s in hidden))
+            bd, fg, bg = ("#C62828", "#8E1B1B", "#FDEAEA") if bad else ("#8A93A3", "#3C4557", "#F0F1F4")
+            more.setStyleSheet(f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {bd}; "
+                               f"border-radius: 13px; padding: 0 10px; font-size: 11px; }}"
+                               f"QPushButton:hover {{ border-color: {NAVY}; }}")
+            more.hidden_slots = hidden
+            more.clicked.connect(lambda _=False, b=more: self._open_more_menu(b))
+            more.setContextMenuPolicy(Qt.CustomContextMenu)
+            more.customContextMenuRequested.connect(lambda _pos, b=more: self._open_more_menu(b))
+            self.more_button = more
             self._others.addWidget(more)
         self._others.addStretch(1)
+
+    def more_menu(self, button: QPushButton) -> QMenu:
+        """'외 n개' 에 묶인 품목 목록. 고르면 표에서 그 품목이 선택된다."""
+        menu = QMenu(self)
+        for s in button.hidden_slots:
+            act = menu.addAction(f"{s.text}   ·   {s.note}" + ("   ·   단가 0원" if s.state == rv.BAD else ""))
+            act.triggered.connect(lambda _=False, sp=s.specs[0]: self.pickSpec.emit(sp))
+        return menu
+
+    def _open_more_menu(self, button: QPushButton) -> None:
+        self.more_menu(button).exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_other_slots", None):
+            self._fill_others()          # 폭이 바뀌면 보이는 칩 수를 다시 맞춘다
 
 
 # ══════════════════════════════════════════════

@@ -447,3 +447,44 @@ class FoldableWindow(QWidget):
                 event.Type.Move, event.Type.Resize):
             self._place_folded()
         return super().eventFilter(obj, event)
+
+
+# ══════════════════════════════════════════════
+# 정보 말풍선 (우클릭으로 띄우는 안내)
+# ══════════════════════════════════════════════
+
+class InfoPopup(QLabel):
+    """글만 보여주는 말풍선. 아무 곳이나 누르거나, 휠을 굴리거나, 키를 누르거나,
+    다른 창으로 가면 스스로 닫힌다 — 그리고 그 클릭·키는 원래 가던 곳으로 그대로 간다.
+
+    Qt.Popup 으로 만들면 마우스 입력을 독점해서, 닫으려고 누른 첫 클릭이 먹히고
+    프로그램이 멈춘 것처럼 보였다. 그래서 입력을 잡지 않는 창(ToolTip)으로 띄우고
+    닫는 시점은 직접 지켜본다.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setStyleSheet(
+            "QLabel { background: #1D2433; color: white; padding: 10px 14px; border: 1px solid #1D2433; }")
+        self._watching = False
+
+    def show_at(self, text: str, global_pos) -> None:
+        self.setText(text)
+        self.adjustSize()
+        self.move(global_pos)
+        self.show()
+        if not self._watching:
+            QApplication.instance().installEventFilter(self)
+            self._watching = True
+
+    def hideEvent(self, event) -> None:
+        if self._watching:
+            QApplication.instance().removeEventFilter(self)
+            self._watching = False
+        super().hideEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (event.Type.MouseButtonPress, event.Type.Wheel, event.Type.KeyPress,
+                            event.Type.WindowDeactivate, event.Type.ApplicationDeactivate):
+            self.hide()
+        return False                     # 입력을 가로채지 않는다

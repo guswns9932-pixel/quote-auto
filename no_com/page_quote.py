@@ -35,7 +35,7 @@ from core import (
     normalize_token, parse_invest_info, s, to_float, unique_path,
 )
 from widgets import (
-    DraggableItemsTable, DroppableQuoteTable, FoldableWindow,
+    DraggableItemsTable, DroppableQuoteTable, FoldableWindow, InfoPopup,
     bold_label, centered_checkbox,
     get_checkbox_from_cell, info_label, labeled_frame, tint_button,
 )
@@ -920,7 +920,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.req_table.setItemDelegate(_ReqRowDelegate(self.req_table))
         self.req_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.req_table.customContextMenuRequested.connect(self._show_req_info)
-        self._req_popup: Optional[QLabel] = None
+        self._req_popup: Optional[InfoPopup] = None
         self._style_req_table()
         # 좁은 목록에는 호기와 수량만 — 나머지는 행에 마우스를 올리면 툴팁으로 보인다
         for _ci in self._REQ_HIDDEN_COLS:
@@ -2161,15 +2161,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         row = self.req_table.rowAt(pos.y())
         it = self.req_table.item(row, 1) if row >= 0 else None
         if it is None:
+            if self._req_popup is not None:
+                self._req_popup.hide()
             return
         if self._req_popup is None:
-            self._req_popup = QLabel(self, Qt.Popup)          # 바깥을 누르면 닫힌다
-            self._req_popup.setStyleSheet(
-                "QLabel { background: #1D2433; color: white; padding: 10px 14px; border-radius: 4px; }")
-        self._req_popup.setText(it.toolTip())
-        self._req_popup.adjustSize()
-        self._req_popup.move(self.req_table.viewport().mapToGlobal(pos) + QPoint(12, 8))
-        self._req_popup.show()
+            self._req_popup = InfoPopup(self)     # 아무 곳이나 누르면 닫히고, 그 클릭은 그대로 동작한다
+        self._req_popup.show_at(it.toolTip(), self.req_table.viewport().mapToGlobal(pos) + QPoint(12, 8))
 
     def _add_done(self, path: str) -> None:
         self._list_all_files.insert(0, path)

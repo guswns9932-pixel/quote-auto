@@ -51,13 +51,33 @@ def _run_spec(only=""):
     return calls, g["_PROFILES"]
 
 
-def test_full_build_makes_five_exes_in_one_folder():
+def test_default_build_is_one_exe_and_internal_only():
+    """기본 빌드: 폴더에 <이름>.exe 와 _internal 만 — exe 하나가 런처와 앱 전부를 품는다."""
     calls, profiles = _run_spec()
+    assert [c.kw["name"] for c in calls if c.kind == "EXE"] == ["견적자동화"]
+    assert [c.kw["name"] for c in calls if c.kind == "COLLECT"] == ["견적자동화"]
+    a = next(c for c in calls if c.kind == "Analysis")
+    assert a.args[0][0].endswith("app_main.py")
+    assert build_onedir.output_names("견적자동화") == ("견적자동화", ["견적자동화.exe"])
+
+    # exe 하나가 모든 앱을 돌려야 한다: 어느 앱이든 쓰는 것은 들어 있고, 제외돼 있지 않다
+    hidden, excludes = set(a.kw["hiddenimports"]), a.kw["excludes"]
+    seen, third, by_string = _closure("app_main")
+    assert {"main", "run_quote", "run_esign", "run_search", "run_csp"} <= hidden
+    assert not sorted(m for m in by_string if m not in hidden)
+    used = {m.split(".")[0] for m in seen} | third
+    assert not sorted(u for u in used if any(u == e or u.startswith(e + ".") for e in excludes))
+    for lib in ("openpyxl", "fitz"):                       # 견적서작성·CSP 는 openpyxl, 전자서명·검색기는 fitz
+        assert ("b:" + lib, ".") in a.kw["binaries"]
+
+
+def test_split_build_makes_five_exes_in_one_folder():
+    calls, profiles = _run_spec("split")
     exes = [c.kw["name"] for c in calls if c.kind == "EXE"]
     assert exes == ["견적자동화", "견적자동화_quote", "견적자동화_esign", "견적자동화_search", "견적자동화_csp"]
     assert [c.kw["name"] for c in calls if c.kind == "COLLECT"] == ["견적자동화"]
     assert [p["key"] for p in profiles] == list(build_onedir.APP_KEYS)
-    assert build_onedir.output_names("견적자동화") == ("견적자동화", [e + ".exe" for e in exes])
+    assert build_onedir.output_names("견적자동화", "split") == ("견적자동화", [e + ".exe" for e in exes])
 
 
 @pytest.mark.parametrize("key", ["launcher", "quote", "esign", "search", "csp"])
@@ -72,7 +92,8 @@ def test_single_app_build_is_a_folder_of_its_own(key):
 def test_command_line_parsing(monkeypatch):
     assert build_onedir._split_args(["이름", "icon.ico", "--app", "Quote"]) == (["이름", "icon.ico"], "quote")
     assert build_onedir._split_args(["이름", "--app=esign"]) == (["이름"], "esign")
-    assert build_onedir._split_args(["이름", "--single"]) == (["이름"], "")       # 예전 옵션은 무시
+    assert build_onedir._split_args(["이름", "--single"]) == (["이름"], "")       # 이제 기본이라 적어도 같다
+    assert build_onedir._split_args(["이름", "--split"]) == (["이름"], "split")
     with pytest.raises(SystemExit):
         build_onedir._split_args(["이름", "--app", "없는앱"])
 
@@ -151,7 +172,7 @@ def _closure(entry, stop=()):
 
 @pytest.mark.parametrize("key", ["launcher", "quote", "esign", "search", "csp"])
 def test_profile_matches_what_the_app_really_imports(key):
-    _calls, profiles = _run_spec()
+    _calls, profiles = _run_spec("split")
     prof = next(p for p in profiles if p["key"] == key)
     local = _local_modules()
     entry = prof["script"][:-3]
@@ -216,3 +237,34 @@ def test_launcher_finds_apps_next_to_it_or_in_a_sibling_folder(tmp_path, monkeyp
 
     cmd, must = launcher._app_command("csp")                                    # 없으면 없는 경로를 돌려준다
     assert not os.path.exists(must) and cmd == [must]
+
+    # 기본 빌드(exe 하나에 전부): 같은 exe 를 --<앱> 인자로 다시 실행한다
+    monkeypatch.setattr(launcher, "ALL_IN_ONE", True)
+    assert launcher._app_command("quote") == ([str(exe), "--quote"], str(exe))
+    assert launcher._app_command("csp") == ([str(exe), "--csp"], str(exe))
+
+
+def test_app_main_picks_the_app_from_the_argument(monkeypatch):
+    """exe 하나짜리 빌드의 진입점: 인자에 따라 그 앱만 불러온다(다른 앱의 무거운 모듈은 건드리지 않는다)."""
+    import importlib
+    import app_main
+    started = []
+    real = importlib.import_module
+
+    def fake_import(name, *a, **k):
+        if name.startswith("run_") or name == "main":
+            mod = types.ModuleType(name)
+            mod.main = lambda: started.append(name)
+            return mod
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    fake_launcher = types.SimpleNamespace(main=lambda: started.append("main"), ALL_IN_ONE=False)
+    monkeypatch.setitem(sys.modules, "main", fake_launcher)
+    for argv, want in ((["x.exe", "--csp"], "run_csp"), (["x.exe", "--quote"], "run_quote"),
+                       (["x.exe", "--esign"], "run_esign"), (["x.exe", "--search"], "run_search"),
+                       (["x.exe"], "main")):
+        monkeypatch.setattr(sys, "argv", argv)
+        app_main.main()
+        assert started[-1] == want
+    assert fake_launcher.ALL_IN_ONE is True          # 런처로 뜰 때는 합본 exe 임을 알려 둔다

@@ -9,4 +9,3 @@
 | `pages.py` | 옛 이름 호환용 재내보내기 | `page_quote` / `page_esign` 을 직접 불러오므로 불필요 |
 | `test_printout.py` | 인쇄영역 캡처 수동 시험 스크립트 | 특정 PC 경로가 박힌 일회용 스크립트 |
 | `esign_capture.py` | 전자서명: 시트를 클립보드로 캡처해 그림으로 받던 방식 | PDF 저장 방식(`esign_engine.py`)으로 교체 |
-| `app_main.py` | 런처와 앱 전부를 exe 하나로 합치는 빌드의 진입점 | 앱마다 따로 빌드하기로 해서 그 빌드 방식을 없앰 |

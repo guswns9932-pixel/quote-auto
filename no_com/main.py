@@ -36,8 +36,10 @@ logger = logging.getLogger("QuoteApp")
 # 앱 실행 (앱마다 별도 프로세스 / 별도 exe)
 # ──────────────────────────────────────────────
 # 키: 런처 버튼 → (라벨, exe 접미사, 개발 환경 스크립트)
-# frozen 일 때 exe 는 런처 exe 와 같은 폴더의 "<런처이름>_<접미사>.exe" 이고,
-# 없으면(앱을 따로 빌드해 옆에 둔 경우) "../<런처이름>_<접미사>/<런처이름>_<접미사>.exe" 다.
+# frozen 일 때:
+#   · 기본 빌드(exe 하나에 전부)면 자기 자신을 "--<접미사>" 인자로 다시 실행한다.
+#   · 앱별 exe 빌드면 같은 폴더의 "<런처이름>_<접미사>.exe", 없으면 옆 폴더
+#     "../<런처이름>_<접미사>/<런처이름>_<접미사>.exe" 를 실행한다.
 _APPS = {
     "quote":  ("견적서작성",        "quote",  "run_quote.py"),
     "esign":  ("전자서명",          "esign",  "run_esign.py"),
@@ -50,15 +52,21 @@ _APPS = {
 # 띄운 프로세스가 아직 살아 있으면(poll() is None) 새로 띄우지 않는다.
 _launched_procs: dict = {}
 
+# exe 하나에 런처와 앱 전부가 든 빌드에서만 True. 그 빌드의 진입점이 런처를 띄우기
+# 직전에 켠다. 앱별 exe 빌드에서는 런처가 main.py 로 바로 시작하므로 False 로 남는다.
+ALL_IN_ONE = False
+
 
 def _app_command(key: str) -> tuple:
     """(실행 명령, 존재해야 하는 파일 경로).
 
-    frozen 이면 런처와 같은 폴더의 "<런처이름>_<접미사>.exe"(전체 빌드)를 쓰고,
-    없으면 옆 폴더의 것(--app 으로 따로 빌드한 앱)을 쓴다."""
+    exe 하나에 전부 든 빌드면 자기 자신을 "--<접미사>" 로 다시 실행하고,
+    앱별 exe 빌드면 같은 폴더(--split) 또는 옆 폴더(--app)의 exe 를 쓴다."""
     _label, suffix, script = _APPS[key]
     if getattr(sys, "frozen", False):
         exe = os.path.abspath(sys.executable)
+        if ALL_IN_ONE:                     # 이 exe 가 앱 전부를 품고 있다
+            return [exe, f"--{suffix}"], exe
         stem = os.path.splitext(os.path.basename(exe))[0]
         name = f"{stem}_{suffix}"
         here = os.path.dirname(exe)

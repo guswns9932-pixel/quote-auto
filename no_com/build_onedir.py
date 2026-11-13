@@ -7,21 +7,24 @@ Python 미설치 환경에서도 동작 (Python 인터프리터 포함).
 사용법
 ------
   python build_onedir.py                          # 이름 프롬프트
-  python build_onedir.py 견적자동화               # 전체: dist/견적자동화/ 에 런처 + 앱 4개
+  python build_onedir.py 견적자동화               # 기본: dist/견적자동화/ 에 견적자동화.exe + _internal
   python build_onedir.py 견적자동화 icon.ico
+  python build_onedir.py 견적자동화 --split       # 한 폴더에 exe 5개(런처 + 앱 4개)
   python build_onedir.py 견적자동화 --app quote   # 견적서작성만: dist/견적자동화_quote/
-  python build_onedir.py 견적자동화 --app esign   # 전자서명만:   dist/견적자동화_esign/
       (--app 에 쓸 수 있는 이름: launcher, quote, esign, search, csp)
 
-앱마다 exe 가 하나씩이고, 자기에게 필요한 라이브러리만 싣는다.
-  · 전체 빌드: 한 폴더에 exe 5개. 공통 DLL(PySide6 등)은 한 벌만 들어간다.
-  · --app 빌드: 그 앱 하나만 든 독립 폴더. 그 폴더만 전달해도 실행된다.
+빌드 방식
+---------
+  기본     exe 하나에 런처와 앱 4개가 모두 들어간다. 폴더에는 exe 1개와 _internal 뿐이다.
+           런처에서 앱을 고르면 같은 exe 가 그 앱으로 다시 실행된다(--quote 등).
+           해시는 exe 1개.
+  --split  앱마다 exe 를 따로 만들어 한 폴더에 모은다. 각 exe 는 자기에게 필요한
+           라이브러리만 불러와 첫 실행이 가볍다. 해시는 exe 5개.
+  --app    그 앱 하나만 든 독립 폴더를 만든다.
 
 배포 방법
 ---------
   dist/<폴더>/ 를 통째로 압축해서 전달. 수령자는 압축을 풀고 exe 를 실행.
-  전체 빌드는 런처(견적자동화.exe)에서 각 앱을 띄운다. 런처는 같은 폴더의
-  <이름>_<앱>.exe 를 찾고, 없으면 옆 폴더 ../<이름>_<앱>/<이름>_<앱>.exe 를 찾는다.
 """
 
 import math
@@ -34,8 +37,10 @@ APP_KEYS = ("launcher", "quote", "esign", "search", "csp")
 
 
 def _split_args(argv):
-    """명령줄을 (일반 인자들, --app 값) 으로 나눈다. --app 이 없으면 '' (전체 빌드)."""
+    """명령줄을 (일반 인자들, 빌드 대상) 으로 나눈다.
+    빌드 대상: '' = 기본(exe 하나에 전부), 'split' = 한 폴더에 exe 5개, 앱 이름 = 그 앱만."""
     rest, only, i = [], "", 0
+    split = False
     while i < len(argv):
         a = argv[i]
         if a == "--app":
@@ -44,13 +49,15 @@ def _split_args(argv):
             continue
         if a.startswith("--app="):
             only = a.split("=", 1)[1].strip().lower()
-        elif a != "--single":          # 예전 옵션 — 지금은 뜻이 없어 무시한다
+        elif a == "--split":
+            split = True
+        elif a != "--single":          # 예전 옵션 — 이제 그게 기본이라 적어도 달라지지 않는다
             rest.append(a)
         i += 1
     if only and only not in APP_KEYS:
         print(f"오류: --app 에는 {', '.join(APP_KEYS)} 중 하나를 쓰세요. (받은 값: {only})")
         sys.exit(1)
-    return rest, only
+    return rest, (only or ("split" if split else ""))
 
 
 def _get_args():
@@ -88,7 +95,7 @@ from PyInstaller.utils.hooks import collect_all
 
 HERE = Path(r"@HERE@")
 APP_NAME = "@APP_NAME@"
-ONLY = "@ONLY@"     # 비어 있으면 전체(런처+앱 4개). 앱 이름이면 그 앱 하나만 독립 폴더로.
+ONLY = "@ONLY@"     # '' = exe 하나에 전부(기본), 'split' = 한 폴더에 exe 5개, 앱 이름 = 그 앱만.
 ICON = r"@ICON@" or None
 
 # 앱마다 별도 exe 를 만들되 한 폴더(onedir)에 모은다. 앱별로 필요한 의존성만
@@ -237,11 +244,25 @@ _PROFILES = [
     ),
 ]
 
-if ONLY:
+if ONLY == "split":
+    COLLECT_NAME = APP_NAME
+elif ONLY:
     # 한 앱만: 그 앱의 exe 이름으로 된 독립 폴더를 만든다
     _PROFILES = [_p for _p in _PROFILES if _p["key"] == ONLY]
     COLLECT_NAME = _PROFILES[0]["exe"]
 else:
+    # 기본: 모든 앱을 exe 하나에 합친다. 폴더에는 <이름>.exe 와 _internal 만 생긴다.
+    # 어느 앱으로 뜰지는 app_main.py 가 실행 인자(--quote 등)를 보고 정한다.
+    _merged = dict(key="all", script="app_main.py", exe=APP_NAME, hidden=[], binaries=[], datas=[])
+    for _p in _PROFILES:
+        _merged["hidden"] += [h for h in _p["hidden"] if h not in _merged["hidden"]]
+        _merged["hidden"].append(_p["script"].replace(".py", ""))      # main, run_quote, …
+        _merged["binaries"] += [b for b in _p["binaries"] if b not in _merged["binaries"]]
+        _merged["datas"] += [d for d in _p["datas"] if d not in _merged["datas"]]
+    # 앱마다 제외 목록이 다르다(한 앱이 안 쓰는 것을 다른 앱은 쓴다) → 아무도 안 쓰는 것만 제외
+    _merged["excludes"] = list(_COMMON_EXCLUDES) + [
+        "PIL", "selenium", "webdriver_manager", "pyautogui"]
+    _PROFILES = [_merged]
     COLLECT_NAME = APP_NAME
 
 _exes = []
@@ -283,7 +304,7 @@ coll = COLLECT(
 
 
 def _make_spec(app_name: str, icon: str, only: str = "") -> str:
-    """PyInstaller spec 을 만든다. only 가 비어 있으면 전체, 앱 이름이면 그 앱만."""
+    """PyInstaller spec 을 만든다. only: '' = exe 하나에 전부, 'split' = exe 5개, 앱 이름 = 그 앱만."""
     return (_SPEC_TEMPLATE
             .replace("@HERE@", HERE)
             .replace("@APP_NAME@", app_name)
@@ -294,9 +315,11 @@ def _make_spec(app_name: str, icon: str, only: str = "") -> str:
 def output_names(app_name: str, only: str = ""):
     """(만들어지는 폴더 이름, 그 안의 exe 이름들)."""
     exes = {"launcher": app_name, **{k: f"{app_name}_{k}" for k in APP_KEYS if k != "launcher"}}
+    if only == "split":
+        return app_name, [exes[k] + ".exe" for k in APP_KEYS]
     if only:
         return exes[only], [exes[only] + ".exe"]
-    return app_name, [exes[k] + ".exe" for k in APP_KEYS]
+    return app_name, [app_name + ".exe"]
 
 
 def _create_icon() -> str:
@@ -434,7 +457,7 @@ def main():
     print(f"\n{'='*54}")
     print(f"  앱 이름 : {app_name}")
     print(f"  아이콘  : {icon or '없음'}")
-    print(f"  대상    : {only or '전체 (런처 + 앱 4개)'}")
+    print(f"  대상    : {'exe 하나에 전부 (런처 + 앱 4개)' if not only else '한 폴더에 exe 5개' if only == 'split' else only}")
     print(f"  출력    : {os.path.join(dist_dir, out_name)}/")
     print(f"  로그    : {log_path}")
     print(f"{'='*54}")

@@ -25,8 +25,9 @@ from PySide6.QtWidgets import (
 )
 
 import app_settings
+import quote_config
 from core import (
-    QuoteState, SheetName,
+    QuoteState,
     exe_dir, fmt_krw, fmt_qty,
     normalize_token, parse_invest_info, s, to_float, unique_path,
 )
@@ -64,8 +65,10 @@ class _TemplateLoaderThread(QThread):
             # iter_rows() 로만 순회한다 — cell(r,c) 임의 접근을 read_only 모드에
             # 섞으면 O(n²) 로 저하되므로 절대 함께 쓰지 않는다.
             wb = load_workbook(self.path, read_only=True, data_only=False)
-            rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(wb[SheetName.ITEMS])
-            cmap = excel_io.parse_code_map_sheet(wb[SheetName.CODE_MAP])
+            cfg = quote_config.from_workbook(wb)      # 시트 이름·열 위치는 양식의 설정을 따른다
+            rows, by_class, price_by_spec, order = excel_io.parse_items_sheet(
+                wb[cfg["sheet.items"]], cfg)
+            cmap = excel_io.parse_code_map_sheet(wb[cfg["sheet.code_map"]], cfg)
             wb.close()
             self.done.emit((rows, by_class, price_by_spec, order, cmap))
         except Exception as e:
@@ -75,13 +78,15 @@ class _TemplateLoaderThread(QThread):
 class _RequestLoaderThread(QThread):
     """STEP2용: 의뢰파일 Excel을 백그라운드에서 파싱 (메인 스레드 동결 방지)."""
     done = Signal(object)  # (sheet_name, rows) tuple 또는 Exception
-    def __init__(self, path: str, parent=None) -> None:
+    def __init__(self, path: str, parent=None, template_path: Optional[str] = None) -> None:
         super().__init__(parent)
         self.path = path
+        self.template_path = template_path
     def run(self) -> None:
         try:
             import excel_io
-            sheet_name, rows = excel_io.parse_request_xlsx(self.path)
+            sheet_name, rows = excel_io.parse_request_xlsx(
+                self.path, quote_config.load(self.template_path))
             self.done.emit((sheet_name, rows))
         except Exception as e:
             self.done.emit(e)
@@ -1045,8 +1050,15 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         try:
             from openpyxl import load_workbook
             wb_meta = load_workbook(path, read_only=True, data_only=False)
-            missing = [n for n in SheetName.REQUIRED if n not in wb_meta.sheetnames]
+            cfg = quote_config.from_workbook(wb_meta)
+            sheetnames = list(wb_meta.sheetnames)
             wb_meta.close()
+            missing = [n for n in cfg.required_sheets if n not in sheetnames]
+            # 설정 시트의 잘못된 값, 없는 시트 등 — 생성 도중이 아니라 지금 알려준다
+            for w in cfg.check(sheetnames):
+                self._log(f"[설정 확인] {w}")
+            if cfg.overridden:
+                self._log(f"양식의 '{quote_config.SETTINGS_SHEET}' 시트에서 설정 {len(cfg.overridden)}개를 읽었습니다")
         except Exception as e:
             if not silent:
                 QMessageBox.critical(self, "오류", f"파일을 열 수 없습니다.\n{e}")
@@ -1138,7 +1150,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self, "의뢰파일 선택", start, "Excel Files (*.xlsx)")
         if not path: return
-        self._req_thread = _RequestLoaderThread(path, self)
+        self._req_thread = _RequestLoaderThread(path, self, self.state.template_path)
         self._req_thread.done.connect(lambda result: self._on_request_loaded(path, result))
         self._req_thread.start()
 
@@ -1866,7 +1878,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             return
         try:
             import excel_io
-            out = excel_io.export_cover_data_sheet(path)
+            out = excel_io.export_cover_data_sheet(path, self.state.template_path)
         except Exception as e:
             logger.error("제출용 엑셀 생성 실패", exc_info=True)
             QMessageBox.critical(self, "오류", f"제출용 엑셀 생성 실패:\n{e}")

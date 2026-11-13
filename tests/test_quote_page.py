@@ -147,3 +147,43 @@ def test_settings_sheet_button(page, quote_template, tmp_path, monkeypatch):
     page._export_settings_sheet()
     ws = load_workbook(out + ".xlsx")["설정"]
     assert ws["A2"].value == "sheet.items" and ws.max_row > 100
+
+
+def test_layout_b_request_list_picker_window_and_notices(page, quote_template):
+    """좁은 의뢰 목록 + 툴팁, 품목 추가 창, 로그 창 대신 점검 목록의 '참고'."""
+    app = QApplication.instance()
+    _load_template(page, quote_template)
+    rd = {"row_idx": 2, "D": "PR1", "E": 10, "F": "", "G": "DRY_PUMP;EQ,LOT,XD1200", "H": 3, "J": "의뢰자",
+          "K": "L1_ETCH", "N": "", "R": "3CH", "V": "5D-NAME", "X": "MAKER", "Y": "MODEL", "Z": "H001", "AA": None}
+    page.state.request_rows = [rd]
+    page._fill_req_table([rd])
+
+    # 목록에는 호기·수량만 보이고, 나머지는 툴팁에 전부 있다
+    visible = [c for c in range(page.req_table.columnCount()) if not page.req_table.isColumnHidden(c)]
+    assert visible == [0, 1, 3]
+    tip = page.req_table.item(0, 1).toolTip()
+    for part in ("설비호기: H001", "투자정보: EQ_XD1200", "수량: 3", "Rack: 3CH", "Maker: MAKER",
+                 "설비: MODEL", "5D: 5D-NAME", "PR: PR1", "라인: L1_ETCH"):
+        assert part in tip
+
+    # 품목 목록은 별도 창 — 버튼으로 열고, 거기서 더블클릭하면 담긴다
+    assert page._picker.isVisible() is False and page._picker.isWindow()
+    page.btn_add_item.click()
+    app.processEvents()
+    assert page._picker.isVisible() is True
+    page._do_filter()
+    assert page.items_table.rowCount() > 0 and page.items_table.window() is page._picker
+
+    # 로그 창은 없고, 양식 알림은 점검 목록에 참고로 남는다
+    assert not hasattr(page, "log_view")
+    page._log("[설정 확인] 시트 없음: '예시'")
+    page._log("STEP 메시지")
+    page._refresh_review()
+    assert [c.text for c in page._review.checks] == ["[설정 확인] 시트 없음: '예시'"]
+    assert page.lbl_last.text() == "STEP 메시지"
+
+    # 옵션은 오른쪽 탭 — 요약을 누르면 그 탭이 열린다
+    assert page.side_tabs.currentIndex() == 0 and "국내" in page.btn_opt_summary.text()
+    page.btn_opt_summary.click()
+    assert page.side_tabs.currentIndex() == 1
+    page._picker.hide()

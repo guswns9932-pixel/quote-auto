@@ -7,8 +7,8 @@ from conftest import xlsx_fingerprint
 
 @pytest.fixture(scope="module")
 def csp():
-    import csp_order_maker
-    return csp_order_maker
+    import csp_core          # 화면(tkinter) 없이 불러올 수 있어야 한다
+    return csp_core
 
 
 def _template_headers(csp):

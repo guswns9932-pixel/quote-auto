@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import sys
-import types
 
 import pytest
 
@@ -19,25 +18,6 @@ sys.path.insert(0, os.path.join(ROOT, "no_com"))
 LOCAL_DIR = os.environ.get("QUOTE_AUTO_TEMPLATE_DIR") or os.path.join(ROOT, "tests", "_local")
 BASELINE_PATH = os.path.join(ROOT, "tests", "baseline.json")
 UPDATE = os.environ.get("UPDATE_BASELINE") == "1"
-
-
-def _stub_tkinter_if_missing():
-    """tkinter 가 없는 환경(서버)에서도 화면 없는 로직을 불러올 수 있게 한다."""
-    try:
-        import tkinter  # noqa: F401
-        return
-    except ImportError:
-        pass
-    for name in ("tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"):
-        mod = types.ModuleType(name)
-        mod.Toplevel = object
-        mod.Tk = object
-        sys.modules[name] = mod
-    for sub in ("ttk", "filedialog", "messagebox"):
-        setattr(sys.modules["tkinter"], sub, sys.modules["tkinter." + sub])
-
-
-_stub_tkinter_if_missing()
 
 
 def _sha256(path):

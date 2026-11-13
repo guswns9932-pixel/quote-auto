@@ -211,7 +211,7 @@ _PROFILES = [
     dict(
         script="run_csp.py", exe=APP_NAME + "_csp",
         hidden=_ENCODINGS + _TK_MODS + [
-            "app_boot", "csp_order_maker", "openpyxl.cell._writer", *openpyxl_h,
+            "app_boot", "csp_order_maker", "csp_core", "openpyxl.cell._writer", *openpyxl_h,
         ],
         excludes=_COMMON_EXCLUDES + _NO_QT + [
             "fitz", "PIL", "selenium", "webdriver_manager", "pyautogui",

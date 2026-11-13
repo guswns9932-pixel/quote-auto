@@ -237,6 +237,11 @@ WHATS_NEW = [
         "app": "quote",
         "title": "미국·중국 견적서 입력 확대",
         "desc": "옵션창에서 Quote number·PR 등을 넣고, 투자자·보증기간도 반영됩니다.",
+    },    {
+        "id": "2026-11-15-quote-review-panels",
+        "app": "quote",
+        "title": "견적 구성 한눈에 보기",
+        "desc": "담은 품목을 도식과 금액으로 미리 보고, 빠진 것을 생성 전에 확인합니다.",
     },
 ]
 

@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 
 import app_settings
 import quote_config
+import quote_review
+from quote_panels import AmountPanel, CheckPanel, DiagramPanel, StepBar
 from core import (
     QuoteState,
     exe_dir, fmt_krw, fmt_qty,
@@ -645,9 +647,23 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._submit_paths   : set                             = set()
         self._quote_list_window: Optional[_QuoteListWindow]    = None
 
+        self._dup_price_specs : set                            = set()   # 품목 시트에 단가가 둘 이상인 규격
+        self._class_of        : Dict[str, str]                 = {}      # 규격 → 품목 시트의 분류
+        self._review          : Optional[quote_review.Review]  = None
+        self._review_timer    : QTimer                         = QTimer(self)
+        self._review_timer.setSingleShot(True)
+        self._review_timer.setInterval(60)
+        self._review_timer.timeout.connect(self._refresh_review)
+
         self._build_ui()
         self._ensure_total()
         self._log("준비: STEP1 → STEP2 → STEP4/드래그 → STEP5 → 생성")
+        # STEP5 가 어떻게 바뀌든(추가·삭제·수량·Credit·정렬) 검토 화면을 다시 계산한다
+        m = self.step5_table.model()
+        for sig in (m.rowsInserted, m.rowsRemoved, m.dataChanged, m.modelReset):
+            sig.connect(self._schedule_review)
+        self.req_table.currentCellChanged.connect(self._schedule_review)
+        self._refresh_review()
 
         sc = QShortcut(QKeySequence.Delete, self)
         sc.activated.connect(self._delete_checked_rows)
@@ -687,6 +703,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 14, 14, 14)
         outer.setSpacing(8)
+
+        # ── 단계 표시 (어디까지 왔고 다음에 무엇을 하는지) ───────────
+        self.step_bar = StepBar()
+        outer.addWidget(self.step_bar)
 
         # ── 툴바 (STEP1·2 LOAD + 생성버튼 + LIST 버튼) ──────────────
         outer.addWidget(self._build_toolbar())
@@ -758,7 +778,31 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         h.addWidget(self.btn_submit_xls)
         h.addWidget(btn_list)
         h.addStretch(1)
+        btn_cfg = QPushButton("설정 시트 만들기"); btn_cfg.setFixedHeight(34)
+        btn_cfg.setToolTip("양식의 시트 이름·칸 위치·문구·파일 이름 규칙을 적은 '설정' 시트를 만듭니다.\n"
+                           "통합양식에 이 시트를 복사해 넣고 값을 고치면 프로그램이 그대로 따릅니다.")
+        btn_cfg.clicked.connect(self._export_settings_sheet)
+        h.addWidget(btn_cfg)
         return bar
+
+    def _export_settings_sheet(self) -> None:
+        cfg = quote_config.load(self.state.template_path)
+        start = os.path.join(self.state.last_output_dir or exe_dir(), "견적서작성_설정.xlsx")
+        path, _ = QFileDialog.getSaveFileName(self, "설정 시트 저장", start, "Excel Files (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            quote_config.export_settings_sheet(path, cfg)
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"설정 시트를 만들지 못했습니다.\n{e}"); return
+        self._log(f"설정 시트 생성: {path}")
+        QMessageBox.information(
+            self, "완료",
+            f"설정 시트를 만들었습니다.\n{path}\n\n"
+            f"이 파일의 '{quote_config.SETTINGS_SHEET}' 시트를 통합양식에 복사해 넣고,\n"
+            "바꿀 항목의 '값'만 고치면 됩니다. (비워 두거나 지운 항목은 기본값)")
 
     # ── STEP3 ─────────────────────────────────
     def _build_step3(self) -> QFrame:
@@ -836,11 +880,101 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         splitter = QSplitter(Qt.Horizontal)
 
         splitter.addWidget(self._build_step4_panel())
-        splitter.addWidget(self._build_step5_panel())
+
+        # 가운데: 구성 도식(위) + STEP5 표(아래)
+        center = QWidget()
+        cv = QVBoxLayout(center); cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(8)
+        self.diagram = DiagramPanel()
+        self.diagram.pickSpec.connect(self._select_step5_spec)
+        self.diagram.addSuggest.connect(self._add_suggested)
+        cv.addWidget(self.diagram)
+        cv.addWidget(self._build_step5_panel(), 1)
+        splitter.addWidget(center)
+
+        # 오른쪽: 금액(위) + 생성 전 점검(아래)
+        side = QWidget(); side.setMinimumWidth(250)
+        sv = QVBoxLayout(side); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(8)
+        self.amount_panel = AmountPanel()
+        self.check_panel = CheckPanel()
+        self.check_panel.pickSpec.connect(self._select_step5_spec)
+        self.check_panel.addSuggest.connect(self._add_suggested)
+        sv.addWidget(self.amount_panel)
+        sv.addWidget(self.check_panel, 1)
+        splitter.addWidget(side)
+
         splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
-        splitter.setSizes([400, 600])
+        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([300, 690, 260])
         return splitter
+
+    # ══════════════════════════════════════════
+    # 검토 (구성 도식 · 금액 · 생성 전 점검)
+    # ══════════════════════════════════════════
+    def _schedule_review(self, *_args) -> None:
+        """잠깐 모았다가 한 번만 다시 계산한다(행 하나 추가에도 신호가 여러 번 온다)."""
+        self._review_timer.start()
+
+    def _make_review(self) -> quote_review.Review:
+        st = self.state
+        suggested = st.code_map.get((st.process, st.vendor, st.code_5d), []) if st.code_map else []
+        ch = self._pick_rd().get("H") if st.request_rows else None
+        return quote_review.analyze(
+            self._snapshot_items(), st.quote_type or "국내", ch,
+            cfg=quote_config.load(st.template_path),
+            class_of=self._class_of,
+            known_specs=set(st.price_by_spec) if st.template_path else None,
+            dup_price_specs=self._dup_price_specs,
+            suggested=suggested)
+
+    def _refresh_review(self) -> None:
+        try:
+            review = self._make_review()
+        except Exception:
+            logger.warning("검토 화면 계산 실패", exc_info=True)
+            return
+        self._review = review
+        self.diagram.show_review(review)
+        self.amount_panel.show_review(review)
+        self.check_panel.show_review(review)
+        self._refresh_step_bar(review)
+
+    def _refresh_step_bar(self, review: quote_review.Review) -> None:
+        st = self.state
+        has_items = any(s.specs for s in review.flow + review.base + review.others)
+        done = [bool(st.template_path), bool(st.request_rows),
+                has_items and not review.red, bool(self._list_all_files)]
+        if not done[0]:
+            hint = "STEP 1 에서 통합양식을 불러오세요"
+        elif not done[1]:
+            hint = "STEP 2 에서 의뢰파일을 불러오고, 의뢰 행을 더블클릭하세요"
+        elif not has_items:
+            hint = "품목을 담으세요 — 의뢰 행 더블클릭, 코드매핑 적용, 또는 STEP 4 에서 더블클릭"
+        elif review.red:
+            hint = f"판단이 필요한 항목이 {len(review.red)}건 있습니다 — 오른쪽 점검 목록을 확인하세요"
+        elif not done[3]:
+            hint = "견적서 생성을 누르세요" + (f"  (확인 권장 {len(review.yellow)}건)" if review.yellow else "")
+        else:
+            hint = "생성 완료 — 다음 의뢰 행을 고르거나 갑지를 생성하세요"
+        self.step_bar.set_progress(done, hint)
+
+    def _select_step5_spec(self, spec: str) -> None:
+        """도식·점검 목록에서 고른 규격의 행을 STEP5 표에서 선택해 보여준다."""
+        for r in range(self.step5_table.rowCount()):
+            it = self.step5_table.item(r, 2)
+            if it and it.text().strip() == spec.strip() and self._is_item(r):
+                self.step5_table.selectRow(r)
+                self.step5_table.scrollToItem(it)
+                self.step5_table.setFocus()
+                return
+
+    def _add_suggested(self, spec: str, qty: float) -> None:
+        """코드매핑이 제안했지만 담기지 않은 품목을 담는다."""
+        price = float(self.state.price_by_spec.get(spec, 0))
+        self._add_row("RACK", spec, qty, price)
+        self._sync_step4_highlight(scroll_top=False)
+        self._log(f"코드매핑 품목 담음: {spec} × {quote_review._fmt_qty(qty)}")
+        self._select_step5_spec(spec)
 
     def _build_step5_panel(self) -> QFrame:
         step5 = labeled_frame("STEP5 견적작성 대상", min_h=150)
@@ -1145,6 +1279,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.state.price_by_spec = price_by_spec
         self.state.code_map = cmap
         self._spec_order = order
+        self._class_of = {r["B"]: r["A"] for r in rows if r["B"] and r["A"]}
+        _prices: Dict[str, set] = {}
+        for r in rows:
+            if r["B"]:
+                _prices.setdefault(r["B"], set()).add(r["C"])
+        self._dup_price_specs = {sp for sp, ps in _prices.items() if len(ps) > 1}
+        self._schedule_review()
         self._apply_filter()
         self.btn_step2.setEnabled(True)
         self._step3_frame.setEnabled(True)
@@ -1213,6 +1354,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.req_table.resizeColumnsToContents()
         self.req_table.setColumnWidth(0, 42)
         self._style_req_table(); self._update_quote_info()
+        self._schedule_review()
 
     def _is_req_checked(self, row: int) -> bool:
         cb = get_checkbox_from_cell(self.req_table.cellWidget(row, 0))
@@ -1309,6 +1451,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.state.code_5d = s(self.ed_code.text())           or None
         ready = bool(self.state.process and self.state.vendor and self.state.code_5d)
         self.btn_apply_map.setEnabled(ready and bool(self.state.code_map))
+        self._schedule_review()
 
     def _apply_code_map(self) -> None:
         key = (self.state.process, self.state.vendor, self.state.code_5d)
@@ -1496,6 +1639,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         for name, chk in chk_map.items():
             chk.blockSignals(True); chk.setChecked(name == selected); chk.blockSignals(False)
         self.state.quote_type = selected; self._log(f"견적서 타입 = {selected}")
+        self._schedule_review()
         if selected in ("중국", "미국"): self._open_options(focus={"중국": "cn", "미국": "us"}[selected])
 
     def _open_options(self, focus: str = "credit") -> None:
@@ -1516,8 +1660,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _step5_fit_col2(self) -> None:
         """초기화 시 품목(col 2) 너비를 364px로 설정하고 나머지 칼럼들을 비례 배분."""
-        target    = 364
         total     = self.step5_table.viewport().width()
+        # 품목 열은 넉넉히 주되, 표가 좁을 때는 숫자 열(수량·단가·금액)이 잘리지 않게 줄인다
+        target    = min(364, int(total * 0.42))
         col0_w    = self.step5_table.columnWidth(0)
         min_adj   = len(self._S5_ADJ) * self._S5_ADJ_MIN
         col2      = max(self._S5_COL2_MIN, min(target, total - col0_w - min_adj))
@@ -1766,6 +1911,16 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if qtype == "미국" and not self.state.us_info.get("tool"):
             self._open_options("us")
             if not self.state.us_info.get("tool"): return
+        # 생성 전 점검 — 판단이 필요한 항목이 남아 있으면 한 번 더 묻는다
+        review = self._make_review()
+        if review.red:
+            lines = "\n".join("  • " + c.text for c in review.red[:10])
+            more = f"\n  … 외 {len(review.red) - 10}건" if len(review.red) > 10 else ""
+            if QMessageBox.question(
+                    self, "생성 전 확인",
+                    f"판단이 필요한 항목이 {len(review.red)}건 있습니다.\n\n{lines}{more}\n\n그래도 생성할까요?"
+            ) != QMessageBox.Yes:
+                return
         checked = self._checked_req_rows()
         if qtype == "국내" and self.state.request_rows and len(checked) >= 2:
             valid = [i for i in checked if i < len(self.state.request_rows)]

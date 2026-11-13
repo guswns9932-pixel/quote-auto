@@ -857,8 +857,7 @@ class ESignPage(QWidget):
             QMessageBox.information(self, "안내", "먼저 엑셀을 LOAD 하세요."); return
         if self._pdf_thread and self._pdf_thread.isRunning():
             QMessageBox.information(self, "안내", "이미 PDF 저장 중입니다."); return
-        unsigned = [f.name for fi, f in enumerate(self._files) if f.pages
-                    and not any(self._sign_items.get((fi, p)) for p in range(len(f.pages)))]
+        unsigned = self.unsigned_files()
         if unsigned and self._sign_items:
             names = "\n".join("  • " + n for n in unsigned[:8]) + ("\n  …" if len(unsigned) > 8 else "")
             if QMessageBox.question(
@@ -868,6 +867,18 @@ class ESignPage(QWidget):
         folder_name = os.path.basename(self._base_folder.rstrip("\\/"))
         out = unique_path(os.path.join(self._base_folder, f"대외비_{folder_name}.pdf"))
         self.save_to(out)
+
+    def unsigned_files(self) -> List[str]:
+        """서명이 하나도 없는 파일 이름들. 갑지는 원래 서명하지 않으므로 세지 않는다."""
+        out = []
+        for fi, f in enumerate(self._files):
+            if not f.pages:
+                continue
+            if "갑지" in f.name or all(p.sheet == SheetName.COVER for p in f.pages):
+                continue
+            if not any(self._sign_items.get((fi, p)) for p in range(len(f.pages))):
+                out.append(f.name)
+        return out
 
     def save_to(self, out: str) -> None:
         total = sum(len(f.pages) for f in self._files)

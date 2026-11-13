@@ -96,6 +96,9 @@ def test_full_flow(page, tmp_path):
     assert "서명 2" in page.file_list.item(1).text()
     assert "✓ 서명 1" in page.page_list.item(2).text() and "서명 없음" in page.page_list.item(1).text()
 
+    # 서명 없는 파일 경고 대상: 갑지는 원래 서명하지 않으므로 빠진다
+    assert page.unsigned_files() == ["2호기.xlsx"]
+
     # 쪽을 넘기면 다음 파일로 이어지고, 실패한 파일은 건너뛴다
     page._next_page()
     assert (page._cur_file, page._cur_page) == (2, 0)

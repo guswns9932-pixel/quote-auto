@@ -1287,10 +1287,23 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if not entries:
             near = sum(1 for k in self.state.code_map if k[:2] == key[:2])
             QMessageBox.warning(self, "코드매핑 없음", f"키: {key}\n동일 공정/설비사 키 수: {near}"); return
+        missing = []
         for acc, qty in entries:
+            if acc not in self.state.price_by_spec:
+                missing.append(acc)
             price = float(self.state.price_by_spec.get(acc, 0))
             self._add_row("RACK", acc, qty, price)
         self._log(f"코드매핑 적용 {key} → {len(entries)}개"); self._sync_step4_highlight()
+        if missing:
+            # 품목 시트에 없는 이름은 단가를 찾지 못해 0원으로 담긴다.
+            # 모르고 지나가면 그 품목이 빠진 금액으로 견적이 나간다.
+            self._log(f"코드매핑 품목 중 품목 시트에 없는 것 {len(missing)}개 → 단가 0원: "
+                      + ", ".join(missing))
+            QMessageBox.warning(
+                self, "단가 확인 필요",
+                "아래 품목은 품목 시트에 없어 단가 0원으로 담겼습니다.\n"
+                "단가를 직접 입력하거나 품목 시트/코드매핑의 이름을 맞춰주세요.\n\n"
+                + "\n".join(missing))
 
     def _gen_5d_object(self) -> None:
         """현재 STEP5의 RACK 품목/수량을 공정·설비사·5D 키로 코드매핑 시트에 저장한다."""

@@ -993,6 +993,42 @@ def load_request_rows(path):
 
 
 # ---------------------------------------------------------------- 엑셀 출력
+# 화면 이름과 양식 헤더 이름이 다른 열 (키 -> 양식 1행의 헤더 글자)
+_OUTPUT_HEADER_ALIAS = {
+    "M": "고객공정",    # 화면: 대공정
+    "N": "고객설비",    # 화면: 설비MAKER
+}
+
+
+def _norm_out_header(text):
+    """양식 헤더 비교용: 필수 표시(*)와 공백 제거."""
+    return re.sub(r"[\s*]+", "", str(text or ""))
+
+
+def _map_output_columns(tpl_ws):
+    """COLUMNS 의 각 키가 양식 Sheet1 의 몇 번째 열(1-based)인지 헤더 글자로 찾는다.
+    찾지 못하는 항목이 있으면 엉뚱한 열에 쓰지 않도록 오류로 멈춘다."""
+    by_header = {}
+    # 양식에 열이 추가되어 뒤로 밀린 헤더도 찾도록 양식의 마지막 열까지 본다.
+    for idx in range(1, max(tpl_ws.max_column, len(COLUMNS)) + 1):
+        name = _norm_out_header(tpl_ws.cell(row=1, column=idx).value)
+        if name and name not in by_header:
+            by_header[name] = idx
+    col_of, missing = {}, []
+    for key, header, _ in COLUMNS:
+        want = _OUTPUT_HEADER_ALIAS.get(key, header)
+        idx = by_header.get(_norm_out_header(want))
+        if idx is None:
+            missing.append("%s(%s)" % (want, key))
+        else:
+            col_of[key] = idx
+    if missing:
+        raise ValueError(
+            "통합양식 Sheet1 1행에서 다음 열을 찾지 못했습니다: %s\n"
+            "양식의 헤더 이름이 바뀌었는지 확인하세요." % ", ".join(missing))
+    return col_of
+
+
 def build_output(template_path, rows, out_path):
     """rows : [{열키: 값}] 을 받아 Sheet1 양식의 새 파일을 만든다.
     CIP 경고(빨간 글씨)는 화면 입력 단계에서만 표시하고, 업로드에 쓰이는
@@ -1005,8 +1041,14 @@ def build_output(template_path, rows, out_path):
     ws = wb.active
     ws.title = "Sheet1"
 
+    # --- 데이터를 넣을 열: 위치가 아니라 양식 1행의 헤더 글자로 찾는다.
+    # (양식의 열 이름이 화면 이름과 다르거나 순서가 달라도 값이 엉뚱한 열에
+    #  들어가지 않도록 — 예전에는 열 위치를 코드에 고정해서 양식의
+    #  '고객설비/고객공정' 열에 대공정/설비MAKER 값이 서로 바뀌어 들어갔다.)
+    col_of = _map_output_columns(tws)
+
     # --- 헤더행 : 원본 서식 그대로 복사
-    for idx, (key, header, _) in enumerate(COLUMNS, start=1):
+    for idx in range(1, max(tws.max_column, len(COLUMNS)) + 1):
         src = tws.cell(row=1, column=idx)
         dst = ws.cell(row=1, column=idx, value=src.value)
         dst.font = Font(name=src.font.name, sz=src.font.sz, b=src.font.b,
@@ -1026,8 +1068,8 @@ def build_output(template_path, rows, out_path):
 
     # --- 데이터행
     for r, data in enumerate(rows, start=2):
-        for idx, (key, _, _) in enumerate(COLUMNS, start=1):
-            cell = ws.cell(row=r, column=idx, value=data.get(key))
+        for key, _, _ in COLUMNS:
+            cell = ws.cell(row=r, column=col_of[key], value=data.get(key))
             if key in ("G", "J", "T"):     # 텍스트 형식 (업로드 시스템이 날짜형 셀을
                 cell.number_format = "@"   # 그대로 인식하지 못하므로 문자열로 고정)
 

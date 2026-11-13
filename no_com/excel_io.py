@@ -547,13 +547,19 @@ def _build_price_lookups(wb) -> Dict[str, Dict[str, Any]]:
             def val(letter: str) -> str:
                 cell = ws[f"{letter}{row[0].row}"]
                 return _vlookup_text(_follow_mirror(ws, cell.value))
+            def raw(letter: str) -> Any:
+                # 조회 '결과'는 글자로 바꾸지 않는다. 숫자를 문자열로 굳히면
+                # 셀 서식(예: 입고검수확인서!D18 의 ##,###"L/min")이 먹지 않아
+                # "20,000L/min" 이 "20000" 으로 찍힌다.
+                v = _follow_mirror(ws, ws[f"{letter}{row[0].row}"].value)
+                return "" if v is None else v
             code, model = val("C"), val("F")
             if code:
                 out["code_model"].setdefault(code, model)
-                out["code_spec"].setdefault(code, val("E"))        # X열 = E열
-                out["code_dry"].setdefault(code, val("W"))
-                out["code_cap"].setdefault(code, val("Z"))
-                out["code_motor"].setdefault(code, val("AA"))
+                out["code_spec"].setdefault(code, raw("E"))        # X열 = E열
+                out["code_dry"].setdefault(code, raw("W"))
+                out["code_cap"].setdefault(code, raw("Z"))
+                out["code_motor"].setdefault(code, raw("AA"))
             if model:
                 out["model_price"].setdefault(
                     model, to_float(_follow_mirror(ws, ws[f"K{row[0].row}"].value)))
@@ -1093,6 +1099,18 @@ def _fill_domestic(state: QuoteState,
     return path
 
 
+def _check_capacity(doc: str, section: str, capacity: int,
+                    n_items: int, n_credits: int) -> None:
+    """양식 칸 수를 넘으면 멈춘다 — 넘친 줄을 조용히 버리면 품목이나 Credit 이
+    빠진 견적서가 그대로 나간다(국내 견적서와 같은 기준)."""
+    if n_items + n_credits > capacity:
+        detail = f"품목 {n_items}건" + (f" + Credit {n_credits}건" if n_credits else "")
+        raise ValueError(
+            f"{doc} {section} 칸({capacity}행)을 초과했습니다: {detail}. "
+            f"품목을 줄이거나 템플릿 행을 늘려주세요."
+        )
+
+
 def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     """중국 견적서: 템플릿 복사 후 openpyxl 로 데이터 기입."""
     info   = state.cn_info
@@ -1125,6 +1143,11 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
         ws[f"{CN.COL_SPEC}{rr}"]  = None
         ws[f"{CN.COL_PRICE}{rr}"] = None
         ws[f"{CN.COL_QTY}{rr}"]   = None
+
+    _check_capacity("중국 견적서", "PUMP", CN.PUMP_END - CN.PUMP_START + 1,
+                    len(pump), len(pump_credits))
+    _check_capacity("중국 견적서", "RACK", CN.RACK_END - CN.RACK_START + 1,
+                    len(others), len(rack_credits))
 
     pump_out = list(pump[:3])
     for cr in pump_credits:
@@ -1185,13 +1208,19 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     ws[US.TOOL_CELL]     = info.get("tool", "")
     ws[US.EXCHANGE_CELL] = float(info.get("exchange", 0))
     y, m = info.get("base_ym", (datetime.now().year, datetime.now().month))
-    ws[US.DATE_CELL] = f"{int(y)}-{int(m):02d}-1"
+    # 글자가 아니라 날짜로 넣는다 — 양식 셀 서식(mmm-yy)이 글자에는 먹지 않아
+    # "Nov-26" 이 아니라 "2026-11-1" 로 찍힌다.
+    ws[US.DATE_CELL] = datetime(int(y), int(m), 1)
 
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
     pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
     rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
+
+    _check_capacity("미국 견적서", "PUMP", 1, len(pump), 0)
+    _check_capacity("미국 견적서", "RACK", US.RACK_END - US.RACK_START + 1,
+                    len(others), len(credits))
 
     # 펌프 단일 행 (Pump Credit은 RACK 구간 맨 앞 줄로 표기)
     ws[US.PUMP_SPEC]  = None

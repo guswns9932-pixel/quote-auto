@@ -5,7 +5,7 @@ Excel 입출력 전담 모듈.
 
 - openpyxl  : 읽기 + 쓰기 전담
               (파싱, 견적서/갑지 생성 모두 openpyxl)
-- Excel COM : 갑지 생성 시 수식값 읽기에만 사용 (공통 헬퍼는 excel_com, 전자서명 캡처는 esign_capture)
+- Excel COM : 갑지 생성 시 수식값 읽기에만 사용 (공통 헬퍼는 excel_com, 전자서명은 esign_engine)
 
 핵심 전략
 ---------

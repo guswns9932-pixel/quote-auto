@@ -1,7 +1,13 @@
 """
 page_esign.py
 =============
-전자서명 페이지와 Excel 시트 캡처 스레드.
+전자서명 화면.
+
+엑셀을 PDF 로 바꿔 불러오고(esign_engine), 쪽 위에 서명을 놓은 뒤 제출용 PDF 로
+저장한다. 변환·합성 규칙은 전부 esign_engine 에 있고 여기는 화면만 다룬다.
+
+화면 좌표 = PDF 포인트. 쪽 그림은 선명하게 보이도록 RENDER_ZOOM 배로 그린 뒤
+1/RENDER_ZOOM 로 줄여 올리므로, 서명 아이템의 pos() 가 곧 PDF 위의 위치다.
 """
 from __future__ import annotations
 
@@ -11,106 +17,61 @@ import os
 import shutil
 import threading
 import traceback
-from typing import List, Optional
+from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (
-    Qt, QBuffer, QByteArray, QIODevice, QPointF, QRectF, QThread, QTimer, Signal,
+    Qt, QBuffer, QByteArray, QIODevice, QPointF, QSize, QThread, QTimer, Signal,
 )
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMessageBox, QProgressDialog, QPushButton, QSizePolicy,
-    QSplitter, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QProgressDialog,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 import app_settings
-from core import unique_path
+import esign_engine as engine
+from core import SheetName, unique_path
 from widgets import PdfView, SignatureItem, PasswordDialog, tint_button
 from page_common import _friendly_error_msg, _natural_key, _ScrollableErrorDialog
 
 logger = logging.getLogger("QuoteApp")
 
-
-class _ImageCache:
-    """캡처한 PNG 를 QImage 로 캐싱한다.
-
-    페이지 이동(_render)과 PDF 빌드(_PdfBuildThread)가 같은 이미지를 각자
-    다시 디코드하던 것을 없애기 위한 공유 캐시. PDF 빌드는 백그라운드
-    스레드에서 이 캐시를 읽고(캐시 미스 시) 채워 넣으므로 락으로 보호한다.
-    QImage 자체는 Qt 문서상 어느 스레드에서 만들고 다뤄도 안전하다
-    (QPixmap 과 달리 GUI 스레드 전용이 아니다).
-
-    키는 보통 캡처 스레드가 메모리에 담아 둔 PNG bytes 의 키(mem://…)다.
-    blobs 에 없는 키는 파일 경로로 보고 디스크에서 읽는다.
-    """
-
-    def __init__(self) -> None:
-        self._data: dict = {}
-        self._blobs: dict = {}
-        self._lock = threading.Lock()
-
-    def set_blobs(self, blobs: dict) -> None:
-        with self._lock:
-            self._blobs = blobs or {}
-
-    def get(self, key: str) -> QImage:
-        with self._lock:
-            img = self._data.get(key)
-            blob = None if img is not None else self._blobs.get(key)
-        if img is not None:
-            return img
-        if blob is not None:
-            img = QImage()
-            img.loadFromData(QByteArray(blob), "PNG")
-        else:
-            img = QImage(key)
-        with self._lock:
-            self._data.setdefault(key, img)
-            return self._data[key]
-
-    def clear(self) -> None:
-        with self._lock:
-            self._data.clear()
-            self._blobs = {}
+RENDER_ZOOM = 3.0        # 화면용 쪽 그림 배율 (72dpi × 3 = 216dpi)
+THUMB_ZOOM = 0.2         # 쪽 미리보기 배율
+PAGE_CACHE_MAX = 8       # 쪽 그림을 몇 장까지 기억할지 (장당 십수 MB)
 
 
 class _ExcelWorkerThread(QThread):
-    """전자서명 페이지가 살아 있는 동안 Excel COM 세션을 쥐고 있는 워커.
+    """전자서명 화면이 살아 있는 동안 Excel COM 세션을 쥐고 있는 워커.
 
-    페이지가 열리자마자 백그라운드로 Excel 을 띄워 두고, 사용자가 엑셀을
-    고르면 이미 준비된 세션으로 바로 캡처를 시작한다. 예전에는 "엑셀 Load"
-    를 누른 뒤에야 DispatchEx 를 했고, 그 기동에만 실측 1.1~1.2초가
-    진행 다이얼로그 앞에 그대로 얹혀 있었다.
+    화면이 열리자마자 백그라운드로 Excel 을 띄워 두고, 사용자가 엑셀을 고르면
+    이미 준비된 세션으로 바로 변환을 시작한다(기동에만 1초 남짓 걸린다).
 
     [왜 스레드를 나누지 않는가]
-    COM 객체는 만들어진 아파트먼트(=스레드)에 묶여 있어서, 다른 스레드에서
-    쓰려면 인터페이스를 마샬링해야 한다. "미리 띄우는 스레드"와 "캡처하는
-    스레드"를 따로 두면 그 마샬링이 필요해지고, 실패하면 보이지 않는
-    EXCEL.EXE 가 남는 골치 아픈 경로가 생긴다. 그래서 이 스레드 하나가
-    세션 생성 → 캡처 → 종료까지 전부 맡고, 작업이 없을 때는 이벤트에서
-    잠들어 있는다.
-
-    캡처는 CopyPicture 로 한다(ExportAsFixedFormat/PrintOut 미사용 →
-    RenameFile 없음).
+    COM 객체는 만들어진 스레드에 묶여 있어서, 다른 스레드에서 쓰려면 인터페이스를
+    마샬링해야 한다. 실패하면 보이지 않는 EXCEL.EXE 가 남는 골치 아픈 경로가
+    생기므로, 이 스레드 하나가 세션 생성 → 변환 → 종료까지 전부 맡는다.
     """
     ready          = Signal(bool)                      # COM 세션 준비 완료(성공 여부)
     progress       = Signal(int, int, str)             # (완료 파일수, 전체 파일수, 현재파일명)
     sheet_progress = Signal(int, int, str, int, int, str)
-    # (파일idx, 파일전체, 파일명, 완료시트수, 전체시트수, 시트명) — 파일 안에서의 세부 진행
-    job_done       = Signal(object, object)            # (sheet_pngs, png_blobs)
+    # (파일idx, 파일전체, 파일명, 완료시트수, 전체시트수, 시트명)
+    job_done       = Signal(object)                    # List[engine.SignFile]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._job    : Optional[tuple] = None
+        self._job    : Optional[List[str]] = None
         self._wake   = threading.Event()
         self._lock   = threading.Lock()
         self._stop   = False
         self._cancel = False
 
-    def submit(self, paths: List[str], tmp_dir: str) -> None:
-        """캡처할 파일 목록을 워커에 넘긴다(GUI 스레드에서 호출)."""
+    def submit(self, paths: List[str]) -> None:
+        """변환할 파일 목록을 워커에 넘긴다(GUI 스레드에서 호출)."""
         with self._lock:
-            self._job = (list(paths), tmp_dir)
+            self._job = list(paths)
         self._cancel = False
         self._wake.set()
 
@@ -124,7 +85,6 @@ class _ExcelWorkerThread(QThread):
         self._wake.set()
 
     def run(self) -> None:
-        import esign_capture
         import excel_com
         com_ctx = excel_com.ExcelCOM()
         xl_app = None
@@ -133,8 +93,7 @@ class _ExcelWorkerThread(QThread):
             xl_app = com_ctx.app
         except Exception as e:
             logger.error("Excel COM 초기화 실패: %s", e, exc_info=True)
-        # 실패해도 계속 간다 — excel_capture_sheets_to_pngs 가 xl_app=None 이면
-        # 파일마다 자체 ExcelCOM 을 쓰는 폴백 경로를 갖고 있다(느릴 뿐 동작함).
+        # 실패해도 계속 간다 — 파일마다 자체 세션을 여는 폴백이 있다(느릴 뿐 동작함).
         self.ready.emit(xl_app is not None)
 
         try:
@@ -147,21 +106,17 @@ class _ExcelWorkerThread(QThread):
                     job, self._job = self._job, None
                 if job is None:
                     continue
-                self._capture_all(esign_capture, xl_app, *job)
+                self._convert_all(excel_com, xl_app, job)
         finally:
             try:
                 com_ctx.__exit__(None, None, None)
             except Exception:
                 pass
 
-    def _capture_all(self, esign_capture, xl_app, paths: List[str], tmp_dir: str) -> None:
-        sheet_pngs: List[List[str]] = []
-        # 캡처한 PNG 를 디스크가 아니라 여기에 bytes 로 담는다. 임시 폴더를
-        # 쓰던 시절엔 네트워크 드라이브에 썼다가 곧바로 다시 읽었는데,
-        # 이미지는 이미 메모리에 있으므로 그 왕복이 통째로 불필요했다.
-        # PNG 1장이 30~100KB 수준이라 수백 장이어도 수십 MB 다.
-        png_blobs: dict = {}
+    def _convert_all(self, excel_com, xl_app, paths: List[str]) -> None:
+        files: List[engine.SignFile] = []
         total = len(paths)
+        targets = list(SheetName.ESIGN_TARGET)
         try:
             for i, xlsx in enumerate(paths):
                 if self._cancel:
@@ -172,64 +127,73 @@ class _ExcelWorkerThread(QThread):
                 def _sheet_cb(done, sheet_total, sheet_name, _i=i, _fname=fname):
                     self.sheet_progress.emit(_i, total, _fname, done, sheet_total, sheet_name)
 
+                kw = dict(progress_cb=_sheet_cb, should_cancel=lambda: self._cancel)
+                if xl_app is not None:
+                    files.append(engine.load_workbook_pdf(xl_app, xlsx, targets, **kw))
+                    continue
                 try:
-                    pngs = esign_capture.excel_capture_sheets_to_pngs(
-                        xlsx, tmp_dir, i + 1, xl_app,
-                        progress_cb=_sheet_cb,
-                        should_cancel=lambda: self._cancel,
-                        blob_sink=png_blobs)
-                    sheet_pngs.append(pngs)
+                    with excel_com.ExcelCOM() as xl:
+                        files.append(engine.load_workbook_pdf(xl.app, xlsx, targets, **kw))
                 except Exception as e:
-                    logger.error("시트 캡처 실패 (%s): %s", xlsx, e, exc_info=True)
-                    sheet_pngs.append([])
+                    logger.error("PDF 변환 실패 (%s): %s", xlsx, e, exc_info=True)
+                    files.append(engine.SignFile(path=xlsx, error=str(e)))
         finally:
-            self.progress.emit(len(sheet_pngs), total, "완료")
-            self.job_done.emit(sheet_pngs, png_blobs)
+            self.progress.emit(len(files), total, "완료")
+            self.job_done.emit(files)
+
+
+class _PdfBuildThread(QThread):
+    """서명이 찍힌 제출용 PDF 저장을 백그라운드에서 수행."""
+    progress = Signal(int, int)   # (완료 쪽수, 전체 쪽수)
+    done     = Signal(object)     # None(성공) 또는 Exception
+
+    def __init__(self, files, placements, sign_images, out_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._args = (files, placements, sign_images, out_path)
+
+    def run(self) -> None:
+        try:
+            engine.build_signed_pdf(*self._args, progress_cb=self.progress.emit)
+            self.done.emit(None)
+        except Exception as e:
+            logger.error("PDF 저장 스레드 실패", exc_info=True)
+            self.done.emit(e)
 
 
 # ══════════════════════════════════════════════
-# 전자서명 페이지
+# 전자서명 화면
 # ══════════════════════════════════════════════
 
 class ESignPage(QWidget):
 
-    SIGN_W = 170
-    SIGN_H = 40
-
     def __init__(self) -> None:
         super().__init__()
-        # ESignPage 전용 Qt 클래스: 이 페이지가 최초 생성될 때만 임포트
-        global QGraphicsScene, QGraphicsPixmapItem, QPointF, QBuffer, QByteArray, QIODevice
-        from PySide6.QtCore import QPointF, QBuffer, QByteArray, QIODevice
-        from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem
-        self._code        : str  = ""
-        # 서명 배치 시 매번 다시 타이핑하지 않도록, 마지막으로 인증에 성공한
+        self._code          : str = ""
+        # 서명을 놓을 때마다 다시 타이핑하지 않도록, 마지막으로 인증에 성공한
         # 값을 세션(메모리)에만 기억해 다음 창에 미리 채운다. 그래도 창은
-        # 매번 뜨고 확인은 필요하다 — 그냥 건너뛰는 게 아니다.
-        # app_settings 에 저장하지 않으므로 앱을 껐다 켜면 자동으로 비워진다.
-        self._last_password: str = ""
-        self._signs       : List = []
-        self._files       : List[str] = []
-        self._base_folder : str  = ""
-        self._sheet_pngs  : List[List[str]] = []
-        self._cur_pngs    : List[str] = []
-        self._cur_file    : int  = 0
-        self._cur_page    : int  = 0
-        self._sign_items    : dict = {}
-        self._image_cache   : _ImageCache = _ImageCache()
-        self._bg_item              = None
-        self._shown_key     : Optional[tuple] = None
-        self._worker           : Optional[_ExcelWorkerThread] = None
-        self._load_progress    : Optional[QProgressDialog]   = None
-        self._pdf_thread        : Optional["_PdfBuildThread"] = None
-        self._pdf_progress      : Optional[QProgressDialog]   = None
-        self._tmp_dir          : Optional[str]               = None
-        self._com_init_timer   : Optional[QTimer]            = None
-        self._com_init_ok      : bool                        = False
+        # 매번 뜨고 확인은 필요하다. 저장하지 않으므로 앱을 끄면 사라진다.
+        self._last_password : str = ""
+        self._signs         : List[QPixmap] = []     # 화면에 올릴 서명 그림 (RENDER_ZOOM 배)
+        self._sign_bytes    : List[bytes]   = []     # PDF 에 넣을 서명 그림 (PNG)
+        self._files         : List[engine.SignFile] = []
+        self._docs          : Dict[int, object] = {}             # 파일 순번 → 열린 PDF
+        self._page_cache    : "OrderedDict[Tuple[int, int], QPixmap]" = OrderedDict()
+        self._base_folder   : str = ""
+        self._cur_file      : int = 0
+        self._cur_page      : int = 0
+        self._sign_items    : Dict[Tuple[int, int], List[SignatureItem]] = {}
+        self._last_bulk     : List[SignatureItem] = []           # 방금 일괄 적용으로 놓은 것
+        self._bg_item                                 = None
+        self._shown_key     : Optional[Tuple[int, int]] = None
+        self._worker        : Optional[_ExcelWorkerThread] = None
+        self._load_progress : Optional[QProgressDialog]    = None
+        self._pdf_thread    : Optional[_PdfBuildThread]    = None
+        self._pdf_progress  : Optional[QProgressDialog]    = None
+        self._com_init_timer: Optional[QTimer]             = None
+        self._com_init_ok   : bool                         = False
         self._build_ui()
-        # 페이지가 뜨자마자 Excel 을 백그라운드로 띄워 둔다. 사용자가 서명을
-        # 고르고 엑셀을 선택하는 동안 기동이 끝나므로, "엑셀 Load" 앞에
-        # 붙던 1초 남짓의 COM 기동이 체감에서 사라진다.
+        # 화면이 뜨자마자 Excel 을 백그라운드로 띄워 둔다. 사용자가 서명을 고르고
+        # 엑셀을 선택하는 동안 기동이 끝난다.
         self._start_worker()
 
     # ── Excel 워커 (COM 세션 예열) ─────────────────────────────
@@ -238,14 +202,14 @@ class ESignPage(QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         self._com_init_ok = False
-        w = _ExcelWorkerThread(self)
+        w = _ExcelWorkerThread()        # 부모 없이 — 창이 먼저 닫혀도 종료를 끝까지 마치도록
         w.ready.connect(self._on_com_ready)
         w.progress.connect(self._on_load_progress)
         w.sheet_progress.connect(self._on_sheet_progress)
         w.job_done.connect(self._on_job_done)
         self._worker = w
         # DispatchEx 가 무한 블로킹하는 경우(Office 활성화 창 대기 등)를 잡는다.
-        # 예열 중에는 사용자가 기다리고 있는 게 아니므로 대화창은 띄우지 않고,
+        # 예열 중에는 기다리는 사람이 없으므로 대화창은 띄우지 않고,
         # 실제로 "엑셀 Load" 를 눌렀을 때만 알린다.
         self._arm_com_timer()
         w.start()
@@ -265,39 +229,62 @@ class ESignPage(QWidget):
         self._com_init_ok = True
         self._stop_com_timer()
         if not ok:
-            # 세션 없이도 파일마다 자체 COM 으로 동작은 한다 — 느릴 뿐이다.
             logger.warning("Excel COM 예열 실패 — 파일별 세션으로 동작합니다")
 
+    # ── 종료 ────────────────────────────────────────────────
+    # Excel 을 끄는 데(Quit) 환경에 따라 수십 초가 걸린다(실측 50초). 예전에는
+    # 창이 그동안 멈춰 있었다. 이제 창은 바로 닫고, 워커가 Excel 종료를 마칠
+    # 때까지 프로세스만 뒤에 남는다(app_runner 가 background_busy 를 보고 기다림).
     def shutdown(self) -> None:
-        """창이 닫히거나 페이지가 교체될 때 Excel 세션을 정리한다.
-
-        이걸 빠뜨리면 보이지 않는 EXCEL.EXE 가 남아 파일 잠금을 쥔다.
-        """
+        """Excel 세션 정리를 '시작'만 한다. 끝나길 기다리지 않는다."""
         self._stop_com_timer()
+        if self._worker is not None:
+            self._worker.shutdown()
+        self._close_docs()
+
+    def background_busy(self) -> bool:
+        """아직 끝나지 않은 뒷정리(Excel 종료)가 있는가."""
+        return self._worker is not None and self._worker.isRunning()
+
+    def force_stop(self) -> None:
+        """뒷정리가 너무 오래 걸릴 때 마지막 수단."""
         w, self._worker = self._worker, None
-        if w is None:
-            return
-        w.shutdown()
-        if not w.wait(10_000):
-            logger.warning("Excel 워커가 10초 내에 종료되지 않음 — 강제 종료")
+        if w is not None and w.isRunning():
+            logger.warning("Excel 워커가 제때 끝나지 않아 강제 종료합니다")
             w.terminate()
             w.wait(3000)
 
+    def reset_page(self) -> None:
+        """초기화 — 불러온 것과 서명을 모두 비운다. Excel 세션은 그대로 둔다
+        (껐다 켜면 그 종료 대기 수십 초를 초기화할 때마다 치르게 된다)."""
+        if self._load_progress is not None or (self._pdf_thread and self._pdf_thread.isRunning()):
+            QMessageBox.information(self, "안내", "작업이 끝난 뒤 초기화하세요.")
+            return
+        self._clear_documents()
+        self._code = ""
+        self._last_password = ""
+        self._signs = []
+        self._sign_bytes = []
+        self._reset_code_status("서명 미로드")
+        self.lbl_status.setText("준비")
+        self._start_worker()
+
+    # ── 화면 구성 ───────────────────────────────────────────
     @staticmethod
     def _action_btn(label: str, slot) -> QPushButton:
-        """견적서작성 페이지(page_quote._action_btn)와 크기·폰트를 통일한다."""
+        """견적서작성 화면과 크기·폰트를 통일한다."""
         btn = QPushButton(label); btn.setFixedHeight(52)
         f = btn.font(); f.setPointSize(10); f.setBold(True); btn.setFont(f)
         btn.clicked.connect(slot); return btn
 
     def _build_ui(self) -> None:
-        outer = QVBoxLayout(self); outer.setContentsMargins(14,14,14,14); outer.setSpacing(10)
+        outer = QVBoxLayout(self); outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
 
         # 1행: 버튼 — 작업 순서대로(서명 준비 → 문서 로드 → 저장)
         top = QHBoxLayout()
-        self.btn_code   = self._action_btn("서명 Load",           self._load_code)
-        self.btn_excel  = self._action_btn("원본 견적(엑셀) Load", self._load_excels)
-        self.btn_save   = self._action_btn("제출용 견적(PDF) Print", self._save_pdf)
+        self.btn_code  = self._action_btn("① 서명 Load",             self._load_code)
+        self.btn_excel = self._action_btn("② 원본 견적(엑셀) Load",   self._load_excels)
+        self.btn_save  = self._action_btn("③ 제출용 견적(PDF) Print", self._save_pdf)
         tint_button(self.btn_code,  "#DCEDC8")   # 연초록
         tint_button(self.btn_excel, "#B3E5FC")   # 연하늘
         tint_button(self.btn_save,  "#FFE0B2")   # 연주황
@@ -309,8 +296,7 @@ class ESignPage(QWidget):
         top.addWidget(self.lbl_status)
         outer.addLayout(top)
 
-        # 2행: 서명 로드 상태 + 서명 미리보기 — 버튼 줄과 높이가 안 맞아
-        # (미리보기가 실제 서명 크기 170x40) 별도 줄로 분리했다.
+        # 2행: 서명 상태 + 서명 미리보기 + 일괄 적용
         code_row = QHBoxLayout()
         self.code_status_frame = QFrame()
         self.code_status_frame.setFrameShape(QFrame.StyledPanel)
@@ -319,29 +305,60 @@ class ESignPage(QWidget):
         csf.setContentsMargins(8, 6, 8, 6)
         csf.setSpacing(8)
         self.lbl_code_state = QLabel("서명 미로드")
-        self.lbl_sign_preview = QLabel()
-        self.lbl_sign_preview.setFixedSize(self.SIGN_W, self.SIGN_H)
-        self.lbl_sign_preview.setAlignment(Qt.AlignCenter)
-        self.lbl_sign_preview.setStyleSheet(
-            "background: white; border: 1px solid #CCC;")
-        self.lbl_sign_preview.setToolTip(
-            "서명1 미리보기 (더블클릭 시 배치)\nShift+더블클릭: 서명2 배치")
         csf.addWidget(self.lbl_code_state)
-        csf.addWidget(self.lbl_sign_preview)
+        self.lbl_sign_previews: List[QLabel] = []
+        for n in (1, 2):
+            cap = QLabel(f"서명{n}")
+            cap.setStyleSheet("color: #555; border: none; background: transparent;")
+            lbl = QLabel()
+            lbl.setFixedSize(170, 40)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet("background: white; border: 1px solid #CCC;")
+            csf.addWidget(cap); csf.addWidget(lbl)
+            self.lbl_sign_previews.append(lbl)
         code_row.addWidget(self.code_status_frame)
         code_row.addStretch(1)
+        self.btn_bulk = QPushButton("이 파일의 서명 위치를 나머지 파일에도 적용")
+        self.btn_bulk.setFixedHeight(34)
+        self.btn_bulk.setToolTip("지금 보고 있는 파일에 놓은 서명을, 다른 파일의 같은 시트 같은 자리에 놓습니다.\n"
+                                 "이미 서명이 있는 쪽은 건드리지 않습니다.")
+        self.btn_bulk.clicked.connect(self._apply_to_others)
+        self.btn_bulk_undo = QPushButton("일괄 적용 취소")
+        self.btn_bulk_undo.setFixedHeight(34)
+        self.btn_bulk_undo.clicked.connect(self._undo_bulk)
+        code_row.addWidget(self.btn_bulk)
+        code_row.addWidget(self.btn_bulk_undo)
         outer.addLayout(code_row)
 
+        # 3행: 왼쪽(파일 목록 + 쪽 미리보기) / 오른쪽(문서)
         mid = QHBoxLayout()
-        self.file_list = QListWidget(); self.file_list.setFixedWidth(360); mid.addWidget(self.file_list)
+        left = QVBoxLayout(); left.setSpacing(6)
+        left.addWidget(QLabel("파일"))
+        self.file_list = QListWidget(); self.file_list.setFixedWidth(360)
+        left.addWidget(self.file_list, 3)
+        left.addWidget(QLabel("쪽"))
+        self.page_list = QListWidget(); self.page_list.setFixedWidth(360)
+        self.page_list.setIconSize(QSize(84, 119))
+        left.addWidget(self.page_list, 4)
+        mid.addLayout(left)
+
         self.scene = QGraphicsScene(self)
         self.view  = PdfView(self); self.view.setScene(self.scene); self.view.setAlignment(Qt.AlignCenter)
-        self.view.setFocusPolicy(Qt.StrongFocus); self.view.setFocus(); mid.addWidget(self.view, 1)
+        self.view.setFocusPolicy(Qt.StrongFocus); self.view.setFocus()
+        self.view.setStyleSheet("background: #6E7480;")
+        mid.addWidget(self.view, 1)
         outer.addLayout(mid, 1)
-        # 버튼 클릭 연결은 _action_btn() 생성 시 이미 처리했다(중복 연결 금지).
+
+        hint = QLabel("더블클릭: 서명1 놓기   ·   Shift+더블클릭: 서명2 놓기   ·   끌기: 이동   ·   "
+                      "우클릭: 삭제   ·   PgUp/PgDn·휠: 쪽 넘기기")
+        hint.setStyleSheet("color: #555;")
+        outer.addWidget(hint)
+
         self.file_list.currentRowChanged.connect(self._on_select_file)
+        self.page_list.currentRowChanged.connect(self._on_select_page)
         self.view.on_prev = self._prev_page; self.view.on_next = self._next_page
         self.view.on_double_click = self._add_sign
+        self._update_buttons()
 
     def _set_code_status_style(self, ok: Optional[bool]) -> None:
         """서명 로드 상태 프레임 배경색. ok=None(미로드/회색) True(성공/연초록) False(실패/연빨강)."""
@@ -350,18 +367,27 @@ class ESignPage(QWidget):
         self.code_status_frame.setStyleSheet(
             f"QFrame {{ background: {color}; border: 1px solid {border}; border-radius: 4px; }}")
 
-    def _build_sign_preview_pixmap(self, pm: QPixmap) -> QPixmap:
-        """서명 Load 옆에 붙일 서명 미리보기 — 대표로 서명1 하나만,
-        실제 문서에 찍히는 크기(SIGN_W x SIGN_H)와 같게 보여준다."""
-        return pm.scaled(self.SIGN_W, self.SIGN_H,
-                         Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
     def _reset_code_status(self, text: str, ok: Optional[bool] = None) -> None:
         self.lbl_code_state.setText(text)
-        self.lbl_sign_preview.clear()
-        self.lbl_sign_preview.setToolTip("")
+        for lbl in self.lbl_sign_previews:
+            lbl.clear(); lbl.setToolTip("")
         self._set_code_status_style(ok)
 
+    def _busy(self) -> bool:
+        return self._load_progress is not None or bool(self._pdf_thread and self._pdf_thread.isRunning())
+
+    def _update_buttons(self) -> None:
+        busy = self._busy()
+        has_pages = any(f.pages for f in self._files)
+        self.btn_code.setEnabled(not busy)
+        self.btn_excel.setEnabled(not busy)
+        self.btn_save.setEnabled(not busy and has_pages)
+        cur_signed = any(self._sign_items.get((self._cur_file, p))
+                         for p in range(len(self._cur_pages())))
+        self.btn_bulk.setEnabled(not busy and cur_signed and len(self._files) > 1)
+        self.btn_bulk_undo.setVisible(bool(self._last_bulk))
+
+    # ── ① 서명 Load ─────────────────────────────────────────
     def _load_code(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "승인코드 TXT", "", "Text Files (*.txt)")
         if not path: return
@@ -372,15 +398,13 @@ class ESignPage(QWidget):
             self._reset_code_status("⚠ 서명 읽기 실패", ok=False)
             QMessageBox.critical(self, "오류", str(e))
             return
-        # 코드를 새로 불러오면 이전 세션에서 기억해둔 값을 지운다 —
-        # 새 코드로 처음 서명할 땐 다시 직접 입력해야 한다.
+        # 코드를 새로 불러오면 기억해둔 값을 지운다 — 새 코드로는 다시 직접 입력.
         self._last_password = ""
         folder = os.path.dirname(path)
-        import glob as _glob
         imgs = sorted(
-            [p for ext in ("*.png","*.jpg","*.jpeg","*.bmp","*.webp")
-             for p in _glob.glob(os.path.join(folder, ext))
-             + _glob.glob(os.path.join(folder, ext.upper()))],
+            {p for ext in ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.webp")
+             for p in glob.glob(os.path.join(folder, ext))
+             + glob.glob(os.path.join(folder, ext.upper()))},
             key=lambda p: os.path.basename(p).lower()
         )
         def _pick(kws):
@@ -388,38 +412,51 @@ class ESignPage(QWidget):
                 for p in imgs:
                     if kw in os.path.basename(p).lower(): return p
             return None
-        p1 = _pick(["서명1","sign1","signature1","stamp1"]); p2 = _pick(["서명2","sign2","signature2","stamp2"])
+        p1 = _pick(["서명1", "sign1", "signature1", "stamp1"])
+        p2 = _pick(["서명2", "sign2", "signature2", "stamp2"])
         if not p1 or not p2:
-            p1 = p1 or (imgs[0] if imgs else None); p2 = p2 or (imgs[1] if len(imgs)>1 else None)
+            p1 = p1 or (imgs[0] if imgs else None); p2 = p2 or (imgs[1] if len(imgs) > 1 else None)
         if not p1 or not p2:
-            self._signs = []
+            self._signs = []; self._sign_bytes = []
             self._reset_code_status("⚠ 서명 이미지 없음", ok=False)
             QMessageBox.warning(self, "안내", "서명 이미지 2개를 찾지 못했습니다.")
+            self._update_buttons()
             return
-        pm1 = QPixmap(p1).scaled(self.SIGN_W,self.SIGN_H,Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
-        pm2 = QPixmap(p2).scaled(self.SIGN_W,self.SIGN_H,Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
-        if pm1.isNull() or pm2.isNull():
+        if not self.set_sign_images([QImage(p1), QImage(p2)]):
             self._reset_code_status("⚠ 서명 이미지 로드 실패", ok=False)
-            QMessageBox.critical(self,"오류","서명 이미지 로드 실패"); return
-        self._signs = [pm1, pm2]
+            QMessageBox.critical(self, "오류", "서명 이미지 로드 실패"); return
 
-        # 서명 Load 버튼 옆에 상태 + 실제 찍힐 서명 이미지를 바로 보여준다.
         self.lbl_code_state.setText("✓ 서명 로드됨")
         self._set_code_status_style(ok=True)
-        self.lbl_sign_preview.setPixmap(self._build_sign_preview_pixmap(pm1))
-        self.lbl_sign_preview.setToolTip(
-            f"서명1(대표): {os.path.basename(p1)}  (더블클릭)\n"
-            f"서명2: {os.path.basename(p2)}  (Shift+더블클릭)")
-
+        self.lbl_sign_previews[0].setToolTip(f"{os.path.basename(p1)}  (더블클릭으로 놓기)")
+        self.lbl_sign_previews[1].setToolTip(f"{os.path.basename(p2)}  (Shift+더블클릭으로 놓기)")
         QMessageBox.information(self, "완료", "서명 Load 완료\n전자서명 ON")
 
+    def set_sign_images(self, images: List[QImage]) -> bool:
+        """서명 그림 2개를 받아 화면용·PDF용으로 준비한다. 하나라도 못 읽으면 False."""
+        if len(images) < 2 or any(im.isNull() for im in images):
+            self._signs = []; self._sign_bytes = []
+            return False
+        w = int(round(engine.SIGN_W_PT * RENDER_ZOOM)); h = int(round(engine.SIGN_H_PT * RENDER_ZOOM))
+        signs, blobs = [], []
+        for im in images[:2]:
+            # 서명 칸 크기에 맞춰 늘린다(예전과 같은 동작 — 가로세로 비율 무시)
+            signs.append(QPixmap.fromImage(im).scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+            ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
+            im.save(buf, "PNG"); buf.close()
+            blobs.append(bytes(ba))
+        self._signs, self._sign_bytes = signs, blobs
+        for lbl, pm in zip(self.lbl_sign_previews, signs):
+            lbl.setPixmap(pm.scaled(170, 40, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        self._update_buttons()
+        return True
+
+    # ── ② 엑셀 Load ─────────────────────────────────────────
     def _load_excels(self) -> None:
         import excel_com
         if not excel_com._ensure_com():
             QMessageBox.critical(self, "오류", "Excel COM이 없습니다.")
             return
-        # 워커는 페이지가 열려 있는 동안 계속 살아 있으므로 isRunning() 으로는
-        # 로딩 중인지 알 수 없다 — 진행 다이얼로그의 존재로 판단한다.
         if self._load_progress is not None:
             QMessageBox.information(self, "안내", "이미 로딩 중입니다.")
             return
@@ -428,38 +465,24 @@ class ESignPage(QWidget):
             self, "엑셀 선택(다중)", start, "Excel Files (*.xlsx)")
         if not paths:
             return
-        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1, _natural_key(os.path.basename(p))))
+        paths = sorted(paths, key=lambda p: (0 if "갑지" in os.path.basename(p).lower() else 1,
+                                             _natural_key(os.path.basename(p))))
         base = os.path.commonpath(paths)
         if os.path.isfile(base):
             base = os.path.dirname(base)
+        self._clear_documents()
         self._base_folder = base
         app_settings.set_str(app_settings.Key.ESIGN_DIR, base)
-        self._files = paths
-        self._sheet_pngs = []
-        self._cur_pngs   = []
-        self._sign_items.clear()
-        self._image_cache.clear()
+        self._files = [engine.SignFile(path=p) for p in paths]
+        self._fill_file_list()
 
-        self.file_list.blockSignals(True)
-        self.file_list.clear()
-        for p in paths:
-            it = QListWidgetItem(os.path.basename(p))
-            it.setData(Qt.UserRole, p)
-            self.file_list.addItem(it)
-        self.file_list.blockSignals(False)
-
-        self._cleanup_tmp()
-        # 캡처 PNG 는 이제 메모리에만 담으므로 임시 폴더를 만들지 않는다.
-        # (예전엔 로컬 디스크 쓰기가 막힌 환경이라 선택한 엑셀 옆에 만들었는데,
-        #  그 네트워크 쓰기가 캡처 시간의 20% 였다.) 경로는 캡처 키 이름을
-        # 만들 때만 쓰이고 실제로 생성되지는 않는다.
-        tmp = os.path.join(base, "_esign_tmp_pdf")
-        self._tmp_dir = None
-        # 구버전이 남긴 임시 폴더가 있으면 정리한다(이제 다시 만들지 않으므로
-        # 여기서 지워 주지 않으면 네트워크 드라이브에 계속 남는다).
-        if os.path.isdir(tmp):
+        # 흔적 정리: 비정상 종료로 남은 임시 PDF, 구버전이 만들던 임시 폴더
+        for folder in {os.path.dirname(os.path.abspath(p)) for p in paths}:
+            engine.cleanup_stale_temp(folder)
+        old_tmp = os.path.join(base, "_esign_tmp_pdf")
+        if os.path.isdir(old_tmp):
             try:
-                shutil.rmtree(tmp)
+                shutil.rmtree(old_tmp)
             except Exception as e:
                 logger.warning("구버전 tmp 폴더 삭제 실패: %s", e)
 
@@ -469,32 +492,26 @@ class ESignPage(QWidget):
         self._load_progress.setMinimumDuration(0)
         self._load_progress.setValue(0)
 
-        # 워커는 페이지가 열릴 때 이미 떠 있다. 예열이 실패해 스레드가 죽어
-        # 있으면(초기화 타임아웃 등) 여기서 한 번 더 살려 본다.
+        # 워커는 화면이 열릴 때 이미 떠 있다. 예열이 실패해 죽어 있으면 다시 살린다.
         self._start_worker()
         self._load_progress.canceled.connect(self._worker.cancel)
 
         # 예열이 아직 안 끝났거나 첫 파일 열기가 무한 블로킹하는 경우를 잡는다.
-        # 이번엔 "첫 progress" 를 기준으로 다시 감시한다.
         self._com_init_ok = False
         self._arm_com_timer()
 
-        self.btn_code.setEnabled(False)
-        self.btn_excel.setEnabled(False)
-        self.btn_save.setEnabled(False)
-        self._worker.submit(paths, tmp)
+        self._update_buttons()
+        self._worker.submit(paths)
 
     def _on_load_progress(self, done: int, total: int, fname: str) -> None:
         if self._load_progress is None:
             return
-        # 첫 progress 도착 → 타임아웃 타이머 해제
-        if not self._com_init_ok:
+        if not self._com_init_ok:               # 첫 progress 도착 → 감시 해제
             self._com_init_ok = True
             self._stop_com_timer()
         self._load_progress.setValue(done)
-        # setValue(max) 가 QProgressDialog 자동 닫기(hide)를 트리거하고,
-        # hide() 중 Qt 이벤트가 재진입해 _on_job_done 이 동기 실행될 수 있다.
-        # 그 경우 _load_progress 가 None 으로 바뀌므로 재확인 후 접근한다.
+        # setValue(max) 가 다이얼로그 자동 닫기를 트리거하고, 그 과정에서 Qt 이벤트가
+        # 재진입해 _on_job_done 이 먼저 실행될 수 있다. None 이 됐는지 다시 확인한다.
         if self._load_progress is None:
             return
         if done < total:
@@ -503,9 +520,7 @@ class ESignPage(QWidget):
             self._load_progress.setLabelText("변환 완료")
 
     def _on_sheet_progress(self, file_idx: int, file_total: int, fname: str,
-                            sheet_done: int, sheet_total: int, sheet_name: str) -> None:
-        """파일 안에서의 시트 단위 진행 — 라벨만 갱신, setValue 는 건드리지 않는다
-        (진행 다이얼로그의 숫자 범위는 파일 개수 기준을 그대로 유지)."""
+                           sheet_done: int, sheet_total: int, sheet_name: str) -> None:
         if self._load_progress is None:
             return
         self._load_progress.setLabelText(
@@ -514,9 +529,8 @@ class ESignPage(QWidget):
     def _on_com_init_timeout(self) -> None:
         """Excel COM 이 30초 내에 응답하지 않으면 워커를 강제 종료한다.
 
-        예열 중(사용자가 아직 아무것도 안 누른 상태)이라면 조용히 워커만
-        정리한다 — 기다리는 사람이 없는데 대화창을 띄울 이유가 없고, 실제로
-        엑셀을 로드할 때 다시 시도된다. 로드 중이었다면 안내까지 띄운다.
+        예열 중(사용자가 아직 아무것도 안 누른 상태)이면 조용히 워커만 정리한다 —
+        실제로 엑셀을 로드할 때 다시 시도된다. 로드 중이었다면 안내까지 띄운다.
         """
         if self._com_init_ok:
             return
@@ -530,9 +544,7 @@ class ESignPage(QWidget):
             return
         self._load_progress.close()
         self._load_progress = None
-        self.btn_code.setEnabled(True)
-        self.btn_excel.setEnabled(True)
-        self.btn_save.setEnabled(True)
+        self._update_buttons()
         QMessageBox.critical(
             self, "Excel COM 타임아웃",
             "Excel COM 초기화가 30초를 초과했습니다.\n\n"
@@ -543,44 +555,143 @@ class ESignPage(QWidget):
             "Excel을 직접 열어 완료한 뒤 다시 시도하세요."
         )
 
-    def _on_job_done(self, sheet_pngs: list, png_blobs: dict) -> None:
+    def _on_job_done(self, files: list) -> None:
         self._stop_com_timer()
         if self._load_progress:
             self._load_progress.close()
             self._load_progress = None
-        self.btn_code.setEnabled(True)
-        self.btn_excel.setEnabled(True)
-        self.btn_save.setEnabled(True)
-        self._sheet_pngs = sheet_pngs
-        # 캡처 스레드가 메모리에 담아 둔 PNG bytes 를 캐시에 넘긴다.
-        # 이후 _render 와 PDF 빌드는 전부 이 캐시만 보고 디스크를 건드리지 않는다.
-        self._image_cache.set_blobs(png_blobs)
-        while len(self._sheet_pngs) < len(self._files):
-            self._sheet_pngs.append([])
-        self.btn_excel.setEnabled(True)
-        self.lbl_status.setText(f"{len(self._files)}개 로드 완료")
-        if self.file_list.count() > 0:
-            self.file_list.setCurrentRow(0)
+        self.show_files(list(files))
 
+    def show_files(self, files: List[engine.SignFile]) -> None:
+        """변환이 끝난 파일들을 화면에 올린다. 취소로 빠진 파일은 '취소됨'으로 채운다."""
+        done = {f.path: f for f in files}
+        wanted = [f.path for f in self._files] or [f.path for f in files]
+        self._files = [done.get(p) or engine.SignFile(path=p, error="취소됨") for p in wanted]
+        if not self._base_folder and self._files:
+            self._base_folder = os.path.dirname(os.path.abspath(self._files[0].path))
+        self._fill_file_list()
+        ok = sum(1 for f in self._files if f.pages)
+        bad = len(self._files) - ok
+        self.lbl_status.setText(f"{ok}개 로드 완료" + (f" · {bad}개 실패" if bad else ""))
+        self._update_buttons()
+        first = next((i for i, f in enumerate(self._files) if f.pages), -1)
+        if first >= 0:
+            self.file_list.setCurrentRow(first)
+
+    # ── 문서 상태 ───────────────────────────────────────────
+    def _close_docs(self) -> None:
+        for d in self._docs.values():
+            try:
+                d.close()
+            except Exception:
+                pass
+        self._docs = {}
+
+    def _clear_documents(self) -> None:
+        self.scene.clear()
+        self._bg_item = None
+        self._shown_key = None
+        self._sign_items = {}
+        self._last_bulk = []
+        self._page_cache.clear()
+        self._close_docs()
+        self._files = []
+        self._cur_file = self._cur_page = 0
+        for lst in (self.file_list, self.page_list):
+            lst.blockSignals(True); lst.clear(); lst.blockSignals(False)
+        self._update_buttons()
+
+    def _doc(self, fi: int):
+        d = self._docs.get(fi)
+        if d is None:
+            d = self._docs[fi] = engine.open_pdf(self._files[fi].pdf)
+        return d
+
+    def _cur_pages(self) -> List[engine.PageRef]:
+        return self._files[self._cur_file].pages if self._cur_file < len(self._files) else []
+
+    def _render_pixmap(self, fi: int, pno: int, zoom: float) -> QPixmap:
+        w, h, stride, samples = engine.render_page(self._doc(fi), pno, zoom)
+        # samples 를 QImage 가 복사해 갖도록 copy() — 원본 bytes 는 곧 사라진다
+        return QPixmap.fromImage(QImage(samples, w, h, stride, QImage.Format_RGB888).copy())
+
+    def _page_pixmap(self, fi: int, pno: int) -> QPixmap:
+        key = (fi, pno)
+        pm = self._page_cache.get(key)
+        if pm is None:
+            pm = self._render_pixmap(fi, pno, RENDER_ZOOM)
+            self._page_cache[key] = pm
+            while len(self._page_cache) > PAGE_CACHE_MAX:
+                self._page_cache.popitem(last=False)
+        else:
+            self._page_cache.move_to_end(key)
+        return pm
+
+    # ── 목록 ────────────────────────────────────────────────
+    def _file_label(self, fi: int) -> str:
+        f = self._files[fi]
+        if f.error:
+            return f"⚠ {f.name} — {f.error}"
+        if not f.pages:
+            return f.name
+        n = sum(len(self._sign_items.get((fi, p), [])) for p in range(len(f.pages)))
+        return f"{f.name}   (서명 {n})" if n else f.name
+
+    @staticmethod
+    def _page_title(ref: engine.PageRef) -> str:
+        return ref.sheet if ref.pages_in_sheet <= 1 else f"{ref.sheet} ({ref.index_in_sheet + 1}/{ref.pages_in_sheet})"
+
+    def _page_label(self, fi: int, pno: int) -> str:
+        n = len(self._sign_items.get((fi, pno), []))
+        title = self._page_title(self._files[fi].pages[pno])
+        return f"{pno + 1}. {title}" + (f"\n✓ 서명 {n}" if n else "\n서명 없음")
+
+    def _fill_file_list(self) -> None:
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        for fi, f in enumerate(self._files):
+            it = QListWidgetItem(self._file_label(fi))
+            it.setData(Qt.UserRole, f.path)
+            it.setToolTip(f.path)
+            self.file_list.addItem(it)
+        self.file_list.blockSignals(False)
+
+    def _fill_page_list(self) -> None:
+        self.page_list.blockSignals(True)
+        self.page_list.clear()
+        fi = self._cur_file
+        for pno in range(len(self._cur_pages())):
+            it = QListWidgetItem(QIcon(self._render_pixmap(fi, pno, THUMB_ZOOM)), self._page_label(fi, pno))
+            self.page_list.addItem(it)
+        self.page_list.blockSignals(False)
+
+    def _refresh_marks(self) -> None:
+        """서명 개수 표시(파일 목록·쪽 목록)와 버튼 상태를 지금 상태에 맞춘다."""
+        for fi in range(min(self.file_list.count(), len(self._files))):
+            self.file_list.item(fi).setText(self._file_label(fi))
+        for pno in range(min(self.page_list.count(), len(self._cur_pages()))):
+            self.page_list.item(pno).setText(self._page_label(self._cur_file, pno))
+        self._update_buttons()
+
+    # ── 보기 ────────────────────────────────────────────────
     def _on_select_file(self, row: int) -> None:
         if row < 0 or row >= len(self._files): return
-        self._cur_file = row; self._cur_page = 0; self._load_sheets(); self._render()
+        self._cur_file = row; self._cur_page = 0
+        self._fill_page_list()
+        if not self._cur_pages():
+            self._detach_shown()
+            self.lbl_status.setText("표시할 시트 없음(스킵)")
+            self._update_buttons()
+            return
+        self._render()
 
-    def _load_sheets(self) -> None:
-        self._cur_pngs = (self._sheet_pngs[self._cur_file]
-                          if self._cur_file < len(self._sheet_pngs) else [])
-        if not self._cur_pngs:
-            self.lbl_status.setText("표시할 시트 없음(스킵)"); self.scene.clear()
+    def _on_select_page(self, row: int) -> None:
+        if row < 0 or row >= len(self._cur_pages()) or row == self._cur_page: return
+        self._cur_page = row
+        self._render()
 
-    def _render(self) -> None:
-        if not self._cur_pngs: return
-        self._cur_page = max(0, min(self._cur_page, len(self._cur_pngs) - 1))
-        path = self._cur_pngs[self._cur_page]
-        # 캐시 경유 — 페이지를 앞뒤로 오가도 같은 파일을 디스크에서 다시 읽지 않는다.
-        # PDF 저장 단계도 이 캐시를 공유해 이미 본 페이지는 재사용한다.
-        img = self._image_cache.get(path)
-        if img.isNull(): return
-        pm = QPixmap.fromImage(img)
+    def _detach_shown(self) -> None:
+        """지금 화면에 올라가 있는 쪽 그림과 서명을 씬에서 떼어낸다(서명은 보관)."""
         if self._shown_key is not None:
             for it in list(self._sign_items.get(self._shown_key, [])):
                 try:
@@ -589,52 +700,100 @@ class ESignPage(QWidget):
         if self._bg_item is not None:
             try:
                 if self._bg_item.scene() is self.scene: self.scene.removeItem(self._bg_item)
-            except Exception: pass
+            except RuntimeError: pass
+        self._bg_item = None
+        self._shown_key = None
+
+    def _render(self) -> None:
+        pages = self._cur_pages()
+        if not pages: return
+        self._cur_page = max(0, min(self._cur_page, len(pages) - 1))
+        fi, pno = self._cur_file, self._cur_page
+        pm = self._page_pixmap(fi, pno)
+        self._detach_shown()
         bg = QGraphicsPixmapItem(pm); bg.setZValue(0); bg.setAcceptedMouseButtons(Qt.NoButton)
-        self.scene.addItem(bg); self._bg_item = bg; self._shown_key = (self._cur_file, self._cur_page)
+        bg.setTransformationMode(Qt.SmoothTransformation)
+        bg.setScale(1.0 / RENDER_ZOOM)                     # 씬 좌표 = PDF 포인트
+        self.scene.addItem(bg); self._bg_item = bg; self._shown_key = (fi, pno)
         for it in list(self._sign_items.get(self._shown_key, [])):
             try: self.scene.addItem(it); it.setZValue(10)
             except RuntimeError: pass
-        self.scene.setSceneRect(bg.boundingRect()); self.view.resetTransform()
+        w_pt, h_pt = engine.page_size(self._doc(fi), pno)
+        self.scene.setSceneRect(0, 0, w_pt, h_pt); self.view.resetTransform()
         vp_w = max(1, self.view.viewport().width())
-        scale = vp_w / max(1, pm.width()); self.view.scale(scale, scale); self.view.setFocus()
+        scale = vp_w / max(1.0, w_pt); self.view.scale(scale, scale); self.view.setFocus()
         self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().minimum())
-        self.lbl_status.setText(f"파일 {self._cur_file+1}/{len(self._files)} / 시트 {self._cur_page+1}/{len(self._cur_pngs)}")
+        self.page_list.blockSignals(True); self.page_list.setCurrentRow(pno); self.page_list.blockSignals(False)
+        self.lbl_status.setText(
+            f"파일 {fi + 1}/{len(self._files)} / 쪽 {pno + 1}/{len(pages)} · {self._page_title(pages[pno])}")
+        self._update_buttons()
+
+    def _step_file(self, step: int) -> int:
+        """step 방향으로 쪽이 있는 다음 파일의 순번. 없으면 -1."""
+        fi = self._cur_file + step
+        while 0 <= fi < len(self._files):
+            if self._files[fi].pages:
+                return fi
+            fi += step
+        return -1
 
     def _next_page(self) -> None:
-        if not self._cur_pngs: return
-        if self._cur_page+1 < len(self._cur_pngs): self._cur_page += 1; self._render()
-        elif self._cur_file+1 < len(self._files): self.file_list.setCurrentRow(self._cur_file+1)
+        if not self._cur_pages(): return
+        if self._cur_page + 1 < len(self._cur_pages()):
+            self._cur_page += 1; self._render()
+        else:
+            fi = self._step_file(+1)
+            if fi >= 0: self.file_list.setCurrentRow(fi)
 
     def _prev_page(self) -> None:
-        if not self._cur_pngs: return
-        if self._cur_page-1 >= 0: self._cur_page -= 1; self._render()
-        elif self._cur_file-1 >= 0:
-            self.file_list.setCurrentRow(self._cur_file-1)
-            if self._cur_pngs: self._cur_page = max(0, len(self._cur_pngs)-1); self._render()
+        if not self._cur_pages(): return
+        if self._cur_page - 1 >= 0:
+            self._cur_page -= 1; self._render()
+        else:
+            fi = self._step_file(-1)
+            if fi >= 0:
+                self.file_list.setCurrentRow(fi)
+                self._cur_page = max(0, len(self._cur_pages()) - 1); self._render()
+
+    # ── 서명 ────────────────────────────────────────────────
+    def _confirm_password(self) -> bool:
+        dlg = PasswordDialog(self, self._code, prefill=self._last_password)
+        if dlg.exec() != QDialog.Accepted or not dlg.verified:
+            return False
+        self._last_password = self._code   # 다음 서명부터는 미리 채워서 뜬다
+        return True
+
+    def _make_item(self, sign_idx: int, pno: int, x: float, y: float) -> SignatureItem:
+        item = SignatureItem(self._signs[sign_idx], pno, on_delete=self._remove_sign)
+        item.sign_idx = sign_idx
+        item.setTransformationMode(Qt.SmoothTransformation)
+        item.setScale(1.0 / RENDER_ZOOM)
+        item.setZValue(10)
+        item.setPos(QPointF(x, y))
+        return item
+
+    def place_sign(self, sign_idx: int, x: float, y: float) -> None:
+        """지금 보고 있는 쪽의 (x, y)pt 에 서명을 놓는다. (x, y) 는 서명의 왼쪽 위."""
+        key = (self._cur_file, self._cur_page)
+        item = self._make_item(sign_idx, self._cur_page, x, y)
+        self.scene.addItem(item)
+        self._sign_items.setdefault(key, []).append(item)
+        self.scene.update()
+        self._refresh_marks()
 
     def _add_sign(self, scene_pos: QPointF) -> None:
         if not self._signs:
             QMessageBox.information(self, "안내", "서명 Load 후 서명 이미지가 필요합니다."); return
-        if not self._cur_pngs: return
-        dlg = PasswordDialog(self, self._code, prefill=self._last_password)
-        if dlg.exec() != QDialog.Accepted or not dlg.verified: return
-        self._last_password = self._code   # 다음 서명부터는 미리 채워서 뜬다
-        idx = min(1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs)-1)
-        key = (self._cur_file, self._cur_page)
-        item = SignatureItem(self._signs[idx], self._cur_page,
-                             on_delete=self._remove_sign)
-        item.setZValue(10)
-        item.setPos(QPointF(scene_pos.x()-self.SIGN_W/2, scene_pos.y()-self.SIGN_H/2))
-        self.scene.addItem(item)
-        self._sign_items.setdefault(key, []).append(item)
-        self.scene.update()
+        if not self._cur_pages(): return
+        if not self._confirm_password(): return
+        idx = min(1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs) - 1)
+        self.place_sign(idx, scene_pos.x() - engine.SIGN_W_PT / 2, scene_pos.y() - engine.SIGN_H_PT / 2)
 
     def _remove_sign(self, item) -> None:
-        """SignatureItem 우클릭 삭제 콜백 — _sign_items 에서도 제거한다.
+        """서명 우클릭 삭제 콜백 — 보관 목록에서도 뺀다.
 
-        여기서 빼주지 않으면 씬에서만 사라지고 목록에는 남아
-        페이지를 다시 그릴 때 되살아나며, _build_pdf 가 그대로 PDF 에 찍는다.
+        빼주지 않으면 씬에서만 사라지고 목록에는 남아, 쪽을 다시 그릴 때
+        되살아나고 PDF 에도 그대로 찍힌다.
         """
         for key, lst in list(self._sign_items.items()):
             if item in lst:
@@ -642,74 +801,103 @@ class ESignPage(QWidget):
                 if not lst:
                     self._sign_items.pop(key, None)
                 break
+        if item in self._last_bulk:
+            self._last_bulk.remove(item)
+        self._refresh_marks()
 
-    def _cleanup_tmp(self) -> None:
-        self._cur_pngs = []
-        if self._tmp_dir and os.path.isdir(self._tmp_dir):
+    def placements(self) -> Dict[Tuple[int, int], List[engine.Placement]]:
+        """화면에 놓인 서명을 엔진이 쓰는 값으로 떠 낸다(GUI 스레드에서만 호출)."""
+        out: Dict[Tuple[int, int], List[engine.Placement]] = {}
+        for key, items in self._sign_items.items():
+            got = []
+            for it in items:
+                try:
+                    got.append(engine.Placement(int(getattr(it, "sign_idx", 0)),
+                                                float(it.pos().x()), float(it.pos().y())))
+                except RuntimeError:
+                    continue
+            if got:
+                out[key] = got
+        return out
+
+    def _apply_to_others(self) -> None:
+        if not self._signs:
+            QMessageBox.information(self, "안내", "서명 Load 후 서명 이미지가 필요합니다."); return
+        added = engine.copy_placements(self._files, self.placements(), self._cur_file)
+        if not added:
+            QMessageBox.information(self, "안내", "적용할 곳이 없습니다.\n"
+                                    "(다른 파일에 같은 시트가 없거나, 이미 서명이 있습니다)")
+            return
+        if not self._confirm_password(): return
+        n = self.apply_placements(added)
+        self.lbl_status.setText(f"{len({k[0] for k in added})}개 파일 · {len(added)}쪽에 서명 {n}개를 놓았습니다")
+
+    def apply_placements(self, added: Dict[Tuple[int, int], List[engine.Placement]]) -> int:
+        """주어진 위치에 서명을 놓는다(일괄 적용). 반환: 놓은 서명 수."""
+        self._last_bulk = []
+        for (fi, pno), pls in added.items():
+            for pl in pls:
+                item = self._make_item(min(pl.sign, len(self._signs) - 1), pno, pl.x, pl.y)
+                self._sign_items.setdefault((fi, pno), []).append(item)
+                self._last_bulk.append(item)
+                if (fi, pno) == self._shown_key:
+                    self.scene.addItem(item)
+        self._refresh_marks()
+        return len(self._last_bulk)
+
+    def _undo_bulk(self) -> None:
+        items, self._last_bulk = self._last_bulk, []
+        for item in items:
+            for key, lst in list(self._sign_items.items()):
+                if item in lst:
+                    lst.remove(item)
+                    if not lst:
+                        self._sign_items.pop(key, None)
             try:
-                shutil.rmtree(self._tmp_dir)
-            except Exception as e:
-                logger.warning("tmp 폴더 삭제 실패: %s", e)
-            self._tmp_dir = None
+                if item.scene() is self.scene: self.scene.removeItem(item)
+            except RuntimeError: pass
+        self.lbl_status.setText(f"일괄 적용한 서명 {len(items)}개를 취소했습니다")
+        self._refresh_marks()
 
-    def _collect_build_plan(self) -> list:
-        """서명 오버레이를 QImage 로 미리 뽑아 (fi, pno, png_path, overlays) 목록으로 만든다.
-
-        SignatureItem.pixmap()/pos() 는 GUI 스레드에서만 접근 가능하므로,
-        백그라운드 스레드(_PdfBuildThread)로 넘기기 전에 여기서 전부 값으로
-        떠 둔다. overlays 의 각 항목은 (QImage, x, y) — QImage 는 스레드
-        경계를 넘나들어도 안전하다.
-        """
-        plan = []
-        for fi, pngs in enumerate(self._sheet_pngs):
-            for pno, png_path in enumerate(pngs):
-                overlays = []
-                for it in list(self._sign_items.get((fi, pno), [])):
-                    try:
-                        x, y = float(it.pos().x()), float(it.pos().y())
-                        img = it.pixmap().toImage()
-                    except RuntimeError:
-                        continue
-                    overlays.append((img, x, y))
-                plan.append((fi, pno, png_path, overlays))
-        return plan
-
+    # ── ③ PDF 저장 ──────────────────────────────────────────
     def _save_pdf(self) -> None:
-        if not any(self._sheet_pngs) or not self._files:
+        if not any(f.pages for f in self._files):
             QMessageBox.information(self, "안내", "먼저 엑셀을 LOAD 하세요."); return
         if self._pdf_thread and self._pdf_thread.isRunning():
             QMessageBox.information(self, "안내", "이미 PDF 저장 중입니다."); return
-
+        unsigned = [f.name for fi, f in enumerate(self._files) if f.pages
+                    and not any(self._sign_items.get((fi, p)) for p in range(len(f.pages)))]
+        if unsigned and self._sign_items:
+            names = "\n".join("  • " + n for n in unsigned[:8]) + ("\n  …" if len(unsigned) > 8 else "")
+            if QMessageBox.question(
+                    self, "확인", f"서명이 하나도 없는 파일이 {len(unsigned)}개 있습니다.\n{names}\n\n그대로 저장할까요?"
+            ) != QMessageBox.Yes:
+                return
         folder_name = os.path.basename(self._base_folder.rstrip("\\/"))
         out = unique_path(os.path.join(self._base_folder, f"대외비_{folder_name}.pdf"))
-        plan = self._collect_build_plan()
+        self.save_to(out)
 
-        # 취소 불가 대기 다이얼로그 — page_common._BgWorker.run_with_progress 와
-        # 같은 패턴(cancelButtonText=None). fitz 문서 작성 도중 취소하면 PDF가
-        # 반쯤 쓰인 상태로 남는 처리가 새로 필요해져 범위를 늘리므로 지금은 두지 않는다.
-        self._pdf_progress = QProgressDialog("제출용 견적(PDF) 준비 중…", None, 0, len(plan), self)
+    def save_to(self, out: str) -> None:
+        total = sum(len(f.pages) for f in self._files)
+        # 취소 불가 대기 다이얼로그 — 도중에 끊으면 반쯤 쓰인 PDF 처리가 새로 필요하다.
+        self._pdf_progress = QProgressDialog("제출용 견적(PDF) 준비 중…", None, 0, total, self)
         self._pdf_progress.setWindowTitle("제출용 견적(PDF) Print")
         self._pdf_progress.setWindowModality(Qt.WindowModal)
         self._pdf_progress.setMinimumDuration(0)
         self._pdf_progress.setValue(0)
 
-        self._pdf_thread = _PdfBuildThread(plan, self._image_cache, out, self)
+        self._pdf_thread = _PdfBuildThread(list(self._files), self.placements(),
+                                           list(self._sign_bytes), out, self)
         self._pdf_thread.progress.connect(self._on_pdf_progress)
         self._pdf_thread.done.connect(lambda result: self._on_pdf_done(result, out))
-
-        self.btn_code.setEnabled(False)
-        self.btn_excel.setEnabled(False)
-        self.btn_save.setEnabled(False)
         self._pdf_thread.start()
+        self._update_buttons()
 
     def _on_pdf_progress(self, done: int, total: int) -> None:
         if self._pdf_progress is None:
             return
         self._pdf_progress.setValue(done)
-        # setValue(max) 가 다이얼로그 자동 닫기를 트리거하고, 그 과정에서
-        # Qt 이벤트가 재진입해 _on_pdf_done 이 동기 실행될 수 있다
-        # (_on_load_progress 에서 이미 겪은 것과 같은 패턴 — 재확인 필수).
-        if self._pdf_progress is None:
+        if self._pdf_progress is None:      # setValue(max) 재진입 대비 (_on_load_progress 와 같은 이유)
             return
         self._pdf_progress.setLabelText(f"제출용 견적(PDF) 저장 중 ({done}/{total})")
 
@@ -717,104 +905,14 @@ class ESignPage(QWidget):
         if self._pdf_progress:
             self._pdf_progress.close()
             self._pdf_progress = None
-        self.btn_code.setEnabled(True)
-        self.btn_excel.setEnabled(True)
-        self.btn_save.setEnabled(True)
+        if self._pdf_thread is not None:
+            self._pdf_thread.wait(2000)
+        self._update_buttons()
         if isinstance(result, Exception):
             logger.error("PDF 저장 실패", exc_info=result)
             tb = "".join(traceback.format_exception(type(result), result, result.__traceback__))
             user_msg, hint = _friendly_error_msg(result)
             _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
-        self._cleanup_tmp()
-        QMessageBox.information(self, "완료", f"저장 완료:\n{out}")
         self.lbl_status.setText("제출용 견적(PDF) Print 완료")
-
-
-class _PdfBuildThread(QThread):
-    """서명이 찍힌 PDF 합성·저장을 백그라운드에서 수행.
-
-    QPixmap/QPainter-on-widget 은 GUI 스레드 전용이라 여기서는 전부 QImage 로
-    처리한다(Qt 문서: QImage 는 어느 스레드에서 다뤄도 안전). fitz(PyMuPDF)
-    문서 작성도 이 스레드 하나로만 국한되므로(다른 스레드와 동시에 같은
-    문서를 건드리지 않음) 안전하다.
-
-    다운스케일을 먼저 하고 그 위에 서명을 합성한다(기존엔 원본 해상도로
-    합성한 뒤 축소) — 서명의 위치·크기도 같은 배율로 줄여서 최종 결과물의
-    상대적 위치/크기는 기존과 동일하게 유지한다.
-    """
-    progress = Signal(int, int)   # (완료 페이지수, 전체 페이지수)
-    done     = Signal(object)     # None(성공) 또는 Exception
-
-    A4_W, A4_H = 595.0, 842.0                  # A4, pt (1pt = 1/72 inch)
-    MAX_PX = int(A4_W * 150 / 72)              # 150 DPI 기준 최대 너비 ≈ 1240px
-
-    def __init__(self, plan: list, image_cache: "_ImageCache", out_path: str,
-                 parent=None) -> None:
-        super().__init__(parent)
-        self.plan = plan
-        self.image_cache = image_cache
-        self.out_path = out_path
-
-    def run(self) -> None:
-        try:
-            self._build()
-            self.done.emit(None)
-        except Exception as e:
-            logger.error("PDF 빌드 스레드 실패", exc_info=True)
-            self.done.emit(e)
-
-    def _build(self) -> None:
-        import fitz
-
-        final = fitz.open()
-        total = len(self.plan)
-
-        for done_i, (fi, pno, png_path, overlays) in enumerate(self.plan):
-            self.progress.emit(done_i, total)
-            # 캡처 결과는 메모리 캐시(mem:// 키)에 있으므로 존재 확인은
-            # 디코드 결과로 한다 — 경로가 아니라 키라 os.path.exists 는 못 쓴다.
-            base = self.image_cache.get(png_path)
-            if base.isNull():
-                continue
-
-            # 다운스케일 먼저 — 원본 해상도로 합성한 뒤 축소하던 것을 뒤집었다.
-            # 캡처가 고DPI 환경일수록(1600~2400px) 절약 폭이 커진다.
-            orig_w = base.width()
-            if orig_w > self.MAX_PX:
-                scaled = base.scaledToWidth(self.MAX_PX, Qt.SmoothTransformation)
-            else:
-                scaled = base
-            scale = (scaled.width() / orig_w) if orig_w else 1.0
-
-            if overlays:
-                composed = QImage(scaled.size(), QImage.Format_ARGB32_Premultiplied)
-                composed.fill(Qt.white)
-                painter = QPainter(composed)
-                painter.drawImage(0, 0, scaled)
-                for sign_img, x, y in overlays:
-                    sw = sign_img.width() * scale
-                    sh = sign_img.height() * scale
-                    painter.drawImage(QRectF(x * scale, y * scale, sw, sh), sign_img)
-                painter.end()
-                final_img = composed
-            else:
-                final_img = scaled
-
-            if "입고검수확인서" in png_path:
-                final_img = final_img.convertToFormat(QImage.Format_Grayscale8)
-
-            iw, ih = final_img.width(), final_img.height()
-            ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
-            final_img.save(buf, "JPEG", 45); buf.close()
-
-            # 고정 A4 페이지, 이미지를 비율 유지하며 중앙+상단 배치
-            page = final.new_page(width=self.A4_W, height=self.A4_H)
-            pscale = min(self.A4_W / max(1, iw), self.A4_H / max(1, ih))
-            pw, ph = iw * pscale, ih * pscale
-            x0 = (self.A4_W - pw) / 2
-            page.insert_image(fitz.Rect(x0, 0.0, x0 + pw, ph), stream=bytes(ba))
-
-        self.progress.emit(total, total)
-        final.save(self.out_path, deflate=True, garbage=4)
-        final.close()
+        QMessageBox.information(self, "완료", f"저장 완료:\n{out}")

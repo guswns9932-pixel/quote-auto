@@ -14,7 +14,7 @@ import logging
 import sys
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QWidget,
 )
@@ -92,10 +92,44 @@ class _PageWindow(QMainWindow):
         self._geo_key = cls_name
         self._geo_restored = app_settings.restore_geometry(self._geo_key, self)
 
+    # 창을 닫은 뒤 페이지의 뒷정리(전자서명의 Excel 종료)를 기다려 주는 최대 시간.
+    _LINGER_MS = 120_000
+
     def closeEvent(self, event) -> None:
         app_settings.save_geometry(self._geo_key, self)
         self._shutdown_page()
-        super().closeEvent(event)
+        busy = getattr(self._page, "background_busy", None)
+        if busy is None or not busy():
+            super().closeEvent(event)
+            return
+        # 뒷정리가 아직 안 끝났다. Excel 종료는 환경에 따라 수십 초가 걸리는데
+        # (실측 50초) 그동안 창이 멈춰 있으면 먹통처럼 보인다. 창은 바로 감추고
+        # 프로세스만 남아 정리가 끝나는 대로 종료한다. 여기서 프로세스를 그냥
+        # 끝내면 보이지 않는 EXCEL.EXE 가 남아 파일 잠금을 쥔다.
+        event.ignore()
+        self.hide()
+        if getattr(self, "_linger", None) is not None:
+            return
+        self._linger_left = self._LINGER_MS
+        self._linger = QTimer(self)
+        self._linger.setInterval(200)
+        self._linger.timeout.connect(self._linger_tick)
+        self._linger.start()
+
+    def _linger_tick(self) -> None:
+        self._linger_left -= 200
+        busy = getattr(self._page, "background_busy", None)
+        if busy is not None and busy() and self._linger_left > 0:
+            return
+        self._linger.stop()
+        if busy is not None and busy():
+            stop = getattr(self._page, "force_stop", None)
+            if stop is not None:
+                try:
+                    stop()
+                except Exception:
+                    logger.warning("페이지 강제 정리 실패", exc_info=True)
+        QApplication.quit()
 
     def _shutdown_page(self) -> None:
         """페이지가 백그라운드 자원(전자서명의 Excel COM 세션 등)을 쥐고 있으면

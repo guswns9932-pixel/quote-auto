@@ -70,7 +70,7 @@ ICON = r"@ICON@" or None
 # 실어서 런처·Tk 앱이 PySide6/fitz/selenium 등을 로드하지 않게 한다.
 #   <APP_NAME>.exe         런처 (PySide6 만)
 #   <APP_NAME>_quote.exe   견적서작성   (Qt + openpyxl + 전체 의존성)
-#   <APP_NAME>_esign.exe   전자서명     (Qt + fitz + PIL + win32com)
+#   <APP_NAME>_esign.exe   전자서명     (Qt + fitz + win32com)
 #   <APP_NAME>_search.exe  키워드 검색기 (Tk + fitz/openpyxl 파서)
 #   <APP_NAME>_csp.exe     CSP UPLOAD   (Tk + openpyxl)
 
@@ -183,16 +183,18 @@ _PROFILES = [
         script="run_esign.py", exe=APP_NAME + "_esign",
         hidden=_ENCODINGS + _QT_PAGE_MODS + _WIN32_MODS + [
             "app_boot", "app_runner", "app_settings", "page_esign", "page_common",
-            "widgets", "core", "excel_com", "esign_capture",
-            "openpyxl.cell._writer", "PIL.ImageGrab", "tarfile",
-            *openpyxl_h, *fitz_h, *pil_h,
+            "widgets", "core", "excel_com", "esign_engine",
+            "tarfile", *fitz_h,
         ],
+        # 전자서명은 Excel 이 만든 PDF 를 fitz 로만 다룬다 — openpyxl·PIL 을 쓰지 않는다
+        # (예전 클립보드 캡처 방식에서만 PIL 이 필요했다).
         excludes=_COMMON_EXCLUDES + _NO_TK + [
-            "content_search", "csp_order_maker",
+            "content_search", "csp_order_maker", "csp_core", "excel_io",
+            "openpyxl", "PIL",
             "selenium", "webdriver_manager", "pyautogui",
         ],
-        binaries=[*openpyxl_b, *fitz_b, *pil_b, *_pywin32_dlls],
-        datas=[*openpyxl_d, *fitz_d, *pil_d],
+        binaries=[*fitz_b, *_pywin32_dlls],
+        datas=[*fitz_d],
     ),
     dict(
         script="run_search.py", exe=APP_NAME + "_search",

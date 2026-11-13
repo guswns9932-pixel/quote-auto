@@ -146,3 +146,21 @@ def test_us_and_china_header_fields(env):
     cn = load_workbook(io.generate_quote(st, "중국", env["items"], {}))["견적서_중국"]
     assert (cn["B3"].value, cn["G6"].value, cn["G10"].value, cn["G7"].value) == (
         "Wang / Purchasing", "CN-01", "2026-12-20", "3 Year after delivery")
+
+
+def test_pump_only_hides_rack_rows_of_incoming_sheet(env):
+    """PUMP 만(또는 PUMP + Credit) 견적하면 입고검수확인서의 RACK 점검 행(20~39)을 숨긴다."""
+    from openpyxl import load_workbook
+    io, st = env["io"], env["state"]
+    pump = [i for i in env["items"] if i["cat"] == "PUMP"]
+
+    def hidden(path):
+        ws = load_workbook(path)["입고검수확인서"]
+        return [r for r in range(14, 40) if ws.row_dimensions[r].hidden]
+
+    assert hidden(io.generate_quote(st, "국내", pump, env["rd"])) == list(range(20, 40))
+    assert hidden(io.generate_quote(st, "국내", pump + _credits(), env["rd"])) == list(range(20, 40))
+    assert hidden(io.generate_quote(st, "국내", env["items"], env["rd"])) == []
+    # 일괄 생성(워크북 재사용): PUMP 만 한 건 뒤에도 다음 건의 숨김 여부가 따로 정해진다
+    res = io.generate_quote_multi(st, pump, [dict(env["rd"], Z="A1")])
+    assert hidden(res[0][1]) == list(range(20, 40))

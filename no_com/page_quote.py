@@ -34,7 +34,7 @@ from core import (
     normalize_token, parse_invest_info, s, to_float, unique_path,
 )
 from widgets import (
-    DraggableItemsTable, DroppableQuoteTable,
+    DraggableItemsTable, DroppableQuoteTable, FoldableWindow,
     bold_label, centered_checkbox,
     get_checkbox_from_cell, info_label, labeled_frame, tint_button,
 )
@@ -511,19 +511,18 @@ class Step5Manager:
 # 견적서 LIST 독립 창
 # ══════════════════════════════════════════════
 
-class _QuoteListWindow(QWidget):
-    """견적서 LIST를 보여주는 독립(플로팅) 창."""
+class _QuoteListWindow(FoldableWindow):
+    """견적서 LIST를 보여주는 독립(플로팅) 창. 최소화하면 본 창 왼쪽 아래로 접힌다."""
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.Window)
-        self.setWindowTitle("견적서 LIST")
+        super().__init__(parent, "견적서 LIST")
         self.resize(480, 620)
         # (tool, label, full_path) — 추가 시점에 한 번만 파싱해 캐시
         self._session_entries: List[Tuple[str, str, str]] = []
         self._build()
 
     def _build(self) -> None:
-        v = QVBoxLayout(self)
+        v = QVBoxLayout(self.body)
         v.setContentsMargins(12, 12, 12, 12); v.setSpacing(6)
 
         title_row = QHBoxLayout()
@@ -612,9 +611,7 @@ class _QuoteListWindow(QWidget):
             except Exception as e: QMessageBox.critical(self, "오류", str(e))
 
     def show_and_raise(self) -> None:
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.open()          # 접혀 있거나 최소화돼 있어도 원래 크기로 나온다
         if self.list_widget.count() > 0:
             self.list_widget.scrollToTop()
 
@@ -658,7 +655,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         self._build_ui()
         self._ensure_total()
-        self._log("준비: STEP1 → STEP2 → STEP4/드래그 → STEP5 → 생성")
+        self._log("준비: 통합양식 LOAD → 의뢰파일 LOAD → 품목 담기 → 생성")
         # STEP5 가 어떻게 바뀌든(추가·삭제·수량·Credit·정렬) 검토 화면을 다시 계산한다
         m = self.step5_table.model()
         for sig in (m.rowsInserted, m.rowsRemoved, m.dataChanged, m.modelReset):
@@ -763,9 +760,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         outer.addWidget(content, 1)
 
         # 품목 목록(STEP4)은 별도 창 — '+ 품목 추가' 로 연다
-        self._picker = QWidget(self, Qt.Window)
-        self._picker.setWindowTitle("품목 추가 — 더블클릭하거나 견적작성 대상 표로 끌어 놓으세요")
-        pk = QVBoxLayout(self._picker); pk.setContentsMargins(8, 8, 8, 8)
+        self._picker = FoldableWindow(self, "품목 추가")
+        pk = QVBoxLayout(self._picker.body); pk.setContentsMargins(8, 8, 8, 8)
         pk.addWidget(self._build_step4_panel())
         self._picker.resize(520, 760)
         self._picker_placed = False
@@ -776,7 +772,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             top = self.window().frameGeometry()
             self._picker.move(max(0, top.right() - self._picker.width() - 380), top.top() + 120)
             self._picker_placed = True
-        self._picker.show(); self._picker.raise_(); self._picker.activateWindow()
+        self._picker.open()          # 접혀 있거나 최소화돼 있어도 원래 크기로 나온다
         self.ed_filter.setFocus(); self.ed_filter.selectAll()
 
     @staticmethod
@@ -790,8 +786,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         bar = QWidget(); bar.setFixedHeight(58)
         h = QHBoxLayout(bar); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
 
-        self.btn_step1 = self._action_btn("STEP 1\n통합양식 LOAD", self._load_template)
-        self.btn_step2 = self._action_btn("STEP 2\n의뢰파일 LOAD", self._load_request)
+        self.btn_step1 = self._action_btn("통합양식 LOAD", self._load_template)
+        self.btn_step2 = self._action_btn("의뢰파일 LOAD", self._load_request)
         tint_button(self.btn_step1, "#C8E6C9")
         tint_button(self.btn_step2, "#BBDEFB")
         self.btn_step2.setEnabled(False)
@@ -909,7 +905,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _build_step4_panel(self) -> QFrame:
         frame = QFrame(); frame.setFrameShape(QFrame.Box); frame.setLineWidth(2); frame.setMinimumHeight(150)
         v = QVBoxLayout(frame); v.setContentsMargins(12,12,12,12); v.setSpacing(8)
-        v.addWidget(bold_label("STEP 4\n품목(규격/단가) + 필터  (더블클릭/드래그 → STEP5)"))
+        v.addWidget(bold_label("품목 목록  —  더블클릭하거나 '견적 품목' 표로 끌어 놓으세요", size=10))
         self.ed_filter = QLineEdit(); self.ed_filter.setPlaceholderText("규격 필터(실시간) - 포함 검색")
         self.ed_filter.textChanged.connect(self._apply_filter)
         self.items_table = DraggableItemsTable(0, 2)
@@ -968,11 +964,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         done = [bool(st.template_path), bool(st.request_rows),
                 has_items and not review.red, bool(self._list_all_files)]
         if not done[0]:
-            hint = "STEP 1 에서 통합양식을 불러오세요"
+            hint = "통합양식 LOAD 로 양식을 불러오세요"
         elif not done[1]:
-            hint = "STEP 2 에서 의뢰파일을 불러오고, 의뢰 행을 더블클릭하세요"
+            hint = "의뢰파일 LOAD 로 의뢰를 불러오고, 의뢰 행을 더블클릭하세요"
         elif not has_items:
-            hint = "품목을 담으세요 — 의뢰 행 더블클릭, 코드매핑 적용, 또는 STEP 4 에서 더블클릭"
+            hint = "품목을 담으세요 — 의뢰 행 더블클릭, 코드매핑 적용, 또는 '+ 품목 추가'"
         elif review.red:
             hint = f"판단이 필요한 항목이 {len(review.red)}건 있습니다 — 오른쪽 점검 목록을 확인하세요"
         elif not done[3]:
@@ -1000,7 +996,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._select_step5_spec(spec)
 
     def _build_step5_panel(self) -> QFrame:
-        step5 = labeled_frame("STEP5 견적작성 대상", min_h=150)
+        step5 = labeled_frame("견적 품목", min_h=150)
+        step5.layout().itemAt(0).widget().setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         step5.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         sl = step5.layout()
         top5 = QHBoxLayout()
@@ -1019,6 +1016,9 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.step5_table.setHorizontalHeaderLabels(["선택","분류","품목","수량","단가(원)","금액(원)"])
         self.step5_table.verticalHeader().setVisible(False)
         self.step5_table.setAlternatingRowColors(True)
+        # 선택한 행: Windows 강조색(진한 바탕)에 검은 글씨가 얹혀 안 보였다 → 연한 바탕 + 검은 글씨
+        self.step5_table.setStyleSheet(
+            "QTableWidget::item:selected { background: #CFE0F5; color: black; }")
         self.step5_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.step5_table.setEditTriggers(DroppableQuoteTable.NoEditTriggers)
         self.step5_table.cellDoubleClicked.connect(self._on_step5_double_click)
@@ -1287,7 +1287,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             QMessageBox.warning(self, "통합양식 주의", msg)
 
         self.btn_step1.setEnabled(False)
-        self.btn_step1.setText("STEP 1\n로딩 중…")
+        self.btn_step1.setText("로딩 중…")
         self._tpl_thread = _TemplateLoaderThread(path, self)
         self._tpl_thread.done.connect(
             lambda result: self._on_template_loaded(path, result, silent))
@@ -1295,7 +1295,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _on_template_loaded(self, path: str, result, silent: bool = False) -> None:
         self.btn_step1.setEnabled(True)
-        self.btn_step1.setText("STEP 1\n통합양식 LOAD")
+        self.btn_step1.setText("통합양식 LOAD")
         if isinstance(result, Exception):
             logger.error("통합양식 파싱 오류", exc_info=result)
             if silent:
@@ -1321,7 +1321,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.btn_step2.setEnabled(True)
         self._step3_frame.setEnabled(True)
         app_settings.set_str(app_settings.Key.TEMPLATE_PATH, path)
-        self._log(f"STEP1 완료: {path}  (품목 {len(rows)}건, 코드매핑 키 {len(cmap)}개)")
+        self._log(f"통합양식 LOAD 완료: {os.path.basename(path)}  (품목 {len(rows)}건, 코드매핑 키 {len(cmap)}개)")
         if not silent:
             QMessageBox.information(self, "완료", "통합양식 LOAD 완료")
 
@@ -1331,7 +1331,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _load_request(self) -> None:
         if not self.state.template_path:
-            QMessageBox.warning(self, "순서 오류", "STEP1을 먼저 완료하세요."); return
+            QMessageBox.warning(self, "순서 오류", "통합양식을 먼저 LOAD 하세요."); return
         if self._req_thread and self._req_thread.isRunning():
             return
         start = os.path.dirname(
@@ -1354,7 +1354,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         app_settings.set_str(app_settings.Key.REQUEST_PATH, path)
         self.state.request_rows = rows
         self._fill_req_table(rows); self._step3_frame.setEnabled(True)
-        self._log(f"STEP2 완료: {path}  ({len(rows)}건, 시트={sheet_name})")
+        self._log(f"의뢰파일 LOAD 완료: {os.path.basename(path)}  ({len(rows)}건, 시트={sheet_name})")
         QMessageBox.information(self, "완료", "의뢰파일 LOAD 완료")
 
     def _fill_req_table(self, rows: List[Dict[str, Any]]) -> None:
@@ -1517,10 +1517,10 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _gen_5d_object(self) -> None:
         """현재 STEP5의 RACK 품목/수량을 공정·설비사·5D 키로 코드매핑 시트에 저장한다."""
         if not self.state.template_path:
-            QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
+            QMessageBox.warning(self, "오류", "통합양식을 먼저 LOAD 하세요."); return
         process, vendor = self.state.process, self.state.vendor
         if not process or not vendor:
-            QMessageBox.warning(self, "오류", "STEP3에서 공정/설비사를 먼저 선택하세요."); return
+            QMessageBox.warning(self, "오류", "조건 줄에서 공정/설비사를 먼저 선택하세요."); return
 
         # 코드매핑은 STEP5(RACK)에만 적용되는 개념이라 RACK 품목만 대상으로 한다.
         # (코드매핑 적용 버튼도 항상 RACK으로만 STEP5에 되돌려 넣는다.)
@@ -1531,7 +1531,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if not rack_items:
             QMessageBox.warning(
                 self, "오류",
-                "STEP5에 RACK 품목이 없습니다. (코드매핑은 RACK 품목/수량만 저장됩니다)")
+                "견적 품목에 RACK 품목이 없습니다. (코드매핑은 RACK 품목/수량만 저장됩니다)")
             return
 
         code5d, ok = QInputDialog.getText(
@@ -1937,7 +1937,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _generate_quote(self) -> None:
         if not self.state.template_path:
-            QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
+            QMessageBox.warning(self, "오류", "통합양식을 먼저 LOAD 하세요."); return
         if self._gen_qt_thread and self._gen_qt_thread.isRunning():
             QMessageBox.warning(self, "진행 중", "이미 생성 작업이 진행 중입니다."); return
         self._refresh_credits(); self._recalc_totals()
@@ -2014,7 +2014,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
     def _generate_cover(self) -> None:
         if not self.state.template_path:
-            QMessageBox.warning(self, "오류", "STEP1 통합양식을 먼저 LOAD 하세요."); return
+            QMessageBox.warning(self, "오류", "통합양식을 먼저 LOAD 하세요."); return
         if self._gen_cv_thread and self._gen_cv_thread.isRunning():
             QMessageBox.warning(self, "진행 중", "이미 갑지 생성 작업이 진행 중입니다."); return
         start = self.state.last_output_dir or exe_dir()

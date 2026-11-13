@@ -109,12 +109,19 @@ def analyze(items: List[Dict[str, Any]],
 
     # ── 도식 ──────────────────────────────────
     placed: set = set()
+    # 같은 분류라도 보조 품목(예: Safety 용 Gate Valve)은 CH 마다 하나씩 붙는 것이 아니다.
+    # 칸에 넣으면 수량 대조가 어긋나므로 '기타 옵션'으로 보낸다.
+    aux = [k.lower() for k in cfg.items("diagram.aux_keywords")]
+
+    def is_aux(spec: str) -> bool:
+        low = spec.lower()
+        return any(k in low for k in aux)
 
     def slot(label: str, key: str, per_ch: bool) -> Slot:
         if key == "@PUMP":
             rows = pumps
         else:
-            rows = [r for r in racks if class_of.get(r["spec"]) == key]
+            rows = [r for r in racks if class_of.get(r["spec"]) == key and not is_aux(r["spec"])]
         placed.update(id(r) for r in rows)
         if rows:
             qty = sum(r["qty"] for r in rows)

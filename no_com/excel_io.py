@@ -1050,6 +1050,14 @@ def _fill_domestic(state: QuoteState,
     ws_incoming[cfg["dom.cell_cap"]] = lk["code_cap"].get(qcode) or cfg["dom.text_no_cap"]
     ws_incoming[cfg["dom.cell_motor"]] = lk["code_motor"].get(qcode) or cfg["dom.text_no_motor"]
 
+    # ⑤-c PUMP 만 견적하는 경우 입고검수확인서의 RACK 점검 항목(Foreline Size ~
+    #      RACK표준화)은 해당 없음 — 그 행들을 숨긴다. Credit 은 품목이 아니므로
+    #      PUMP + Credit 도 PUMP 만으로 본다. 워크북을 재사용하는 일괄 생성에서
+    #      앞 건의 숨김이 남지 않도록 매번 참/거짓을 다시 적는다.
+    pump_only = not rack_items
+    for rr in range(cfg["dom.incoming_rack_start"], cfg["dom.incoming_rack_end"] + 1):
+        ws_incoming.row_dimensions[rr].hidden = pump_only
+
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True
 

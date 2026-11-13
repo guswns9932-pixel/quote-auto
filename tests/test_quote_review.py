@@ -70,3 +70,17 @@ def test_capacity_by_quote_type_and_settings():
     cfg = qc.QuoteConfig({"diagram.flow": "@PUMP*, Gate Valve", "diagram.base": "Pump Rack", "dom.spec_end": 20, "dom.sign_end": 14})
     r = rv.analyze([_it("PUMP", "P", 2, 1), _it("RACK", "GV100", 1, 1)], "국내", 2, cfg=cfg, class_of=CLASS)
     assert [s.label for s in r.flow] == ["PUMP", "Gate Valve"] and r.flow[1].state == rv.OK and r.capacity == 4
+
+
+def test_auxiliary_items_go_to_others_and_are_not_counted():
+    """같은 분류라도 보조 품목(MAV-25, Safety)은 칸에 넣지 않는다 — 수량 대조가 어긋나지 않게."""
+    cls = {"Gate Valve (MAV-25, Safety)": "Gate Valve", "Gate Valve (SSAGV-160, Protection)": "Gate Valve"}
+    items = [_it("PUMP", "P", 2, 100), _it("RACK", "Gate Valve (MAV-25, Safety)", 4, 10),
+             _it("RACK", "Gate Valve (SSAGV-160, Protection)", 2, 20)]
+    r = rv.analyze(items, "국내", 2, class_of=cls)
+    gate = next(s for s in r.flow if s.label == "Gate Valve")
+    assert (gate.state, gate.specs, gate.note) == (rv.OK, ["Gate Valve (SSAGV-160, Protection)"], "수량 2")
+    assert [s.text for s in r.others] == ["Gate Valve (MAV-25, Safety)"] and not r.yellow
+    # 설정에서 끄면 예전처럼 한 칸에 합쳐진다
+    off = rv.analyze(items, "국내", 2, class_of=cls, cfg=qc.QuoteConfig({"diagram.aux_keywords": "없는말"}))
+    assert next(s for s in off.flow if s.label == "Gate Valve").state == rv.DIFF

@@ -47,11 +47,11 @@ def _load_template(page, path):
 
 def test_review_panels_follow_the_work(page, quote_template):
     app = QApplication.instance()
-    assert "통합양식" in page.step_bar.hint.text() and page.check_panel.list.count() == 1
+    assert "통합양식 LOAD" in page.step_bar.hint.text() and page.check_panel.list.count() == 1
 
     rows, cmap = _load_template(page, quote_template)
     page._refresh_review()            # 화면에서는 잠깐(60ms) 모았다가 스스로 갱신한다
-    assert "의뢰파일" in page.step_bar.hint.text()
+    assert "의뢰파일 LOAD" in page.step_bar.hint.text()
 
     # 의뢰 한 행 (수량 3CH)
     page.state.request_rows = [{"row_idx": 2, "D": "PR1", "E": 10, "F": "", "G": "", "H": 3, "J": "의뢰",
@@ -62,7 +62,8 @@ def test_review_panels_follow_the_work(page, quote_template):
     # PUMP 1종 + 분류가 있는 RACK 품목 몇 개 + 품목 시트에 없는 이름 하나
     by_class = {}
     for r in rows:
-        if r["A"] and r["B"] and r["C"] > 0:
+        # 보조 품목(MAV-25, Safety)은 도식 칸에 들어가지 않으므로 고르지 않는다
+        if r["A"] and r["B"] and r["C"] > 0 and "MAV-25" not in r["B"] and "Safety" not in r["B"]:
             by_class.setdefault(r["A"], r)
     pump = next(r for r in rows if r["A"].upper().startswith("Q") and r["C"] > 0)
     page._add_row("PUMP", pump["B"], 3, pump["C"])
@@ -187,3 +188,39 @@ def test_layout_b_request_list_picker_window_and_notices(page, quote_template):
     page.btn_opt_summary.click()
     assert page.side_tabs.currentIndex() == 1
     page._picker.hide()
+
+
+def test_windows_fold_instead_of_minimizing(page, quote_template):
+    """새 창을 최소화하면 본 창 왼쪽 아래에 막대로 접히고, 버튼을 다시 누르면 원래대로 펼쳐진다."""
+    app = QApplication.instance()
+    _load_template(page, quote_template)
+    for opener, win_of in ((page.btn_add_item.click, lambda: page._picker),
+                           (page._open_quote_list_window, lambda: page._quote_list_window)):
+        opener(); app.processEvents()
+        win = win_of()
+        size = (win.width(), win.height())
+        assert win.isVisible() and not win.folded and size[0] > 400
+
+        win.fold()                                    # 최소화 버튼이 하는 일
+        app.processEvents()
+        assert win.folded and win.isVisible() and not win.isMinimized()
+        assert (win.width(), win.height()) == (win.FOLD_W, win.FOLD_H)
+        assert win.fold_bar.isVisible() and not win.body.isVisible()
+        main = page.window().geometry()
+        assert abs(win.x() - (main.left() + 8)) <= 2 and win.y() > main.center().y()   # 왼쪽 아래
+
+        opener(); app.processEvents()                 # 같은 버튼을 다시 누르면 펼쳐진다
+        assert not win.folded and (win.width(), win.height()) == size and win.body.isVisible()
+
+        win.fold(); app.processEvents()
+        win.fold_bar.click(); app.processEvents()     # 막대를 눌러도 펼쳐진다
+        assert not win.folded and (win.width(), win.height()) == size
+        win.hide()
+
+
+def test_title_and_selection_style(page):
+    title = page.step5_table.parentWidget().layout().itemAt(0).widget()
+    from PySide6.QtCore import Qt
+    assert title.text() == "견적 품목" and bool(title.alignment() & Qt.AlignLeft)
+    assert page.btn_step1.text() == "통합양식 LOAD" and page.btn_step2.text() == "의뢰파일 LOAD"
+    assert "item:selected" in page.step5_table.styleSheet() and "color: black" in page.step5_table.styleSheet()

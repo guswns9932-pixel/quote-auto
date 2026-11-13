@@ -102,6 +102,8 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     ("dom.cell_dry",         "D17", "cell", "입고검수확인서: DRY/BOOSTER 칸"),
     ("dom.cell_cap",         "D18", "cell", "입고검수확인서: 용량 칸"),
     ("dom.cell_motor",       "D19", "cell", "입고검수확인서: MOTOR TYPE 칸"),
+    ("dom.incoming_rack_start", 20, "row", "입고검수확인서: RACK 점검 항목 첫 행 (PUMP 만 견적하면 숨김)"),
+    ("dom.incoming_rack_end",   39, "row", "입고검수확인서: RACK 점검 항목 마지막 행"),
     ("dom.investor_text", "{투자자} 님 / 설비구매그룹", "name", "사양서 투자자 문구"),
     ("dom.text_no_model", "미등록 Q-Code", "text", "단가표에 Q-code 가 없을 때 모델명 칸에 적는 말"),
     ("dom.text_no_spec",  "-",            "text", "단가표에 Q-code 가 없을 때 규격 칸에 적는 말"),
@@ -179,6 +181,8 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
      "도식 윗줄: 설비 → 배기 흐름 순서"),
     ("diagram.base", "Pump Rack, Power Distribution Box, 성형 Bellows", "list",
      "도식 아랫줄: 흐름 밖 구성품"),
+    ("diagram.aux_keywords", "MAV-25, Safety", "list",
+     "품목 이름에 이 말이 있으면 도식 칸에 넣지 않고 '기타 옵션'으로 (수량 대조에서 제외)"),
 
     # ── 기본값 · 판별 ─────────────────────────────────────────
     ("default.investor",    "채승철", "text", "투자자 이름을 비워 두었을 때 쓰는 이름"),

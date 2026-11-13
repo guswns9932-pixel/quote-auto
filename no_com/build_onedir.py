@@ -171,7 +171,7 @@ _PROFILES = [
         script="run_quote.py", exe=APP_NAME + "_quote",
         hidden=_ENCODINGS + _QT_PAGE_MODS + _WIN32_MODS + _AUTOMATION_MODS + [
             "app_boot", "app_runner", "app_settings", "page_quote", "page_common",
-            "widgets", "core", "excel_io", "excel_com", "approval_auto",
+            "widgets", "core", "excel_io", "excel_com",
             "openpyxl.cell._writer", "PIL.ImageGrab", "tarfile",
             *openpyxl_h, *fitz_h, *pil_h, *wdm_h,
         ],

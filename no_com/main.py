@@ -37,7 +37,7 @@ logger = logging.getLogger("QuoteApp")
 # ──────────────────────────────────────────────
 # 키: 런처 버튼 → (라벨, exe 접미사, 개발 환경 스크립트)
 # frozen 일 때 exe 는 런처 exe 와 같은 폴더의 "<런처이름>_<접미사>.exe" 이고,
-# 없으면(단일 exe 빌드) 런처 exe 자신을 "--<접미사>" 인자로 재실행한다.
+# 없으면(앱을 따로 빌드해 옆에 둔 경우) "../<런처이름>_<접미사>/<런처이름>_<접미사>.exe" 다.
 _APPS = {
     "quote":  ("견적서작성",        "quote",  "run_quote.py"),
     "esign":  ("전자서명",          "esign",  "run_esign.py"),
@@ -54,16 +54,21 @@ _launched_procs: dict = {}
 def _app_command(key: str) -> tuple:
     """(실행 명령, 존재해야 하는 파일 경로).
 
-    frozen 이면 런처 옆의 "<런처이름>_<접미사>.exe"(앱별 exe 빌드)를 쓰고,
-    없으면 자기 자신을 "--<접미사>" 로 재실행한다(단일 exe 빌드 — 해시 1개)."""
+    frozen 이면 런처와 같은 폴더의 "<런처이름>_<접미사>.exe"(전체 빌드)를 쓰고,
+    없으면 옆 폴더의 것(--app 으로 따로 빌드한 앱)을 쓴다."""
     _label, suffix, script = _APPS[key]
     if getattr(sys, "frozen", False):
         exe = os.path.abspath(sys.executable)
         stem = os.path.splitext(os.path.basename(exe))[0]
-        sibling = os.path.join(os.path.dirname(exe), f"{stem}_{suffix}.exe")
+        name = f"{stem}_{suffix}"
+        here = os.path.dirname(exe)
+        sibling = os.path.join(here, name + ".exe")
         if os.path.exists(sibling):
             return [sibling], sibling
-        return [exe, f"--{suffix}"], exe
+        apart = os.path.join(os.path.dirname(here), name, name + ".exe")
+        if os.path.exists(apart):
+            return [apart], apart
+        return [sibling], sibling          # 없으면 호출한 쪽이 '실행 파일 없음' 을 알린다
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), script)
     return [sys.executable, path], path
 

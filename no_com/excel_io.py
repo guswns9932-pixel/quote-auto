@@ -5,7 +5,7 @@ Excel 입출력 전담 모듈.
 
 - openpyxl  : 읽기 + 쓰기 전담
               (파싱, 견적서/갑지 생성 모두 openpyxl)
-- Excel COM : PDF 변환 전용 (excel_to_merged_pdf 만 사용)
+- Excel COM : 갑지 생성 시 수식값 읽기에만 사용 (공통 헬퍼는 excel_com, 전자서명 캡처는 esign_capture)
 
 핵심 전략
 ---------
@@ -32,6 +32,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+import excel_com
+from excel_com import _clear_clipboard
 from core import (
     CN, DOM, US, SheetName, QuoteState,
     ensure_dir, safe_filename, s, to_float, unique_path,
@@ -201,52 +203,6 @@ def check_pump_price_consistency(path: str) -> List[str]:
     except Exception as e:
         logger.warning("PUMP 단가 대조 실패 (%s): %s", path, e)
     return out
-
-
-def _clear_clipboard() -> None:
-    """
-    Windows 클립보드를 강제로 비운다.
-
-    CopyPicture()/ExportAsFixedFormat() 후 COM 세션이 종료되면
-    클립보드에 죽은 프로세스 소유의 CF_ENHMETAFILE(EMF) 핸들이 남는다.
-    이 stale 핸들이 있는 상태에서 별도 Excel 창이 Ctrl+C를 시도하면
-    Windows가 이전 클립보드를 초기화하다가 액세스 위반 → Excel 전체 종료.
-    COM 세션 종료 전, 또는 CopyPicture 직후에 반드시 호출한다.
-    """
-    try:
-        import ctypes
-        u32 = ctypes.windll.user32
-        if u32.OpenClipboard(0):
-            u32.EmptyClipboard()
-            u32.CloseClipboard()
-    except Exception:
-        pass
-
-
-# ── COM 지연 로딩 (PDF 변환 전용) ───────────────────────────────
-# 모듈 임포트 시 DLL LoadLibrary를 호출하지 않도록 지연.
-# GIL 점유로 인한 시작 시 UI 동결 방지 (AV/Defender 환경에서 10~120초 블로킹 가능).
-pythoncom: Any = None
-win32: Any = None
-COM_AVAILABLE: Optional[bool] = None  # None=미확인, True=사용가능, False=불가
-
-
-def _ensure_com() -> bool:
-    """COM DLL을 최초 필요 시점에만 로드한다."""
-    global COM_AVAILABLE, pythoncom, win32
-    if COM_AVAILABLE is not None:
-        return COM_AVAILABLE
-    try:
-        import pythoncom as _pc
-        import win32com.client as _w32
-        pythoncom = _pc
-        win32 = _w32
-        COM_AVAILABLE = True
-    except Exception:
-        pythoncom = None
-        win32 = None
-        COM_AVAILABLE = False
-    return COM_AVAILABLE
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1410,12 +1366,12 @@ def _generate_cover_impl(
     _FORMULA_COLS = (15, 16, 17, 19, 20, 21)
     _com_vals: Dict[str, Dict[int, Any]] = {}
 
-    if _ensure_com():
+    if excel_com._ensure_com():
         _xl = None
         _wb_c = _ws_c = None
         try:
-            pythoncom.CoInitialize()
-            _xl = win32.DispatchEx("Excel.Application")
+            excel_com.pythoncom.CoInitialize()
+            _xl = excel_com.win32.DispatchEx("Excel.Application")
             _xl.Visible = False
             _xl.DisplayAlerts = False
             for _p in clean:
@@ -1463,7 +1419,7 @@ def _generate_cover_impl(
                 _xl = None
                 gc.collect()
             try:
-                pythoncom.CoUninitialize()
+                excel_com.pythoncom.CoUninitialize()
             except Exception:
                 pass
 
@@ -1618,316 +1574,3 @@ def export_cover_data_sheet(*args, **kwargs) -> str:
         raise
     _clear_inflight()
     return out
-
-
-class ExcelCOM:
-    """
-    Excel COM 세션 컨텍스트 매니저.
-    _ExcelWorkerThread(전자서명 시트 캡처)가 공유 Application 객체로 사용한다.
-    그 워커는 페이지가 열려 있는 내내 이 세션을 쥐고 있다 — COM 객체는
-    만들어진 스레드에서만 안전하므로 생성·사용·종료가 모두 한 스레드다.
-    """
-
-    def __init__(self) -> None:
-        self._excel = None
-
-    def __enter__(self) -> "ExcelCOM":
-        if not _ensure_com():
-            raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
-        pythoncom.CoInitialize()
-        _t0 = time.perf_counter()
-        try:
-            self._excel = win32.DispatchEx("Excel.Application")
-            logger.info("Excel COM 세션 시작: %.0fms", (time.perf_counter() - _t0) * 1000)
-            self._excel.Visible = False
-            self._excel.DisplayAlerts = False
-            # ★ 자동화 스위치(Calculation / ScreenUpdating)는 걸지 않는다 ★
-            #
-            # 예전에는 걸려고 시도하는 코드가 있었지만, 첫 줄의 Calculation
-            # 설정이 com_error 로 실패하면서 뒤의 것들까지 통째로 건너뛰고
-            # 있었다. 그 "버그"를 고쳐 실제로 스위치를 걸었더니 캡처가 빈
-            # 이미지로 나왔다 — 실패하던 쪽이 오히려 이 앱을 지켜주고 있었다.
-            #
-            #   · ScreenUpdating=False
-            #     CopyPicture(Appearance=xlScreen) 는 "화면에 그려진 모습"을
-            #     복사하는 것이라, 화면 갱신을 끄면 빈 그림이 복사된다.
-            #   · Calculation=xlCalculationManual
-            #     이 앱이 만드는 견적서는 openpyxl 로 저장돼 수식의 캐시값이
-            #     없다. 열 때 재계산(fullCalcOnLoad)이 돌아야 값이 보이는데,
-            #     수동으로 돌려놓으면 수식 칸이 빈 채로 캡처된다.
-            #
-            # 즉 이 경로에서 "열기가 느린 것"(재계산)과 "캡처가 제대로 나오는
-            # 것"은 맞바꿀 수 없다. 속도를 줄이려면 재계산량 자체를 줄여야
-            # 한다(생성물에서 수식·시트를 덜어내는 방향).
-        except BaseException:
-            # DispatchEx 실패(Excel 미설치·손상) 시 __exit__ 가 호출되지 않으므로
-            # 여기서 아파트먼트를 되돌리지 않으면 호출할 때마다 하나씩 누수된다.
-            self._excel = None
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-            raise
-        return self
-
-    def __exit__(self, *_) -> None:
-        # 순서 중요: 프록시 해제 → Quit() → 참조 제거 → CoUninitialize()
-        # 반대로 하면 보이지 않는 EXCEL.EXE 가 파일 잠금을 쥔 채 남는다.
-        import gc
-        gc.collect()
-        if self._excel is not None:
-            try:
-                self._excel.Quit()
-            except Exception:
-                pass
-            self._excel = None
-            gc.collect()
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-
-    @property
-    def app(self):
-        return self._excel
-
-    def open(self, path: str, read_only: bool = False):
-        return self._excel.Workbooks.Open(
-            path, ReadOnly=read_only, UpdateLinks=0, AddToMru=False
-        )
-
-
-# ═══════════════════════════════════════════════════════════════
-# 공개 API: 전자서명용 임시 PDF 생성 (COM 유지)
-# ═══════════════════════════════════════════════════════════════
-
-def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
-                        xl_app=None) -> str:
-    """
-    xlsx 의 ESIGN_TARGET 시트(원래 Visible인 것)만 PDF 로 내보낸다.
-    반환: PDF 경로 (대상 시트 없으면 "")
-
-    워크북 단위 ExportAsFixedFormat 1회 호출:
-      - 비대상 시트를 일시적으로 VeryHidden 처리 → workbook 전체 export
-      - Close(False) 로 디스크 파일은 변경하지 않음
-      - RenameFile 발생 횟수: 파일당 1회 (기존 시트 수만큼 → 1회로 감소)
-
-    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
-    """
-    import fitz
-
-    out_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}.pdf")
-
-    def _process(app) -> str:
-        wb = app.Workbooks.Open(xlsx_path, ReadOnly=False, UpdateLinks=0, AddToMru=False)
-        try:
-            target_set = set(SheetName.ESIGN_TARGET)
-            to_hide = []
-
-            # 원래 Visible 이면서 ESIGN_TARGET에 속하는 시트만 유지
-            has_visible_target = False
-            for ws in wb.Worksheets:
-                is_target  = ws.Name in target_set
-                was_visible = int(ws.Visible) == -1   # xlSheetVisible = -1
-                if is_target and was_visible:
-                    has_visible_target = True
-                else:
-                    to_hide.append(ws)
-
-            if not has_visible_target:
-                return ""
-
-            # 비대상 시트를 VeryHidden (xlVeryHidden = 2)
-            for ws in to_hide:
-                try:
-                    ws.Visible = 2
-                except Exception:
-                    pass
-
-            # 워크북 전체를 PDF 1회 export (ExportAsFixedFormat 1회 = RenameFile 1회)
-            wb.ExportAsFixedFormat(0, out_pdf)
-            return out_pdf if os.path.exists(out_pdf) else ""
-        finally:
-            _clear_clipboard()   # ExportAsFixedFormat 이 클립보드를 사용하는 경우 대비
-            try:
-                wb.Close(False)   # 디스크 파일 변경 없음
-            except Exception:
-                pass
-
-    if xl_app is not None:
-        return _process(xl_app)
-
-    with ExcelCOM() as xl:
-        return _process(xl.app)
-
-
-def _print_area_range(ws):
-    """PrintArea(R1C1 또는 A1 형식)를 Range 객체로 반환. 없으면 UsedRange."""
-    import re
-    pa = ws.PageSetup.PrintArea
-    if not pa:
-        return ws.UsedRange
-    if "!" in pa:
-        pa = pa.split("!")[-1]
-    # R1C1 형식 감지: "R숫자C숫자:R숫자C숫자" 또는 단일 "R숫자C숫자"
-    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
-    if m:
-        r1, c1 = int(m.group(1)), int(m.group(2))
-        r2 = int(m.group(3)) if m.group(3) else r1
-        c2 = int(m.group(4)) if m.group(4) else c1
-        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
-    # A1 형식
-    try:
-        return ws.Range(pa)
-    except Exception:
-        return ws.UsedRange
-
-
-def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
-                                  xl_app=None, progress_cb=None,
-                                  should_cancel=None, blob_sink=None) -> List[str]:
-    """
-    xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
-    ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
-
-    xl_app       : 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
-    progress_cb  : (완료 시트수, 전체 시트수, 시트명) 콜백. 시트 캡처가 끝날 때마다 호출.
-    should_cancel: 인자 없이 bool 반환하는 콜백. True 면 남은 시트를 건너뛰고 지금까지
-                   캡처한 것만 반환한다 (파일 단위보다 촘촘한 취소 체크).
-    blob_sink    : dict 를 넘기면 PNG 를 파일로 쓰지 않고 이 dict 에 bytes 로 담는다
-                   ({키: PNG bytes}). 반환 리스트에는 경로 대신 그 키가 들어간다.
-                   캡처 결과는 이미 메모리(PIL Image)에 있는데 굳이 네트워크
-                   드라이브에 썼다가 다시 읽을 이유가 없어서 만든 경로다
-                   — 실측상 저장 구간이 전체의 20%(장당 ~90ms)였다.
-                   None 이면 기존처럼 tmp_dir 에 파일로 저장한다.
-    반환: PNG 경로(또는 blob_sink 키) 리스트 (순서 = ESIGN_TARGET 순서)
-    """
-    try:
-        from PIL import ImageGrab
-    except ImportError:
-        logger.error("Pillow(PIL) 없음 — pip install pillow")
-        return []
-
-    png_paths: List[str] = []
-
-    def _process(app) -> List[str]:
-        # 구간별 시간을 로그에 남긴다. 이 경로는 전부 Excel COM 왕복이라
-        # 개발 PC 에서 재현·측정할 수가 없어서, 실제 사용 환경의
-        # quote_app.log 를 보고 어디가 느린지 판단하기 위한 계측이다.
-        t_open = time.perf_counter()
-        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
-        ms_open = (time.perf_counter() - t_open) * 1000
-        ms_prep = ms_cap = ms_save = 0.0
-        bytes_saved = 0
-        try:
-            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처.
-            # 이름 조회 + Visible 확인을 한 번만 하고 ws 프록시를 그대로 들고 있는다
-            # (기존엔 이 목록을 만들 때 한 번, 캡처 루프에서 또 한 번 조회했다).
-            target_sheets = []   # [(name, ws), ...]
-            for name in SheetName.ESIGN_TARGET:
-                try:
-                    ws = wb.Worksheets(name)
-                    if int(ws.Visible) == -1:
-                        target_sheets.append((name, ws))
-                except Exception:
-                    continue
-            if not target_sheets:
-                for ws in wb.Worksheets:
-                    try:
-                        if int(ws.Visible) == -1:
-                            target_sheets.append((ws.Name, ws))
-                    except Exception:
-                        continue
-
-            total = len(target_sheets)
-            for idx, (name, ws) in enumerate(target_sheets):
-                if should_cancel is not None:
-                    try:
-                        if should_cancel():
-                            break
-                    except Exception:
-                        pass
-                safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
-                png_path = os.path.join(
-                    tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
-                try:
-                    _t = time.perf_counter()
-                    ws.Activate()
-                    # 페이지 나누기 미리보기 → 기본 보기로 전환 후 캡처.
-                    # [주의] View 는 창 속성이지만, 시트마다 마지막 저장 시점의
-                    # 보기 모드를 따로 기억하고 있어 Activate() 로 다른 시트로
-                    # 넘어가면 그 시트의 저장된 모드(페이지 나누기 미리보기)가
-                    # 되살아날 수 있다. 워크북당 1회로 줄였다가 "1 페이지"
-                    # 워터마크가 다시 나타나는 회귀가 있었다 — 반드시 시트마다
-                    # 매번 설정해야 한다.
-                    try:
-                        app.ActiveWindow.View = 1  # xlNormalView
-                    except Exception:
-                        pass
-                    rng = _print_area_range(ws)
-                    ms_prep += (time.perf_counter() - _t) * 1000
-                    _t = time.perf_counter()
-                    rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
-                    img = ImageGrab.grabclipboard()
-                    # ── 클립보드 즉시 해제 ──────────────────────────────────────
-                    # CopyPicture 후 Windows 클립보드에 CF_ENHMETAFILE(EMF) 핸들이
-                    # 남아 있는 상태에서 COM 세션(xl.Quit)이 종료되면 stale 핸들이
-                    # 발생한다. 이후 사용자가 별도 Excel에서 Ctrl+C를 시도하면
-                    # Windows가 이 핸들을 해제하려다 액세스 위반 → Excel 전체 종료.
-                    # 이미지를 읽은 직후 클립보드를 비워 이 경로를 차단한다.
-                    _clear_clipboard()
-                    ms_cap += (time.perf_counter() - _t) * 1000
-                    _t = time.perf_counter()
-                    if img is not None:
-                        # compress_level=1: 잠깐 쓰고 버릴 이미지라 압축률보다
-                        # 인코딩 속도가 낫다(기본값 6 대비 체감 저하 없음).
-                        if blob_sink is not None:
-                            key = f"mem://{os.path.basename(png_path)}"
-                            buf = io.BytesIO()
-                            img.save(buf, "PNG", compress_level=1)
-                            blob_sink[key] = buf.getvalue()
-                            png_paths.append(key)
-                            bytes_saved += len(blob_sink[key])
-                        else:
-                            # 이전 세션 잠금 파일이 남아 있으면 삭제 시도 후 저장
-                            _dst = png_path
-                            if os.path.exists(_dst):
-                                try:
-                                    os.remove(_dst)
-                                except OSError:
-                                    _dst = unique_path(_dst)
-                            img.save(_dst, "PNG", compress_level=1)
-                            png_paths.append(_dst)
-                            try:
-                                bytes_saved += os.path.getsize(_dst)
-                            except OSError:
-                                pass
-                    else:
-                        logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
-                    ms_save += (time.perf_counter() - _t) * 1000
-                except Exception as e:
-                    logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
-                if progress_cb is not None:
-                    try:
-                        progress_cb(idx + 1, total, name)
-                    except Exception:
-                        pass
-        finally:
-            _clear_clipboard()   # 워크북 닫기 전 최종 클립보드 해제
-            try:
-                wb.Close(False)
-            except Exception:
-                pass
-            logger.info(
-                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 인코딩 %.0f, "
-                "시트 %d개, PNG %.1fMB)",
-                os.path.basename(xlsx_path), ms_open + ms_prep + ms_cap + ms_save,
-                ms_open, ms_prep, ms_cap, ms_save, len(png_paths),
-                bytes_saved / 1024 / 1024)
-        return png_paths
-
-    if xl_app is not None:
-        return _process(xl_app)
-
-    with ExcelCOM() as xl:
-        return _process(xl.app)

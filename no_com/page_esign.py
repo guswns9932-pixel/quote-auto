@@ -124,8 +124,9 @@ class _ExcelWorkerThread(QThread):
         self._wake.set()
 
     def run(self) -> None:
-        import excel_io
-        com_ctx = excel_io.ExcelCOM()
+        import esign_capture
+        import excel_com
+        com_ctx = excel_com.ExcelCOM()
         xl_app = None
         try:
             com_ctx.__enter__()
@@ -146,14 +147,14 @@ class _ExcelWorkerThread(QThread):
                     job, self._job = self._job, None
                 if job is None:
                     continue
-                self._capture_all(excel_io, xl_app, *job)
+                self._capture_all(esign_capture, xl_app, *job)
         finally:
             try:
                 com_ctx.__exit__(None, None, None)
             except Exception:
                 pass
 
-    def _capture_all(self, excel_io, xl_app, paths: List[str], tmp_dir: str) -> None:
+    def _capture_all(self, esign_capture, xl_app, paths: List[str], tmp_dir: str) -> None:
         sheet_pngs: List[List[str]] = []
         # 캡처한 PNG 를 디스크가 아니라 여기에 bytes 로 담는다. 임시 폴더를
         # 쓰던 시절엔 네트워크 드라이브에 썼다가 곧바로 다시 읽었는데,
@@ -172,7 +173,7 @@ class _ExcelWorkerThread(QThread):
                     self.sheet_progress.emit(_i, total, _fname, done, sheet_total, sheet_name)
 
                 try:
-                    pngs = excel_io.excel_capture_sheets_to_pngs(
+                    pngs = esign_capture.excel_capture_sheets_to_pngs(
                         xlsx, tmp_dir, i + 1, xl_app,
                         progress_cb=_sheet_cb,
                         should_cancel=lambda: self._cancel,
@@ -413,8 +414,8 @@ class ESignPage(QWidget):
         QMessageBox.information(self, "완료", "서명 Load 완료\n전자서명 ON")
 
     def _load_excels(self) -> None:
-        import excel_io
-        if not excel_io._ensure_com():
+        import excel_com
+        if not excel_com._ensure_com():
             QMessageBox.critical(self, "오류", "Excel COM이 없습니다.")
             return
         # 워커는 페이지가 열려 있는 동안 계속 살아 있으므로 isRunning() 으로는

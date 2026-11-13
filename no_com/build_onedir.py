@@ -171,7 +171,7 @@ _PROFILES = [
         script="run_quote.py", exe=APP_NAME + "_quote",
         hidden=_ENCODINGS + _QT_PAGE_MODS + _WIN32_MODS + _AUTOMATION_MODS + [
             "app_boot", "app_runner", "app_settings", "page_quote", "page_common",
-            "widgets", "core", "excel_io", "approval_auto",
+            "widgets", "core", "excel_io", "excel_com", "approval_auto",
             "openpyxl.cell._writer", "PIL.ImageGrab", "tarfile",
             *openpyxl_h, *fitz_h, *pil_h, *wdm_h,
         ],
@@ -183,7 +183,7 @@ _PROFILES = [
         script="run_esign.py", exe=APP_NAME + "_esign",
         hidden=_ENCODINGS + _QT_PAGE_MODS + _WIN32_MODS + [
             "app_boot", "app_runner", "app_settings", "page_esign", "page_common",
-            "widgets", "core", "excel_io",
+            "widgets", "core", "excel_com", "esign_capture",
             "openpyxl.cell._writer", "PIL.ImageGrab", "tarfile",
             *openpyxl_h, *fitz_h, *pil_h,
         ],

@@ -224,3 +224,61 @@ def test_title_and_selection_style(page):
     assert title.text() == "견적 품목" and bool(title.alignment() & Qt.AlignLeft)
     assert page.btn_step1.text() == "통합양식 LOAD" and page.btn_step2.text() == "의뢰파일 LOAD"
     assert "item:selected" in page.step5_table.styleSheet() and "color: black" in page.step5_table.styleSheet()
+
+
+def test_picker_folds_to_main_window_even_when_page_is_embedded_later(page, quote_template):
+    """실제 앱처럼 화면을 만든 뒤에 본 창에 올린 경우에도, 접힌 막대는 본 창 왼쪽 아래로 간다.
+    (창을 만들 때 본 창을 잡아 두면 화면 자신이 기준이 되어 모니터 왼쪽 끝으로 갔다)"""
+    from PySide6.QtWidgets import QMainWindow
+    app = QApplication.instance()
+    main = QMainWindow()
+    main.setCentralWidget(page)
+    main.setGeometry(300, 150, 1400, 800)
+    main.show(); app.processEvents()
+    page.btn_add_item.click(); app.processEvents()
+    page._picker.fold(); app.processEvents()
+    geo = main.geometry()
+    assert abs(page._picker.x() - (geo.left() + 8)) <= 2
+    assert geo.center().y() < page._picker.y() < geo.bottom()
+    main.move(500, 200); app.processEvents()               # 본 창을 옮기면 따라간다
+    assert abs(page._picker.x() - (main.geometry().left() + 8)) <= 2
+    page._picker.unfold(); page._picker.hide()
+    main.takeCentralWidget()                               # 정리는 fixture 가 한다
+    main.close(); main.deleteLater(); app.processEvents()
+
+
+def test_request_row_done_color_right_click_and_hover(page, quote_template):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor
+    import page_quote
+    app = QApplication.instance()
+    _load_template(page, quote_template)
+    rds = [{"row_idx": 2 + i, "D": "PR%d" % i, "E": 10, "F": "", "G": "", "H": 2, "J": "의뢰", "K": "L1",
+            "N": "", "R": "", "V": "", "X": "MK", "Y": "", "Z": "H00%d" % i, "AA": None} for i in range(2)]
+    page.state.request_rows = rds
+    page._fill_req_table(rds)
+    page._mark_req_done(0)
+    page.req_table.selectRow(0)                            # 완료된 행을 고른다
+    page.req_table.resize(240, 200); app.processEvents()
+
+    def pixel(row):
+        rect = page.req_table.visualItemRect(page.req_table.item(row, 1))
+        img = page.req_table.viewport().grab().toImage()
+        return img.pixelColor(rect.right() - 6, rect.center().y())
+
+    done = page_quote._ReqRowDelegate.DONE_COLOR
+    assert pixel(0) == QColor(done)                        # 골라도 완료 색 그대로
+    page.req_table.selectRow(1); app.processEvents()
+    assert pixel(0) == QColor(done) and pixel(1) != QColor(done)
+
+    # 우클릭 → 전체 정보가 바로 뜬다
+    rect = page.req_table.visualItemRect(page.req_table.item(1, 1))
+    page._show_req_info(rect.center())
+    assert page._req_popup.isVisible() and "설비호기: H001" in page._req_popup.text() and "Maker: MK" in page._req_popup.text()
+    page._req_popup.hide()
+    page._show_req_info(QPoint(5, 5000))                   # 빈 곳을 눌러도 오류 없이 무시
+    assert not page._req_popup.isVisible()
+
+    # 견적 품목 표: 마우스를 올린 행도 글씨가 보이게
+    css = page.step5_table.styleSheet()
+    assert "item:hover" in css and "item:selected:hover" in css and css.count("color: black") == 3

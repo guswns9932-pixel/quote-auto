@@ -364,7 +364,10 @@ class FoldableWindow(QWidget):
         self._title = title
         self._folded = False
         self._saved_geo = None
-        self._anchor = parent.window() if parent is not None else None
+        # 기준이 되는 본 창은 접는 순간에 찾는다. 이 창을 만드는 시점에는 부모가
+        # 아직 본 창에 올라가지 않았을 수 있어서(그러면 부모 자신이 '창'으로 잡혀
+        # 좌표가 어긋나고, 접힌 막대가 모니터 왼쪽 끝으로 갔다).
+        self._anchor = None
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
         self.fold_bar = QPushButton(f"▸ {title} — 눌러서 펼치기")
         self.fold_bar.setFixedHeight(self.FOLD_H)
@@ -376,8 +379,18 @@ class FoldableWindow(QWidget):
         self.body = QWidget()
         outer.addWidget(self.fold_bar)
         outer.addWidget(self.body, 1)
-        if self._anchor is not None:
-            self._anchor.installEventFilter(self)      # 본 창이 움직이면 막대도 따라간다
+
+    def _find_anchor(self) -> Optional[QWidget]:
+        """지금의 본 창. 바뀌었으면 움직임을 지켜볼 대상도 바꾼다."""
+        p = self.parentWidget()
+        top = p.window() if p is not None else None
+        if top is not self._anchor:
+            if self._anchor is not None:
+                self._anchor.removeEventFilter(self)
+            self._anchor = top
+            if top is not None:
+                top.installEventFilter(self)           # 본 창이 움직이면 막대도 따라간다
+        return top
 
     # ── 상태 ────────────────────────────────────
     @property
@@ -417,9 +430,10 @@ class FoldableWindow(QWidget):
 
     def _place_folded(self) -> None:
         """본 창의 왼쪽 아래 안쪽에 붙인다."""
-        if self._anchor is None:
+        anchor = self._find_anchor()
+        if anchor is None:
             return
-        geo = self._anchor.geometry()
+        geo = anchor.geometry()
         self.move(geo.left() + 8, geo.bottom() - self.frameGeometry().height() - 8)
 
     # ── 이벤트 ──────────────────────────────────

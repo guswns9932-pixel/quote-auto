@@ -11,15 +11,16 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import Qt, QEvent, QPoint, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
-    QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget,
+    QProgressDialog, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStyle,
+    QStyledItemDelegate, QStyleOptionViewItem, QTabWidget,
     QTableWidget, QTableWidgetItem, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -616,6 +617,32 @@ class _QuoteListWindow(FoldableWindow):
             self.list_widget.scrollToTop()
 
 
+class _ReqRowDelegate(QStyledItemDelegate):
+    """의뢰 목록의 칸 그리기. 생성 완료된 행은 선택하거나 마우스를 올려도 완료 색을
+    그대로 둔다 — 선택 색이 덮으면 어느 것이 끝난 것인지 눌러 보는 순간 안 보인다.
+    대신 선택된 행에는 위아래로 진한 선을 그어 지금 고른 행임을 알린다."""
+
+    DONE_ROLE = Qt.UserRole + 7
+    DONE_COLOR = QColor(160, 220, 160)
+
+    def paint(self, painter, option, index) -> None:
+        if not index.data(self.DONE_ROLE):
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        selected = bool(opt.state & QStyle.State_Selected)
+        opt.state &= ~(QStyle.State_Selected | QStyle.State_MouseOver)
+        painter.fillRect(opt.rect, self.DONE_COLOR)
+        super().paint(painter, opt, index)
+        if selected:
+            painter.save()
+            painter.setPen(QPen(QColor("#1F3864"), 2))
+            r = opt.rect
+            painter.drawLine(r.left(), r.top() + 1, r.right(), r.top() + 1)
+            painter.drawLine(r.left(), r.bottom(), r.right(), r.bottom())
+            painter.restore()
+
+
 # ══════════════════════════════════════════════
 # 견적서 작성 페이지
 # ══════════════════════════════════════════════
@@ -890,13 +917,17 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             _rh.setSectionResizeMode(_ci, QHeaderView.Interactive)
         self.req_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.req_table.cellDoubleClicked.connect(self._on_req_double_click)
+        self.req_table.setItemDelegate(_ReqRowDelegate(self.req_table))
+        self.req_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.req_table.customContextMenuRequested.connect(self._show_req_info)
+        self._req_popup: Optional[QLabel] = None
         self._style_req_table()
         # 좁은 목록에는 호기와 수량만 — 나머지는 행에 마우스를 올리면 툴팁으로 보인다
         for _ci in self._REQ_HIDDEN_COLS:
             self.req_table.setColumnHidden(_ci, True)
         _rh.setSectionResizeMode(1, QHeaderView.Stretch)
         v.addWidget(self.req_table, 1)
-        tip = QLabel("행에 마우스를 올리면 전체 정보가 보입니다.\n더블클릭하면 그 의뢰로 채워집니다.")
+        tip = QLabel("우클릭(또는 마우스를 올리면) 전체 정보가 보입니다.\n더블클릭하면 그 의뢰로 채워집니다.")
         tip.setStyleSheet("color: #5C6475; font-size: 11px;"); tip.setWordWrap(True)
         v.addWidget(tip)
         return frame
@@ -1017,8 +1048,11 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self.step5_table.verticalHeader().setVisible(False)
         self.step5_table.setAlternatingRowColors(True)
         # 선택한 행: Windows 강조색(진한 바탕)에 검은 글씨가 얹혀 안 보였다 → 연한 바탕 + 검은 글씨
+        # 마우스를 올린 행도 같은 이유로 안 보였다 — 더 연한 바탕으로 따로 지정한다.
         self.step5_table.setStyleSheet(
-            "QTableWidget::item:selected { background: #CFE0F5; color: black; }")
+            "QTableWidget::item:hover { background: #E8F0FB; color: black; }"
+            "QTableWidget::item:selected { background: #CFE0F5; color: black; }"
+            "QTableWidget::item:selected:hover { background: #BFD5F1; color: black; }")
         self.step5_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.step5_table.setEditTriggers(DroppableQuoteTable.NoEditTriggers)
         self.step5_table.cellDoubleClicked.connect(self._on_step5_double_click)
@@ -2113,12 +2147,29 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         return {}
 
     def _mark_req_done(self, row: int) -> None:
-        """견적 완료된 의뢰행을 연두색으로 하이라이트."""
-        color = QBrush(QColor(160, 220, 160))
+        """견적 완료된 의뢰행을 연두색으로 하이라이트. 선택해도 이 색이 유지된다
+        (_ReqRowDelegate 가 완료 표시를 보고 그린다)."""
+        color = QBrush(_ReqRowDelegate.DONE_COLOR)
         for col in range(1, self.req_table.columnCount()):
             it = self.req_table.item(row, col)
             if it:
                 it.setBackground(color)
+                it.setData(_ReqRowDelegate.DONE_ROLE, True)
+
+    def _show_req_info(self, pos) -> None:
+        """의뢰 행 우클릭 → 그 행의 전체 정보를 바로 띄운다(툴팁은 뜨기까지 기다려야 한다)."""
+        row = self.req_table.rowAt(pos.y())
+        it = self.req_table.item(row, 1) if row >= 0 else None
+        if it is None:
+            return
+        if self._req_popup is None:
+            self._req_popup = QLabel(self, Qt.Popup)          # 바깥을 누르면 닫힌다
+            self._req_popup.setStyleSheet(
+                "QLabel { background: #1D2433; color: white; padding: 10px 14px; border-radius: 4px; }")
+        self._req_popup.setText(it.toolTip())
+        self._req_popup.adjustSize()
+        self._req_popup.move(self.req_table.viewport().mapToGlobal(pos) + QPoint(12, 8))
+        self._req_popup.show()
 
     def _add_done(self, path: str) -> None:
         self._list_all_files.insert(0, path)

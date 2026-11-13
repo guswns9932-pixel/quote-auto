@@ -5,7 +5,7 @@ Excel 입출력 전담 모듈.
 
 - openpyxl  : 읽기 + 쓰기 전담
               (파싱, 견적서/갑지 생성 모두 openpyxl)
-- Excel COM : PDF 변환 전용 (excel_to_merged_pdf 만 사용)
+- Excel COM : 갑지 생성 시 수식값 읽기에만 사용 (공통 헬퍼는 excel_com, 전자서명은 esign_engine)
 
 핵심 전략
 ---------
@@ -32,10 +32,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+import excel_com
+import quote_calc
+import quote_config
+from excel_com import _clear_clipboard
 from core import (
-    CN, DOM, US, SheetName, QuoteState,
+    QuoteState,
     ensure_dir, safe_filename, s, to_float, unique_path,
-    exe_dir, parse_invest_info,
+    exe_dir,
 )
 
 logger = logging.getLogger("QuoteApp")
@@ -143,6 +147,11 @@ def inspect_template_losses(path: str) -> List[str]:
     return out
 
 
+def _at(row: tuple, col: int) -> Any:
+    """values_only 로 읽은 한 행에서 col 번째(1부터) 값. 행이 짧으면 None."""
+    return row[col - 1] if 0 < col <= len(row) else None
+
+
 def check_pump_price_consistency(path: str) -> List[str]:
     """
     앱이 쓰는 '품목' 단가와 템플릿 '사양서'가 VLOOKUP 하는 'Pump 단가표' 단가를 대조.
@@ -160,14 +169,17 @@ def check_pump_price_consistency(path: str) -> List[str]:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
-            if "품목" not in wb.sheetnames or "Pump 단가표" not in wb.sheetnames:
+            cfg = quote_config.from_workbook(wb)
+            sh_items, sh_pump = cfg["sheet.items"], cfg["sheet.pump_price"]
+            if sh_items not in wb.sheetnames or sh_pump not in wb.sheetnames:
                 return out
 
+            i_cls, i_price = cfg.col("items.col_class"), cfg.col("items.col_price")
             by_class: Dict[str, List[float]] = {}
-            for a, _b, c in wb["품목"].iter_rows(max_col=3, values_only=True):
-                key = s(a)
+            for row in wb[sh_items].iter_rows(max_col=max(i_cls, i_price), values_only=True):
+                key = s(_at(row, i_cls))
                 if key:
-                    by_class.setdefault(key, []).append(to_float(c))
+                    by_class.setdefault(key, []).append(to_float(_at(row, i_price)))
 
             # Pump 단가표: C열=자재코드, F열=모델명, K열=단가
             # 템플릿 수식 체인을 그대로 흉내낸다:
@@ -176,12 +188,14 @@ def check_pump_price_consistency(path: str) -> List[str]:
             # VLOOKUP 은 첫 일치만 쓰므로 중복 행이 있어도 첫 행 기준으로 본다.
             code_to_model: Dict[str, str] = {}
             model_to_price: Dict[str, float] = {}
-            for row in wb["Pump 단가표"].iter_rows(max_col=11, values_only=True):
-                code, model = s(row[2]), s(row[5])
+            p_code, p_model, p_price = (cfg.col("pump.col_code"), cfg.col("pump.col_model"),
+                                        cfg.col("pump.col_price"))
+            for row in wb[sh_pump].iter_rows(max_col=max(p_code, p_model, p_price), values_only=True):
+                code, model = s(_at(row, p_code)), s(_at(row, p_model))
                 if code and code.upper().startswith("Q") and code not in code_to_model:
                     code_to_model[code] = model
                 if model and model not in model_to_price:
-                    model_to_price[model] = to_float(row[10])
+                    model_to_price[model] = to_float(_at(row, p_price))
 
             for code, model in code_to_model.items():
                 if code not in by_class:
@@ -203,57 +217,11 @@ def check_pump_price_consistency(path: str) -> List[str]:
     return out
 
 
-def _clear_clipboard() -> None:
-    """
-    Windows 클립보드를 강제로 비운다.
-
-    CopyPicture()/ExportAsFixedFormat() 후 COM 세션이 종료되면
-    클립보드에 죽은 프로세스 소유의 CF_ENHMETAFILE(EMF) 핸들이 남는다.
-    이 stale 핸들이 있는 상태에서 별도 Excel 창이 Ctrl+C를 시도하면
-    Windows가 이전 클립보드를 초기화하다가 액세스 위반 → Excel 전체 종료.
-    COM 세션 종료 전, 또는 CopyPicture 직후에 반드시 호출한다.
-    """
-    try:
-        import ctypes
-        u32 = ctypes.windll.user32
-        if u32.OpenClipboard(0):
-            u32.EmptyClipboard()
-            u32.CloseClipboard()
-    except Exception:
-        pass
-
-
-# ── COM 지연 로딩 (PDF 변환 전용) ───────────────────────────────
-# 모듈 임포트 시 DLL LoadLibrary를 호출하지 않도록 지연.
-# GIL 점유로 인한 시작 시 UI 동결 방지 (AV/Defender 환경에서 10~120초 블로킹 가능).
-pythoncom: Any = None
-win32: Any = None
-COM_AVAILABLE: Optional[bool] = None  # None=미확인, True=사용가능, False=불가
-
-
-def _ensure_com() -> bool:
-    """COM DLL을 최초 필요 시점에만 로드한다."""
-    global COM_AVAILABLE, pythoncom, win32
-    if COM_AVAILABLE is not None:
-        return COM_AVAILABLE
-    try:
-        import pythoncom as _pc
-        import win32com.client as _w32
-        pythoncom = _pc
-        win32 = _w32
-        COM_AVAILABLE = True
-    except Exception:
-        pythoncom = None
-        win32 = None
-        COM_AVAILABLE = False
-    return COM_AVAILABLE
-
-
 # ═══════════════════════════════════════════════════════════════
 # 읽기 (openpyxl) — 기존과 동일
 # ═══════════════════════════════════════════════════════════════
 
-def parse_items_sheet(ws: Worksheet) -> Tuple[
+def parse_items_sheet(ws: Worksheet, cfg: Optional[quote_config.QuoteConfig] = None) -> Tuple[
     List[Dict[str, Any]],
     Dict[str, List[Dict[str, Any]]],
     Dict[str, float],
@@ -267,14 +235,22 @@ def parse_items_sheet(ws: Worksheet) -> Tuple[
         h = (a + b + c).replace(" ", "").lower()
         return "분류" in h and ("단가" in h or "가격" in h)
 
-    row_iter = ws.iter_rows(max_col=3, values_only=True)
+    cfg = cfg or quote_config.QuoteConfig()
+    i_cls, i_spec, i_price = (cfg.col("items.col_class"), cfg.col("items.col_spec"),
+                              cfg.col("items.col_price"))
+    n_col = max(i_cls, i_spec, i_price)
+
+    def _abc(row: tuple) -> tuple:
+        return _at(row, i_cls), _at(row, i_spec), _at(row, i_price)
+
+    row_iter = (_abc(r) for r in ws.iter_rows(max_col=n_col, values_only=True))
     try:
         r1a, r1b, r1c = next(row_iter)
     except StopIteration:
         return [], {}, {}, {}
     header = _is_header(s(r1a), s(r1b), s(r1c))
     if not header:
-        row_iter = ws.iter_rows(max_col=3, values_only=True)   # 1행부터 다시
+        row_iter = (_abc(r) for r in ws.iter_rows(max_col=n_col, values_only=True))   # 1행부터 다시
 
     rows: List[Dict[str, Any]] = []
     by_class: Dict[str, List[Dict[str, Any]]] = {}
@@ -301,19 +277,29 @@ def parse_items_sheet(ws: Worksheet) -> Tuple[
     return rows, by_class, price_by_spec, order_index
 
 
-def parse_code_map_sheet(ws: Worksheet) -> Dict[Tuple[str, str, str], List[Tuple[str, float]]]:
+def _code_map_cols(cfg: quote_config.QuoteConfig) -> Tuple[int, int, int, int, int]:
+    return tuple(cfg.col("codemap.col_" + k) for k in ("process", "vendor", "code5d", "acc", "qty"))
+
+
+def parse_code_map_sheet(ws: Worksheet, cfg: Optional[quote_config.QuoteConfig] = None
+                         ) -> Dict[Tuple[str, str, str], List[Tuple[str, float]]]:
     """코드매핑 시트 파싱. 반환: {(공정, 설비사, 5D): [(ACC, 수량), ...]}"""
     def _is_header(a, b, c, d, e) -> bool:
         h = (a + b + c + d + e).replace(" ", "").lower()
         return "공정" in h and "설비" in h and ("acc" in h or "수량" in h or "5d" in h)
 
-    row_iter = ws.iter_rows(max_col=5, values_only=True)
+    cols = _code_map_cols(cfg or quote_config.QuoteConfig())
+
+    def _five(row: tuple) -> tuple:
+        return tuple(_at(row, c) for c in cols)
+
+    row_iter = (_five(r) for r in ws.iter_rows(max_col=max(cols), values_only=True))
     try:
         r1 = next(row_iter)
     except StopIteration:
         return {}
     if not _is_header(*(s(v) for v in r1)):
-        row_iter = ws.iter_rows(max_col=5, values_only=True)   # 1행부터 다시
+        row_iter = (_five(r) for r in ws.iter_rows(max_col=max(cols), values_only=True))   # 1행부터 다시
 
     cmap: Dict[Tuple[str, str, str], List[Tuple[str, float]]] = {}
     for proc_raw, vendor_raw, code5d_raw, acc_raw, qty_raw in row_iter:
@@ -368,8 +354,9 @@ def append_code_map_rows(
     반환: (added, skipped) — 실제로 추가된 (품목,수량) 목록 / 중복이라 건너뛴 목록.
     """
     wb = load_workbook(template_path)
-    ws = wb[SheetName.CODE_MAP]
-    existing = parse_code_map_sheet(ws)
+    cfg = quote_config.from_workbook(wb)
+    ws = wb[cfg["sheet.code_map"]]
+    existing = parse_code_map_sheet(ws, cfg)
     key = (process, vendor, code5d)
     seen = set(existing.get(key, []))
 
@@ -400,11 +387,8 @@ def append_code_map_rows(
     row = ws.max_row + 1
     for spec, qty in added:
         qty_val = int(qty) if float(qty).is_integer() else qty
-        ws.cell(row, 1, process)
-        ws.cell(row, 2, vendor)
-        ws.cell(row, 3, code5d)
-        ws.cell(row, 4, spec)
-        ws.cell(row, 5, qty_val)
+        for col, value in zip(_code_map_cols(cfg), (process, vendor, code5d, spec, qty_val)):
+            ws.cell(row, col, value)
         row += 1
 
     try:
@@ -423,7 +407,18 @@ def append_code_map_rows(
     return added, skipped
 
 
-def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
+# 의뢰 행 dict 의 키(예전부터 열 문자로 불러 온 이름) ← 설정의 어느 열에서 읽는지.
+# 열 위치는 설정으로 옮겨도 키 이름은 그대로 둬서 이 dict 를 쓰는 곳을 건드리지 않는다.
+_REQ_FIELDS = (
+    ("D", "req.col_pr"), ("E", "req.col_item"), ("F", "req.col_qcode"), ("G", "req.col_desc"),
+    ("H", "req.col_qty"), ("J", "req.col_requester"), ("K", "req.col_line"),
+    ("N", "req.col_subproc"), ("R", "req.col_concept"), ("V", "req.col_5d"),
+    ("X", "req.col_maker"), ("Y", "req.col_model"), ("Z", "req.col_hogi"), ("AA", "req.col_due"),
+)
+
+
+def parse_request_xlsx(path: str, cfg: Optional[quote_config.QuoteConfig] = None
+                       ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     의뢰파일 파싱.
     반환: (active_sheet_name, row_dicts)
@@ -435,15 +430,14 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
     sheet_name = ws.title
-    NCOL = 27  # AA
+    cfg = cfg or quote_config.QuoteConfig()
+    fields = [(name, cfg.col(key)) for name, key in _REQ_FIELDS]
+    NCOL = max(c for _, c in fields)
+    i_hogi = cfg.col("req.col_hogi")
 
     def _is_header(r1: tuple) -> bool:
-        checks = [
-            s(r1[25]).replace(" ", "").lower(),   # Z (26)
-            s(r1[10]).replace(" ", "").lower(),   # K (11)
-            s(r1[23]).replace(" ", "").lower(),   # X (24)
-            s(r1[21]).replace(" ", "").lower(),   # V (22)
-        ]
+        checks = [s(_at(r1, cfg.col(k))).replace(" ", "").lower()
+                  for k in ("req.col_hogi", "req.col_line", "req.col_maker", "req.col_5d")]
         return any("설비" in c or "공정" in c or "5d" in c or "코드" in c for c in checks)
 
     row_iter = ws.iter_rows(max_col=NCOL, values_only=True)
@@ -458,17 +452,12 @@ def parse_request_xlsx(path: str) -> Tuple[str, List[Dict[str, Any]]]:
 
     rows: List[Dict[str, Any]] = []
     for idx, vals in enumerate(row_iter, start=start):
-        z = vals[25]  # Z (26)
-        if s(z) == "":
+        if s(_at(vals, i_hogi)) == "":      # 호기가 비어 있는 행은 의뢰가 아니다
             continue
-        rows.append({
-            "row_idx": idx,
-            "D": vals[3],   "E": vals[4],   "F": vals[5],
-            "G": vals[6],   "H": vals[7],   "J": vals[9],
-            "K": vals[10],  "N": vals[13],  "R": vals[17],
-            "V": vals[21],  "X": vals[23],  "Y": vals[24],
-            "Z": z,         "AA": vals[26],
-        })
+        rd: Dict[str, Any] = {"row_idx": idx}
+        for name, col in fields:
+            rd[name] = _at(vals, col)
+        rows.append(rd)
     wb.close()
     return sheet_name, rows
 
@@ -540,9 +529,10 @@ def _build_price_lookups(wb) -> Dict[str, Dict[str, Any]]:
 
     out = {k: {} for k in ("code_model", "model_price", "code_spec",
                            "code_dry", "code_cap", "code_motor", "spec_class")}
+    cfg = quote_config.from_workbook(wb)
 
-    if "Pump 단가표" in wb.sheetnames:
-        ws = wb["Pump 단가표"]
+    if cfg["sheet.pump_price"] in wb.sheetnames:
+        ws = wb[cfg["sheet.pump_price"]]
         for row in ws.iter_rows():
             def val(letter: str) -> str:
                 cell = ws[f"{letter}{row[0].row}"]
@@ -553,23 +543,25 @@ def _build_price_lookups(wb) -> Dict[str, Dict[str, Any]]:
                 # "20,000L/min" 이 "20000" 으로 찍힌다.
                 v = _follow_mirror(ws, ws[f"{letter}{row[0].row}"].value)
                 return "" if v is None else v
-            code, model = val("C"), val("F")
+            code, model = val(cfg["pump.col_code"]), val(cfg["pump.col_model"])
             if code:
                 out["code_model"].setdefault(code, model)
-                out["code_spec"].setdefault(code, raw("E"))        # X열 = E열
-                out["code_dry"].setdefault(code, raw("W"))
-                out["code_cap"].setdefault(code, raw("Z"))
-                out["code_motor"].setdefault(code, raw("AA"))
+                out["code_spec"].setdefault(code, raw(cfg["pump.col_spec"]))
+                out["code_dry"].setdefault(code, raw(cfg["pump.col_dry"]))
+                out["code_cap"].setdefault(code, raw(cfg["pump.col_cap"]))
+                out["code_motor"].setdefault(code, raw(cfg["pump.col_motor"]))
             if model:
                 out["model_price"].setdefault(
-                    model, to_float(_follow_mirror(ws, ws[f"K{row[0].row}"].value)))
+                    model, to_float(_follow_mirror(
+                        ws, ws[cfg.at("pump.col_price", row[0].row)].value)))
 
-    if "악세서리 단가표" in wb.sheetnames:
-        ws = wb["악세서리 단가표"]
-        for row in ws.iter_rows(max_col=17, values_only=True):
-            spec = _vlookup_text(row[3])                           # D열 규격
+    if cfg["sheet.acc_price"] in wb.sheetnames:
+        ws = wb[cfg["sheet.acc_price"]]
+        a_spec, a_class = cfg.col("acc.col_spec"), cfg.col("acc.col_class")
+        for row in ws.iter_rows(max_col=max(a_spec, a_class), values_only=True):
+            spec = _vlookup_text(_at(row, a_spec))
             if spec:
-                out["spec_class"].setdefault(spec, _vlookup_text(row[16]))   # Q열 분류
+                out["spec_class"].setdefault(spec, _vlookup_text(_at(row, a_class)))
 
     wb._lot_price_lookups = out
     return out
@@ -792,18 +784,13 @@ def _write_req_row_openpyxl(wb_copy, state: QuoteState, rd: Dict[str, Any],
     if row_idx <= 0:
         return
 
+    cfg = quote_config.from_workbook(wb_copy)
+
     def _copy_row(req_ws) -> None:
-        copy_ws = wb_copy[SheetName.REQ_COPY]
-        for c in range(1, 15):
-            copy_ws.cell(2, c).value = None
-        copy_ws.cell(2, 18).value = None
-        for c in range(23, 28):
-            copy_ws.cell(2, c).value = None
-        for c in range(1, 15):
-            copy_ws.cell(2, c).value = req_ws.cell(row_idx, c).value
-        copy_ws.cell(2, 18).value = req_ws.cell(row_idx, 18).value
-        for c in range(23, 28):
-            copy_ws.cell(2, c).value = req_ws.cell(row_idx, c).value
+        copy_ws = wb_copy[cfg["sheet.req_copy"]]
+        dst_row = cfg["copy.row"]
+        for c in cfg.cols("copy.cols"):
+            copy_ws.cell(dst_row, c).value = req_ws.cell(row_idx, c).value
 
     if req_ws_cache is not None:
         _copy_row(req_ws_cache)
@@ -852,6 +839,15 @@ def open_template_for_reuse(template_path: str):
     return wb
 
 
+def _split_credits(credits: List[Dict[str, Any]], cfg: quote_config.QuoteConfig
+                   ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Credit 을 (Pump Credit, Rack Credit) 으로 나눈다 — 규격 이름에 든 말로 가른다."""
+    kw = cfg["credit.pump_keyword"]
+    pump = [r for r in credits if kw in r.get("spec", "")]
+    rack = [r for r in credits if kw not in r.get("spec", "")]
+    return pump, rack
+
+
 def _fill_domestic(state: QuoteState,
                    rd: Dict[str, Any],
                    items: List[Dict[str, Any]],
@@ -866,18 +862,20 @@ def _fill_domestic(state: QuoteState,
               건별 상태는 아래 ②③④⑤ 에서 전부 덮어쓰므로 누수되지 않지만,
               도중에 예외가 나면 워크북이 더러워지므로 호출자가 다시 열어야 한다.
     """
-    ymd        = datetime.now().strftime("%y%m%d")
-    pr         = safe_filename(s(rd.get("D")))
-    itemno     = safe_filename(s(rd.get("E")))
-    lineproc   = safe_filename(s(rd.get("K")))
-    investor_fn = safe_filename(s(rd.get("J")))
-    tool       = safe_filename(s(rd.get("Z")))
+    cfg = quote_config.from_workbook(wb_cache) if wb_cache is not None \
+        else quote_config.load(state.template_path)
+    names = {
+        "날짜":   datetime.now().strftime("%y%m%d"),
+        "PR":     safe_filename(s(rd.get("D"))),
+        "항번":   safe_filename(s(rd.get("E"))),
+        "라인":   safe_filename(s(rd.get("K"))),
+        "의뢰자": safe_filename(s(rd.get("J"))),
+        "호기":   safe_filename(s(rd.get("Z"))),
+    }
     folder = ensure_dir(
-        os.path.join(exe_dir(), "견적서", f"{ymd}_LOT베큠_{lineproc}_{investor_fn}")
+        os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.dom_folder", **names))
     )
-    path = unique_path(
-        os.path.join(folder, f"대외비_{pr}-{itemno}_{ymd}_LOT베큠_{lineproc}_{investor_fn}_{tool}.xlsx")
-    )
+    path = unique_path(os.path.join(folder, cfg.text("name.dom_file", **names)))
 
     # ① 템플릿 준비 — 재사용 워크북이 있으면 복사·로드를 건너뛴다
     if wb_cache is not None:
@@ -888,32 +886,39 @@ def _fill_domestic(state: QuoteState,
         _copy_template(state.template_path, path)
         wb = load_workbook(path)
 
-    ws_spec = wb[SheetName.SPEC]
-    ws_sign = wb[SheetName.SIGN_SPEC]
-    ws_incoming = wb[SheetName.INCOMING]
+    ws_spec = wb[cfg["sheet.spec"]]
+    ws_sign = wb[cfg["sheet.sign_spec"]]
+    ws_incoming = wb[cfg["sheet.incoming"]]
+    spec_start, spec_end = cfg["dom.spec_start"], cfg["dom.spec_end"]
+    spec_rows = spec_end - spec_start + 1                 # 사양서 품목 칸 수
+    pump_row = cfg["dom.pump_row"]
+    c_class, c_spec, c_qty, c_price, c_amt = (
+        cfg["dom.col_class"], cfg["dom.col_spec"], cfg["dom.col_qty"],
+        cfg["dom.col_price"], cfg["dom.col_amt"])
 
     # ② 의뢰파일 행 → 견적의뢰복사본 시트 복사
     _write_req_row_openpyxl(wb, state, rd, req_ws_cache)
 
     # ③ 투자자명
-    investor = s(state.investor_name) or "채승철"
-    ws_spec["B4"] = f"{investor} 님 / 설비구매그룹"
+    investor = s(state.investor_name) or cfg["default.investor"]
+    ws_spec[cfg["dom.cell_investor"]] = cfg.text("dom.investor_text", 투자자=investor)
 
     # ③-1 옵션에서 지정한 설비수량/실반입라인/Exh Size — 값이 있을 때만 기입.
     #     0/빈 문자열(=옵션 미설정)이면 템플릿 원본 셀을 건드리지 않는다.
     if state.equip_qty:
-        ws_spec["A43"] = int(state.equip_qty)
+        ws_spec[cfg["dom.cell_equip_qty"]] = int(state.equip_qty)
     if state.actual_line:
-        ws_sign["B6"] = state.actual_line
+        ws_sign[cfg["dom.cell_actual_line"]] = state.actual_line
     if state.exh_size:
-        ws_incoming["D27"] = int(state.exh_size)
+        ws_incoming[cfg["dom.cell_exh_size"]] = int(state.exh_size)
 
-    rack_items = [r for r in items if r["cat"] != "PUMP" and r["role"] != "CREDIT"]
-    credits    = [r for r in items if r["role"] == "CREDIT"]
+    # 금액 계산은 quote_calc 한곳에서 — 화면의 금액 미리보기와 같은 식을 쓴다
+    calc = quote_calc.domestic(items, to_float(rd.get("H")), cfg["credit.pump_keyword"])
+    rack_items, credits = calc.rack_items, calc.credits
 
     # ④ 기존 데이터 클리어
-    for rr in range(DOM.SPEC_START, DOM.SPEC_END + 1):
-        for col in (DOM.COL_SPEC, DOM.COL_QTY, DOM.COL_PRICE, DOM.COL_AMT):
+    for rr in range(spec_start, spec_end + 1):
+        for col in (c_spec, c_qty, c_price, c_amt):
             ws_spec[f"{col}{rr}"] = None
 
     # ⑤ 품목 기입
@@ -932,28 +937,11 @@ def _fill_domestic(state: QuoteState,
     # 차감되도록 하고, 아래 라인은 표시 전용(G=0)으로 남긴다.
     #   · Rack Credit → 기존대로 G열에 실금액 (G16 에서 차감)
     #   · Pump Credit → F15 하드코딩 + 표시행 G=0 (이중 차감 방지)
-    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
-    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
+    pump_credits, rack_credits = calc.pump_credits, calc.rack_credits
+    pump_spec = calc.pump_spec
+    p_unit_net, _pump_credit_unit = calc.p_unit_net, calc.pump_credit_unit
 
-    pump_items      = [r for r in items if r["cat"] == "PUMP" and r["role"] != "CREDIT"]
-    pump_spec       = pump_items[0]["spec"] if pump_items else None
-    pump_amt        = sum(r["amt"] for r in pump_items)
-    rack_amt        = sum(r["amt"] for r in rack_items)
-    pump_credit_amt = sum(c["amt"] for c in pump_credits)   # 통상 음수
-    rack_credit_amt = sum(c["amt"] for c in rack_credits)   # 통상 음수
-
-    h_qty = to_float(rd.get("H"))
-    if h_qty <= 0:
-        h_qty = 1.0
-
-    # PUMP CH당 단가 — credit 반영 후 정수(원)로 확정한다.
-    # 소수점이 남으면 견적서에 13,900,000.333 같은 값이 찍히고,
-    # G15=E15*F15 결과도 원 단위로 떨어지지 않는다.
-    p_unit_net = round((pump_amt + pump_credit_amt) / h_qty)
-    # 표시용 CH당 Credit 단가 (음수)
-    _pump_credit_unit = round(pump_credit_amt / h_qty) if pump_credits else 0
-
-    out_list = rack_items[:25]
+    out_list = rack_items[:spec_rows]
     for cr in rack_credits:
         out_list.append({"spec": cr["spec"], "qty": 0.0, "price": 0.0, "amt": cr["amt"]})
     for cr in pump_credits:
@@ -962,12 +950,12 @@ def _fill_domestic(state: QuoteState,
             "spec": cr["spec"], "qty": 0.0,
             "price": _pump_credit_unit, "amt": 0, "display_only": True,
         })
-    out_list = out_list[:25]
+    out_list = out_list[:spec_rows]
 
     # 템플릿 용량 초과 시 조용히 잘리면 사양서 합계와 갑지 금액이 어긋난다.
-    if len(rack_items) + len(credits) > 25:
+    if len(rack_items) + len(credits) > spec_rows:
         raise ValueError(
-            f"사양서 품목 칸(25행)을 초과했습니다: "
+            f"사양서 품목 칸({spec_rows}행)을 초과했습니다: "
             f"품목 {len(rack_items)}건 + Credit {len(credits)}건. "
             f"품목을 줄이거나 템플릿 행을 늘려주세요."
         )
@@ -977,27 +965,27 @@ def _fill_domestic(state: QuoteState,
         return int(round(to_float(v)))
 
     for i, r in enumerate(out_list):
-        rr = DOM.SPEC_START + i
-        ws_spec[f"{DOM.COL_SPEC}{rr}"] = r["spec"]
+        rr = spec_start + i
+        ws_spec[f"{c_spec}{rr}"] = r["spec"]
         if r.get("display_only"):
             # Pump Credit 표시행: CH당 단가만 보여주고 금액은 0
             # (F15 에서 이미 차감했으므로 G16 에 또 넣으면 이중 차감)
-            ws_spec[f"{DOM.COL_QTY}{rr}"]   = None
-            ws_spec[f"{DOM.COL_PRICE}{rr}"] = _won(r["price"])
-            ws_spec[f"{DOM.COL_AMT}{rr}"]   = 0
+            ws_spec[f"{c_qty}{rr}"]   = None
+            ws_spec[f"{c_price}{rr}"] = _won(r["price"])
+            ws_spec[f"{c_amt}{rr}"]   = 0
         elif r.get("qty") == 0.0 and r.get("price") == 0.0 and "amt" in r:
-            ws_spec[f"{DOM.COL_AMT}{rr}"] = _won(r["amt"])
+            ws_spec[f"{c_amt}{rr}"] = _won(r["amt"])
         else:
-            ws_spec[f"{DOM.COL_QTY}{rr}"]   = r["qty"]
-            ws_spec[f"{DOM.COL_PRICE}{rr}"]  = _won(r["price"])
-            ws_spec[f"{DOM.COL_AMT}{rr}"]    = _won(r["amt"])
+            ws_spec[f"{c_qty}{rr}"]   = r["qty"]
+            ws_spec[f"{c_price}{rr}"]  = _won(r["price"])
+            ws_spec[f"{c_amt}{rr}"]    = _won(r["amt"])
 
     # ⑤-b PUMP CH당 단가를 F15 에 직접 기입 — Pump Credit 을 G15 에서 차감시킨다.
     # 템플릿 F15 는 'Pump 단가표' VLOOKUP 수식이지만, credit 이 있으면 그 값을
     # 그대로 두면 credit 이 반영되지 않는다. 값으로 덮어써 G15=E15*F15 가
     # net 금액이 되게 한다. credit 이 없으면 수식을 그대로 둔다.
     if pump_credits:
-        ws_spec[f"{DOM.COL_PRICE}15"] = p_unit_net
+        ws_spec[f"{c_price}{pump_row}"] = p_unit_net
 
     # ⑤-a 견적의뢰복사본 수식 셀 → 계산값 직접 기입 ─────────────────────────
     # openpyxl 저장 시 수식 캐시(cached value)가 소멸된다.
@@ -1009,7 +997,8 @@ def _fill_domestic(state: QuoteState,
     #
     # 아래 값들은 Excel 이 재계산할 값과 반드시 일치해야 한다.
     # 어긋나면 인쇄되는 사양서와 갑지 금액이 서로 다른 견적서가 나간다.
-    copy_ws = wb[SheetName.REQ_COPY]
+    copy_ws = wb[cfg["sheet.req_copy"]]
+    copy_row = cfg["copy.row"]
 
     # 템플릿 수식 그대로 재현한다. Excel 이 재계산할 값과 어긋나면
     # 인쇄되는 사양서와 갑지 금액이 서로 다른 견적서가 나간다.
@@ -1022,33 +1011,18 @@ def _fill_domestic(state: QuoteState,
     # ※ p_unit_net 은 이미 정수로 반올림했으므로 g15 도 그 값에서 직접 만든다.
     #   (A/h)*h 식으로 되돌리면 부동소수점 1 ulp 오차로 floor 가 1,000원
     #   낮게 떨어질 수 있다.
-    if pump_credits:
-        p_unit = p_unit_net                 # F15 에 실제로 쓴 값
-        g15    = p_unit_net * h_qty         # Excel 의 E15*F15 와 정확히 동일
-    else:
-        p_unit = round(pump_amt / h_qty) if h_qty else 0
-        g15    = pump_amt
-
-    g16   = rack_amt + rack_credit_amt      # Pump Credit 은 G열 0 이라 미포함
-    q_val = g16                             # Q2 = 사양서!G16
-
-    # S = 사양서!F43 = ROUNDDOWN((G15+G16)/H2, -3)
-    s_raw = (g15 + g16) / h_qty
-    s_val = math.floor(s_raw / 1000) * 1000   # ROUNDDOWN(..., -3)
-    # T = S2 * H2
-    t_val = s_val * h_qty
-    # U = ROUNDUP((P2*H2+Q2)/H2, -3) — 템플릿 수식 그대로 (Q2 경유로 credit 반영)
-    u_raw = (p_unit * h_qty + q_val) / h_qty
-    u_val = math.ceil(u_raw / 1000) * 1000    # ROUNDUP(..., -3)
+    p_unit, q_val = calc.p_unit, calc.g16          # P2 = 사양서!F15, Q2 = 사양서!G16
+    s_val, t_val, u_val = calc.unit, calc.total, calc.unit_check
 
     # 금액은 모두 원 단위 정수로 기입한다 — 소수점이 남으면 갑지·견적서에
     # 13,900,000.333 같은 값이 찍힌다.
-    copy_ws.cell(2, 15).value = pump_spec         # O: PUMP 메인모듈 (=사양서!A15)
-    copy_ws.cell(2, 16).value = int(p_unit)       # P: PUMP CH당 단가 (=사양서!F15)
-    copy_ws.cell(2, 17).value = int(q_val)        # Q: Rack 합계 (=사양서!G16)
-    copy_ws.cell(2, 19).value = int(s_val)        # S: 견적단가 (=사양서!F43)
-    copy_ws.cell(2, 20).value = int(t_val)        # T: 견적금액 (=S2*H2)
-    copy_ws.cell(2, 21).value = int(u_val)        # U: 견적단가(Check)
+    for key, value in (("copy.col_pump_model", pump_spec),     # O: PUMP 메인모듈 (=사양서!A15)
+                       ("copy.col_pump_price", int(p_unit)),   # P: PUMP CH당 단가 (=사양서!F15)
+                       ("copy.col_rack_sum",   int(q_val)),    # Q: Rack 합계 (=사양서!G16)
+                       ("copy.col_unit",       int(s_val)),    # S: 견적단가 (=사양서!F43)
+                       ("copy.col_amount",     int(t_val)),    # T: 견적금액 (=S2*H2)
+                       ("copy.col_check",      int(u_val))):   # U: 견적단가(Check)
+        copy_ws.cell(copy_row, cfg.col(key)).value = value
 
     # ⑤-b 단가표 VLOOKUP 수식 → 계산값 직접 기입 ─────────────────────────
     # 사양서·입고검수확인서가 'Pump 단가표'/'악세서리 단가표' 를 VLOOKUP 하는
@@ -1060,34 +1034,42 @@ def _fill_domestic(state: QuoteState,
     # 적힌 문자열을 그대로 쓴다.
     lk = _build_price_lookups(wb)
     qcode = _vlookup_text(rd.get("F"))                        # 견적의뢰복사본!F2
-    a15 = lk["code_model"].get(qcode) or "미등록 Q-Code"
-    ws_spec["A15"] = a15
-    ws_spec["B15"] = lk["code_spec"].get(qcode) or "-"
+    a15 = lk["code_model"].get(qcode) or cfg["dom.text_no_model"]
+    ws_spec[f"{c_class}{pump_row}"] = a15
+    ws_spec[f"{c_spec}{pump_row}"] = lk["code_spec"].get(qcode) or cfg["dom.text_no_spec"]
     # F15 는 credit 이 있으면 위에서 이미 p_unit_net 을 기입했다. 없을 때만
     # 단가표 조회값을 넣는다 — 지금 동작(수식 결과)과 같게 유지하기 위함이다.
     if not pump_credits:
-        ws_spec[f"{DOM.COL_PRICE}15"] = _won(lk["model_price"].get(a15, 0))
+        ws_spec[f"{c_price}{pump_row}"] = _won(lk["model_price"].get(a15, 0))
 
-    for i in range(DOM.SPEC_START, DOM.SPEC_END + 1):          # A17:A41
-        spec = _vlookup_text(ws_spec[f"{DOM.COL_SPEC}{i}"].value)
-        ws_spec[f"A{i}"] = lk["spec_class"].get(spec) or "1"
+    for i in range(spec_start, spec_end + 1):                  # A17:A41
+        spec = _vlookup_text(ws_spec[f"{c_spec}{i}"].value)
+        ws_spec[f"{c_class}{i}"] = lk["spec_class"].get(spec) or cfg["dom.text_no_class"]
 
-    ws_incoming["D17"] = lk["code_dry"].get(qcode) or "의뢰파일DATA"
-    ws_incoming["D18"] = lk["code_cap"].get(qcode) or "확인필요"
-    ws_incoming["D19"] = lk["code_motor"].get(qcode) or "확인필요"
+    ws_incoming[cfg["dom.cell_dry"]] = lk["code_dry"].get(qcode) or cfg["dom.text_no_dry"]
+    ws_incoming[cfg["dom.cell_cap"]] = lk["code_cap"].get(qcode) or cfg["dom.text_no_cap"]
+    ws_incoming[cfg["dom.cell_motor"]] = lk["code_motor"].get(qcode) or cfg["dom.text_no_motor"]
+
+    # ⑤-c PUMP 만 견적하는 경우 입고검수확인서의 RACK 점검 항목(Foreline Size ~
+    #      RACK표준화)은 해당 없음 — 그 행들을 숨긴다. Credit 은 품목이 아니므로
+    #      PUMP + Credit 도 PUMP 만으로 본다. 워크북을 재사용하는 일괄 생성에서
+    #      앞 건의 숨김이 남지 않도록 매번 참/거짓을 다시 적는다.
+    pump_only = not rack_items
+    for rr in range(cfg["dom.incoming_rack_start"], cfg["dom.incoming_rack_end"] + 1):
+        ws_incoming.row_dimensions[rr].hidden = pump_only
 
     # ⑥ 수식 재계산을 파일 열 때 Excel 에 위임
     wb.calculation.fullCalcOnLoad = True
 
     # ⑦ 빈 행 숨기기 (SPEC / SIGN_SPEC 모두 같은 개수)
     filled = len(out_list)
-    _hide_rows(ws_spec, DOM.SPEC_START, DOM.SPEC_END, filled)
-    _hide_rows(ws_sign, DOM.SIGN_START, DOM.SIGN_END, filled)
+    _hide_rows(ws_spec, spec_start, spec_end, filled)
+    _hide_rows(ws_sign, cfg["dom.sign_start"], cfg["dom.sign_end"], filled)
 
     # ⑧ 불필요한 시트 숨기기
     _keep_only_sheets(wb, [
-        SheetName.SPEC, SheetName.SIGN_SPEC,
-        SheetName.INCOMING, SheetName.REQ_COPY,
+        cfg["sheet.spec"], cfg["sheet.sign_spec"],
+        cfg["sheet.incoming"], cfg["sheet.req_copy"],
     ])
 
     _reset_sheet_selections(wb)
@@ -1111,73 +1093,81 @@ def _check_capacity(doc: str, section: str, capacity: int,
         )
 
 
+def _write_lines(ws, cfg: quote_config.QuoteConfig, prefix: str, start: int, end: int,
+                 lines: List[Dict[str, Any]]) -> None:
+    """start~end 행의 규격·단가·수량 칸을 비우고 lines 를 위에서부터 적는다.
+    수량이 0 인 줄(Credit)은 수량 칸을 비워 둔다."""
+    c_spec, c_price, c_qty = (cfg[prefix + ".col_spec"], cfg[prefix + ".col_price"],
+                              cfg[prefix + ".col_qty"])
+    for rr in range(start, end + 1):
+        ws[f"{c_spec}{rr}"] = None
+        ws[f"{c_price}{rr}"] = None
+        ws[f"{c_qty}{rr}"] = None
+    for i, r in enumerate(lines[:end - start + 1]):
+        rr = start + i
+        ws[f"{c_spec}{rr}"] = r["spec"]
+        ws[f"{c_price}{rr}"] = r["price"]
+        ws[f"{c_qty}{rr}"] = None if float(r.get("qty", 0)) == 0 else r["qty"]
+
+
+def _write_text(ws, cfg: quote_config.QuoteConfig, cell_key: str, text_key: str, **values) -> None:
+    """문구 규칙(text_key)에 값을 채워 cell_key 칸에 적는다.
+    값이 비어 있으면 아무것도 하지 않는다 — 양식에 적힌 '입력필요' 같은 표시를
+    빈칸으로 덮어쓰면 누락을 알아채기 어렵다."""
+    if any(s(v) == "" for v in values.values()):
+        return
+    ws[cfg[cell_key]] = cfg.text(text_key, **{k: s(v) for k, v in values.items()})
+
+
+def _credit_line(cr: Dict[str, Any]) -> Dict[str, Any]:
+    return {"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]}
+
+
 def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     """중국 견적서: 템플릿 복사 후 openpyxl 로 데이터 기입."""
+    cfg    = quote_config.load(state.template_path)
     info   = state.cn_info
-    ymd    = datetime.now().strftime("%y%m%d")
-    line   = safe_filename(info.get("line", ""))
-    tool   = safe_filename(info.get("tool", ""))
+    names  = {"날짜": datetime.now().strftime("%y%m%d"),
+              "라인": safe_filename(info.get("line", "")),
+              "호기": safe_filename(info.get("tool", ""))}
     folder = ensure_dir(
-        os.path.join(exe_dir(), "견적서", f"{ymd}_중국_SCS_{line}")
+        os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.cn_folder", **names))
     )
-    path = unique_path(
-        os.path.join(folder, f"대외비_{ymd}_중국_SCS_{line}_{tool}.xlsx")
-    )
+    path = unique_path(os.path.join(folder, cfg.text("name.cn_file", **names)))
 
     _copy_template(state.template_path, path)
     wb = load_workbook(path)
-    ws = wb[SheetName.QUOTE_CN]
+    ws = wb[cfg["sheet.quote_cn"]]
 
-    ws[CN.MAKER_CELL]   = info.get("maker", "")
-    ws[CN.PROCESS_CELL] = info.get("process", "")
-    ws[CN.TOOL_CELL]    = info.get("tool", "")
+    ws[cfg["cn.cell_maker"]]   = info.get("maker", "")
+    ws[cfg["cn.cell_process"]] = info.get("process", "")
+    ws[cfg["cn.cell_tool"]]    = info.get("tool", "")
+    _write_text(ws, cfg, "cn.cell_to", "cn.to_text", 받는사람=info.get("to"))
+    _write_text(ws, cfg, "cn.cell_quote_no", "cn.quote_no_text", 견적번호=info.get("quote_no"))
+    _write_text(ws, cfg, "cn.cell_delivery", "cn.delivery_text", 납기=info.get("delivery"))
+    _write_text(ws, cfg, "cn.cell_warranty", "cn.warranty_text", 보증=state.warranty_years)
 
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
-    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
-    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
+    pump_credits, rack_credits = _split_credits(credits, cfg)
 
-    # 펌프 구간 클리어 & 기입 (Pump Credit 포함)
-    for rr in range(CN.PUMP_START, CN.PUMP_END + 1):
-        ws[f"{CN.COL_SPEC}{rr}"]  = None
-        ws[f"{CN.COL_PRICE}{rr}"] = None
-        ws[f"{CN.COL_QTY}{rr}"]   = None
-
-    _check_capacity("중국 견적서", "PUMP", CN.PUMP_END - CN.PUMP_START + 1,
+    pump_start, pump_end = cfg["cn.pump_start"], cfg["cn.pump_end"]
+    rack_start, rack_end = cfg["cn.rack_start"], cfg["cn.rack_end"]
+    _check_capacity("중국 견적서", "PUMP", pump_end - pump_start + 1,
                     len(pump), len(pump_credits))
-    _check_capacity("중국 견적서", "RACK", CN.RACK_END - CN.RACK_START + 1,
+    _check_capacity("중국 견적서", "RACK", rack_end - rack_start + 1,
                     len(others), len(rack_credits))
 
-    pump_out = list(pump[:3])
-    for cr in pump_credits:
-        pump_out.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
-    for i, r in enumerate(pump_out[:3]):
-        rr = CN.PUMP_START + i
-        ws[f"{CN.COL_SPEC}{rr}"]  = r["spec"]
-        ws[f"{CN.COL_PRICE}{rr}"] = r["price"]
-        ws[f"{CN.COL_QTY}{rr}"]   = None if float(r.get("qty", 0)) == 0 else r["qty"]
-
-    # 랙 구간 클리어 & 기입 (Rack Credit만 포함)
-    for rr in range(CN.RACK_START, CN.RACK_END + 1):
-        ws[f"{CN.COL_SPEC}{rr}"]  = None
-        ws[f"{CN.COL_PRICE}{rr}"] = None
-        ws[f"{CN.COL_QTY}{rr}"]   = None
-
-    out_list = others[:20]
-    for cr in rack_credits:
-        out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
-    out_list = out_list[:20]
-
-    for i, r in enumerate(out_list):
-        rr = CN.RACK_START + i
-        ws[f"{CN.COL_SPEC}{rr}"]  = r["spec"]
-        ws[f"{CN.COL_PRICE}{rr}"] = r["price"]
-        ws[f"{CN.COL_QTY}{rr}"]   = None if float(r.get("qty", 0)) == 0 else r["qty"]
+    # 펌프 구간 (Pump Credit 포함) / 랙 구간 (Rack Credit 만 포함)
+    _write_lines(ws, cfg, "cn", pump_start, pump_end,
+                 list(pump) + [_credit_line(cr) for cr in pump_credits])
+    out_list = list(others) + [_credit_line(cr) for cr in rack_credits]
+    _write_lines(ws, cfg, "cn", rack_start, rack_end, out_list)
 
     wb.calculation.fullCalcOnLoad = True
-    _hide_rows(ws, CN.RACK_START, CN.RACK_END, len(out_list))
-    _keep_only_sheets(wb, [SheetName.QUOTE_CN])
+    _hide_rows(ws, rack_start, rack_end, len(out_list))
+    _keep_only_sheets(wb, [cfg["sheet.quote_cn"]])
     _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
@@ -1188,72 +1178,57 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
 
 def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     """미국 견적서: 템플릿 복사 후 openpyxl 로 데이터 기입."""
+    cfg    = quote_config.load(state.template_path)
     info   = state.us_info
-    ymd    = datetime.now().strftime("%y%m%d")
-    site   = safe_filename(info.get("site", ""))
-    tool   = safe_filename(info.get("tool", ""))
+    names  = {"날짜": datetime.now().strftime("%y%m%d"),
+              "사이트": safe_filename(info.get("site", "")),
+              "호기": safe_filename(info.get("tool", ""))}
     folder = ensure_dir(
-        os.path.join(exe_dir(), "견적서", f"{ymd}_미국_{site}")
+        os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.us_folder", **names))
     )
-    path = unique_path(
-        os.path.join(folder, f"대외비_{ymd}_{site}_{tool}_Quotation.xlsx")
-    )
+    path = unique_path(os.path.join(folder, cfg.text("name.us_file", **names)))
 
     _copy_template(state.template_path, path)
     wb = load_workbook(path)
-    ws = wb[SheetName.QUOTE_US]
+    ws = wb[cfg["sheet.quote_us"]]
 
-    ws[US.MAKER_CELL]    = info.get("maker", "")
-    ws[US.PROCESS_CELL]  = info.get("process", "")
-    ws[US.TOOL_CELL]     = info.get("tool", "")
-    ws[US.EXCHANGE_CELL] = float(info.get("exchange", 0))
+    ws[cfg["us.cell_maker"]]    = info.get("maker", "")
+    ws[cfg["us.cell_process"]]  = info.get("process", "")
+    ws[cfg["us.cell_tool"]]     = info.get("tool", "")
+    ws[cfg["us.cell_exchange"]] = float(info.get("exchange", 0))
     y, m = info.get("base_ym", (datetime.now().year, datetime.now().month))
     # 글자가 아니라 날짜로 넣는다 — 양식 셀 서식(mmm-yy)이 글자에는 먹지 않아
     # "Nov-26" 이 아니라 "2026-11-1" 로 찍힌다.
-    ws[US.DATE_CELL] = datetime(int(y), int(m), 1)
+    ws[cfg["us.cell_date"]] = datetime(int(y), int(m), 1)
+    _write_text(ws, cfg, "us.cell_investor", "us.investor_text",
+                투자자=s(state.investor_name) or cfg["default.investor"])
+    _write_text(ws, cfg, "us.cell_quote_no", "us.quote_no_text", 견적번호=info.get("quote_no"))
+    _write_text(ws, cfg, "us.cell_pr", "us.pr_text", PR=info.get("pr"))
+    _write_text(ws, cfg, "us.cell_warranty", "us.warranty_text", 보증=state.warranty_years)
 
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
     others  = [r for r in items if r["role"] != "CREDIT" and r["cat"] != "PUMP"]
     credits = [r for r in items if r["role"] == "CREDIT"]
-    pump_credits = [r for r in credits if "Pump" in r.get("spec", "")]
-    rack_credits = [r for r in credits if "Pump" not in r.get("spec", "")]
+    pump_credits, rack_credits = _split_credits(credits, cfg)
 
+    pump_row = cfg["us.pump_row"]
+    rack_start, rack_end = cfg["us.rack_start"], cfg["us.rack_end"]
     _check_capacity("미국 견적서", "PUMP", 1, len(pump), 0)
-    _check_capacity("미국 견적서", "RACK", US.RACK_END - US.RACK_START + 1,
+    _check_capacity("미국 견적서", "RACK", rack_end - rack_start + 1,
                     len(others), len(credits))
 
-    # 펌프 단일 행 (Pump Credit은 RACK 구간 맨 앞 줄로 표기)
-    ws[US.PUMP_SPEC]  = None
-    ws[US.PUMP_PRICE] = None
-    ws[US.PUMP_QTY]   = None
-    if pump:
-        ws[US.PUMP_SPEC]  = pump[0]["spec"]
-        ws[US.PUMP_PRICE] = pump[0]["price"]
-        ws[US.PUMP_QTY]   = pump[0]["qty"]
+    # 펌프는 한 줄. 수량은 0 이어도 그대로 적는다(예전 동작).
+    for key, field in (("us.col_spec", "spec"), ("us.col_price", "price"), ("us.col_qty", "qty")):
+        ws[cfg.at(key, pump_row)] = pump[0][field] if pump else None
 
-    # 랙 구간 클리어 & 기입 (Pump Credit → 맨 앞, Rack Credit → 맨 뒤)
-    for rr in range(US.RACK_START, US.RACK_END + 1):
-        ws[f"{US.COL_SPEC}{rr}"]  = None
-        ws[f"{US.COL_PRICE}{rr}"] = None
-        ws[f"{US.COL_QTY}{rr}"]   = None
-
-    out_list = []
-    for cr in pump_credits:
-        out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
-    out_list += others[:20 - len(pump_credits)]
-    for cr in rack_credits:
-        out_list.append({"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]})
-    out_list = out_list[:20]
-
-    for i, r in enumerate(out_list):
-        rr = US.RACK_START + i
-        ws[f"{US.COL_SPEC}{rr}"]  = r["spec"]
-        ws[f"{US.COL_PRICE}{rr}"] = r["price"]
-        ws[f"{US.COL_QTY}{rr}"]   = None if float(r.get("qty", 0)) == 0 else r["qty"]
+    # 랙 구간: Pump Credit → 맨 앞, Rack Credit → 맨 뒤
+    out_list = ([_credit_line(cr) for cr in pump_credits] + list(others)
+                + [_credit_line(cr) for cr in rack_credits])
+    _write_lines(ws, cfg, "us", rack_start, rack_end, out_list)
 
     wb.calculation.fullCalcOnLoad = True
-    _hide_rows(ws, US.RACK_START, US.RACK_END, len(out_list))
-    _keep_only_sheets(wb, [SheetName.QUOTE_US])
+    _hide_rows(ws, rack_start, rack_end, len(out_list))
+    _keep_only_sheets(wb, [cfg["sheet.quote_us"]])
     _reset_sheet_selections(wb)
     wb.save(path)
     wb.close()
@@ -1367,11 +1342,55 @@ def generate_quote_multi(
     return results
 
 
+def _cover_formula_cols(cfg: quote_config.QuoteConfig) -> Tuple[int, ...]:
+    """견적의뢰복사본에서 계산으로 채워지는 열 (기본 O/P/Q/S/T/U)."""
+    return tuple(cfg.col("copy.col_" + k) for k in (
+        "pump_model", "pump_price", "rack_sum", "unit", "amount", "check"))
+
+
+def _needs_excel_values(path: str, cfg: Optional[quote_config.QuoteConfig] = None) -> bool:
+    """이 견적서의 견적의뢰복사본 O/P/Q/S/T/U 값을 Excel 로 계산해야만 알 수 있는가.
+
+    지금 버전이 만든 견적서는 이 칸들에 계산값을 직접 써 두므로(_fill_domestic ⑤-a)
+    파일만 읽으면 된다. Excel 이 필요한 것은 칸이 수식인데 저장된 계산값이 없는
+    경우뿐이다 — 예전 버전이 만들고 Excel 에서 한 번도 저장하지 않은 파일.
+
+    Excel 을 띄웠다 끄는 데 환경에 따라 수십 초가 걸리므로(실측: 종료에만 50초),
+    필요 없는 파일 때문에 띄우지 않으려고 미리 가려낸다. 판단할 수 없으면
+    True(Excel 사용)로 돌려 예전 동작을 유지한다.
+    """
+    cfg = cfg or quote_config.QuoteConfig()
+    sheet, r, cols = cfg["sheet.req_copy"], cfg["copy.row"], _cover_formula_cols(cfg)
+    try:
+        wb = load_workbook(path, read_only=True)
+        try:
+            if sheet not in wb.sheetnames:
+                return False            # 어차피 읽을 수 없는 파일 — 뒤에서 누락으로 보고된다
+            row = next(wb[sheet].iter_rows(min_row=r, max_row=r, max_col=max(cols),
+                                           values_only=True), ())
+        finally:
+            wb.close()
+        formula_cols = [c for c in cols
+                        if len(row) >= c and isinstance(row[c - 1], str) and row[c - 1].startswith("=")]
+        if not formula_cols:
+            return False
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            cached = next(wb[sheet].iter_rows(min_row=r, max_row=r, max_col=max(cols),
+                                              values_only=True), ())
+        finally:
+            wb.close()
+        return any(len(cached) < c or cached[c - 1] is None for c in formula_cols)
+    except Exception as e:
+        logger.warning("Excel 필요 여부 판단 실패 (%s): %s — Excel 로 읽는다", path, e)
+        return True
+
+
 def _generate_cover_impl(
     template_path : str,
     folder        : str,
     source_files  : List[str],
-    investor_name : str = "채승철",
+    investor_name : str = "",
     progress_cb   : Optional[Callable[[int, int, str], None]] = None,
     warranty_years: int = 2,
 ) -> Tuple[str, List[Tuple[str, str]]]:
@@ -1384,8 +1403,13 @@ def _generate_cover_impl(
       실패 목록이 비어 있지 않으면 그만큼 갑지에서 누락된 것이므로
       호출자가 반드시 사용자에게 알려야 한다.
     """
+    cfg = quote_config.load(template_path)
+    investor_name = s(investor_name) or cfg["default.investor"]
+    sh_copy, copy_row = cfg["sheet.req_copy"], cfg["copy.row"]
+    data_start, last_col = cfg["cover.data_row_start"], cfg.col("cover.data_last_col")
     folder_name = os.path.basename(folder.rstrip("\\/"))
-    out_path = unique_path(os.path.join(folder, f"대외비_{folder_name}_갑지.xlsx"))
+    out_path = unique_path(os.path.join(folder, cfg.text(
+        "name.cover_file", 폴더=folder_name, 갑지표시=cfg["name.cover_mark"])))
 
     input_abs = {os.path.abspath(p).lower() for p in source_files}
     while os.path.abspath(out_path).lower() in input_abs:
@@ -1407,38 +1431,54 @@ def _generate_cover_impl(
     # data_only=True 로 열면 O/P/Q/S/T/U 열(15,16,17,19,20,21)이 None 반환.
     # COM 세션을 열어 Excel 이 fullCalcOnLoad 재계산한 값을 직접 읽는다.
     # {abs_path.lower(): {col: value}}
-    _FORMULA_COLS = (15, 16, 17, 19, 20, 21)
+    _FORMULA_COLS = _cover_formula_cols(cfg)
+    _need_excel = [p for p in clean if _needs_excel_values(p, cfg)]
     _com_vals: Dict[str, Dict[int, Any]] = {}
 
-    if _ensure_com():
+    # 구간별 소요시간 — Excel 을 쓰는 경로라 개발 PC 에서 재현할 수 없어,
+    # 느리다는 제보가 오면 로그의 이 한 줄로 어디가 느린지 가린다.
+    _t0 = time.perf_counter()
+    _com_ok = bool(_need_excel) and excel_com._ensure_com()
+    _ms_load = (time.perf_counter() - _t0) * 1000
+    _ms_start = _ms_open = _ms_wbopen = _ms_read = _ms_close = _ms_quit = 0.0
+    if _com_ok:
         _xl = None
         _wb_c = _ws_c = None
         try:
-            pythoncom.CoInitialize()
-            _xl = win32.DispatchEx("Excel.Application")
+            _t = time.perf_counter()
+            excel_com.pythoncom.CoInitialize()
+            _xl = excel_com.win32.DispatchEx("Excel.Application")
+            _ms_start = (time.perf_counter() - _t) * 1000
+            _t = time.perf_counter()
             _xl.Visible = False
             _xl.DisplayAlerts = False
-            for _p in clean:
+            for _p in _need_excel:
                 _pkey = os.path.abspath(_p).lower()
                 _row: Dict[int, Any] = {}
                 try:
+                    _tt = time.perf_counter()
                     _wb_c = _xl.Workbooks.Open(
                         os.path.abspath(_p), ReadOnly=True, UpdateLinks=0, AddToMru=False
                     )
+                    _ms_wbopen += (time.perf_counter() - _tt) * 1000
                     try:
-                        _ws_c = _wb_c.Worksheets(SheetName.REQ_COPY)
+                        _tt = time.perf_counter()
+                        _ws_c = _wb_c.Worksheets(sh_copy)
                         for _c in _FORMULA_COLS:
                             try:
-                                _row[_c] = _ws_c.Cells(2, _c).Value
+                                _row[_c] = _ws_c.Cells(copy_row, _c).Value
                             except Exception:
                                 pass
+                        _ms_read += (time.perf_counter() - _tt) * 1000
                     finally:
                         _ws_c = None          # 시트 프록시 먼저 해제
+                        _tt = time.perf_counter()
                         try:
                             _wb_c.Close(False)
                         except Exception:
                             pass
                         _wb_c = None
+                        _ms_close += (time.perf_counter() - _tt) * 1000
                 except Exception as _e:
                     logger.warning("COM 수식값 읽기 실패 (%s): %s", _p, _e)
                 _com_vals[_pkey] = _row
@@ -1450,6 +1490,7 @@ def _generate_cover_impl(
             # CoUninitialize() 를 프록시 해제보다 먼저 부르면 그 뒤의 해제가
             # 이미 정리된 아파트먼트에서 일어나 보이지 않는 좀비 프로세스가 남는다.
             #   프록시 해제 → gc → Quit() → 참조 제거 → gc → CoUninitialize()
+            _tt = time.perf_counter()
             _clear_clipboard()
             _ws_c = None
             _wb_c = None
@@ -1463,27 +1504,30 @@ def _generate_cover_impl(
                 _xl = None
                 gc.collect()
             try:
-                pythoncom.CoUninitialize()
+                excel_com.pythoncom.CoUninitialize()
             except Exception:
                 pass
+            _ms_quit = (time.perf_counter() - _tt) * 1000
+            _ms_open = (time.perf_counter() - _t0) * 1000 - _ms_load - _ms_start
+    _t_fill = time.perf_counter()
 
     # 템플릿 복사 후 openpyxl 로 편집
     _copy_template(template_path, out_path)
     wb       = load_workbook(out_path)
-    ws_data  = wb[SheetName.COVER_DATA]
-    ws_cover = wb[SheetName.COVER]
+    ws_data  = wb[cfg["sheet.cover_data"]]
+    ws_cover = wb[cfg["sheet.cover"]]
 
     # 갑지DATA 초기화 — iter_rows 공개 API 사용 (내부 _cells 직접 접근 금지)
     max_data_row = min(ws_data.max_row or 1, 2000)
-    if max_data_row >= 2:
-        for row_cells in ws_data.iter_rows(min_row=2, max_row=max_data_row,
-                                            min_col=1, max_col=27):
+    if max_data_row >= data_start:
+        for row_cells in ws_data.iter_rows(min_row=data_start, max_row=max_data_row,
+                                            min_col=1, max_col=last_col):
             for cell in row_cells:
                 if cell.value is not None:
                     cell.value = None
 
     # 각 source 파일의 견적의뢰복사본 2행 읽기
-    write_row = 2
+    write_row = data_start
     total_src = len(clean)
     failed: List[Tuple[str, str]] = []   # (파일명, 사유)
     for idx, path in enumerate(clean):
@@ -1492,11 +1536,11 @@ def _generate_cover_impl(
         src_wb = None
         try:
             src_wb = load_workbook(path, data_only=True)
-            if SheetName.REQ_COPY not in src_wb.sheetnames:
-                raise KeyError(f"'{SheetName.REQ_COPY}' 시트 없음")
-            src_ws = src_wb[SheetName.REQ_COPY]
-            for c in range(1, 28):  # A:AA
-                ws_data.cell(write_row, c).value = src_ws.cell(2, c).value
+            if sh_copy not in src_wb.sheetnames:
+                raise KeyError(f"'{sh_copy}' 시트 없음")
+            src_ws = src_wb[sh_copy]
+            for c in range(1, last_col + 1):  # A:AA
+                ws_data.cell(write_row, c).value = src_ws.cell(copy_row, c).value
             # COM 계산값으로 수식 셀(O/P/Q/S/T/U) 덮어쓰기
             for _c, _v in _com_vals.get(os.path.abspath(path).lower(), {}).items():
                 if _v is not None:
@@ -1514,43 +1558,49 @@ def _generate_cover_impl(
                 except Exception:
                     pass
 
-    if not failed and write_row == 2:
+    if not failed and write_row == data_start:
         raise ValueError("갑지에 기록할 원본이 없습니다.")
 
     # 투자자명
-    ws_cover["B7"] = f"삼성전자 ㈜ / {investor_name} 님"
+    ws_cover[cfg["cover.cell_investor"]] = cfg.text("cover.investor_text", 투자자=investor_name)
 
     # 보증기간 (기본값: 2 Year after delivery)
-    ws_cover["I12"] = f"{warranty_years} Year after delivery"
+    ws_cover[cfg["cover.cell_warranty"]] = cfg.text("cover.warranty_text", 보증=warranty_years)
 
     # 갑지DATA A2:A31 을 직접 확인하여 빈 행을 COVER(20~49) + COVER_DATA(2~31) 양쪽에 숨기기
-    for i in range(30):
-        a_val = ws_data.cell(2 + i, 1).value
+    for i in range(cfg["cover.rows"]):
+        a_val = ws_data.cell(data_start + i, 1).value
         blank = a_val is None or str(a_val).strip() == ""
-        ws_cover.row_dimensions[20 + i].hidden = blank
-        ws_data.row_dimensions[2 + i].hidden   = blank
+        ws_cover.row_dimensions[cfg["cover.row_start"] + i].hidden = blank
+        ws_data.row_dimensions[data_start + i].hidden   = blank
 
     wb.calculation.fullCalcOnLoad = True
-    _keep_only_sheets(wb, [SheetName.COVER_DATA, SheetName.COVER])
+    _keep_only_sheets(wb, [cfg["sheet.cover_data"], cfg["sheet.cover"]])
 
     # 열릴 때 COVER 시트만 활성 탭으로 — 여러 시트가 tabSelected=True 상태로
     # 저장되면 Excel이 '그룹' 모드로 파일을 열어버린다.
     for _sn in wb.sheetnames:
-        wb[_sn].sheet_view.tabSelected = (_sn == SheetName.COVER)
-    wb.active = wb[SheetName.COVER]
+        wb[_sn].sheet_view.tabSelected = (_sn == cfg["sheet.cover"])
+    wb.active = wb[cfg["sheet.cover"]]
 
     _reset_sheet_selections(wb)
     wb.save(out_path)
     wb.close()
     restore_header_footer_images(template_path, out_path)
     logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
-                out_path, write_row - 2, len(failed))
+                out_path, write_row - data_start, len(failed))
+    logger.info("갑지: Excel 로 값을 읽은 원본 %d건 / 전체 %d건", len(_need_excel), len(clean))
+    logger.info("갑지 소요: COM 로드 %.0fms / Excel 기동 %.0fms / 원본 열기·종료 %.0fms "
+                "(파일 열기 %.0f, 값 읽기 %.0f, 파일 닫기 %.0f, Excel 종료 %.0f) / "
+                "갑지 작성·저장 %.0fms", _ms_load, _ms_start, _ms_open,
+                _ms_wbopen, _ms_read, _ms_close, _ms_quit,
+                (time.perf_counter() - _t_fill) * 1000)
     return out_path, failed
 
 
-def _export_cover_data_sheet_impl(src_path: str) -> str:
+def _export_cover_data_sheet_impl(src_path: str, template_path: Optional[str] = None) -> str:
     """
-    갑지 파일에서 갑지DATA(SheetName.COVER_DATA) 시트만 추출하여 새 xlsx 로 저장.
+    갑지 파일에서 갑지DATA 시트만 추출하여 새 xlsx 로 저장.
 
     파일명 규칙:
       원본 파일명 끝의 '_갑지' 를 제거한다.
@@ -1565,7 +1615,8 @@ def _export_cover_data_sheet_impl(src_path: str) -> str:
     import re
 
     stem, ext = os.path.splitext(os.path.basename(src_path))
-    new_stem = re.sub(r"_갑지(?:_\d+)?$", "", stem)
+    cfg = quote_config.load(template_path)
+    new_stem = re.sub(re.escape(cfg["name.cover_mark"]) + r"(?:_\d+)?$", "", stem)
     if new_stem == stem:
         raise ValueError(f"갑지 파일이 아닙니다: '{os.path.basename(src_path)}'")
     out_path = unique_path(os.path.join(os.path.dirname(src_path), new_stem + ext))
@@ -1574,7 +1625,7 @@ def _export_cover_data_sheet_impl(src_path: str) -> str:
     _copy_template(src_path, out_path)
 
     wb = load_workbook(out_path)
-    keep = SheetName.COVER_DATA
+    keep = cfg["sheet.cover_data"]
     if keep not in wb.sheetnames:
         wb.close()
         os.remove(out_path)
@@ -1618,316 +1669,3 @@ def export_cover_data_sheet(*args, **kwargs) -> str:
         raise
     _clear_inflight()
     return out
-
-
-class ExcelCOM:
-    """
-    Excel COM 세션 컨텍스트 매니저.
-    _ExcelWorkerThread(전자서명 시트 캡처)가 공유 Application 객체로 사용한다.
-    그 워커는 페이지가 열려 있는 내내 이 세션을 쥐고 있다 — COM 객체는
-    만들어진 스레드에서만 안전하므로 생성·사용·종료가 모두 한 스레드다.
-    """
-
-    def __init__(self) -> None:
-        self._excel = None
-
-    def __enter__(self) -> "ExcelCOM":
-        if not _ensure_com():
-            raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
-        pythoncom.CoInitialize()
-        _t0 = time.perf_counter()
-        try:
-            self._excel = win32.DispatchEx("Excel.Application")
-            logger.info("Excel COM 세션 시작: %.0fms", (time.perf_counter() - _t0) * 1000)
-            self._excel.Visible = False
-            self._excel.DisplayAlerts = False
-            # ★ 자동화 스위치(Calculation / ScreenUpdating)는 걸지 않는다 ★
-            #
-            # 예전에는 걸려고 시도하는 코드가 있었지만, 첫 줄의 Calculation
-            # 설정이 com_error 로 실패하면서 뒤의 것들까지 통째로 건너뛰고
-            # 있었다. 그 "버그"를 고쳐 실제로 스위치를 걸었더니 캡처가 빈
-            # 이미지로 나왔다 — 실패하던 쪽이 오히려 이 앱을 지켜주고 있었다.
-            #
-            #   · ScreenUpdating=False
-            #     CopyPicture(Appearance=xlScreen) 는 "화면에 그려진 모습"을
-            #     복사하는 것이라, 화면 갱신을 끄면 빈 그림이 복사된다.
-            #   · Calculation=xlCalculationManual
-            #     이 앱이 만드는 견적서는 openpyxl 로 저장돼 수식의 캐시값이
-            #     없다. 열 때 재계산(fullCalcOnLoad)이 돌아야 값이 보이는데,
-            #     수동으로 돌려놓으면 수식 칸이 빈 채로 캡처된다.
-            #
-            # 즉 이 경로에서 "열기가 느린 것"(재계산)과 "캡처가 제대로 나오는
-            # 것"은 맞바꿀 수 없다. 속도를 줄이려면 재계산량 자체를 줄여야
-            # 한다(생성물에서 수식·시트를 덜어내는 방향).
-        except BaseException:
-            # DispatchEx 실패(Excel 미설치·손상) 시 __exit__ 가 호출되지 않으므로
-            # 여기서 아파트먼트를 되돌리지 않으면 호출할 때마다 하나씩 누수된다.
-            self._excel = None
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-            raise
-        return self
-
-    def __exit__(self, *_) -> None:
-        # 순서 중요: 프록시 해제 → Quit() → 참조 제거 → CoUninitialize()
-        # 반대로 하면 보이지 않는 EXCEL.EXE 가 파일 잠금을 쥔 채 남는다.
-        import gc
-        gc.collect()
-        if self._excel is not None:
-            try:
-                self._excel.Quit()
-            except Exception:
-                pass
-            self._excel = None
-            gc.collect()
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-
-    @property
-    def app(self):
-        return self._excel
-
-    def open(self, path: str, read_only: bool = False):
-        return self._excel.Workbooks.Open(
-            path, ReadOnly=read_only, UpdateLinks=0, AddToMru=False
-        )
-
-
-# ═══════════════════════════════════════════════════════════════
-# 공개 API: 전자서명용 임시 PDF 생성 (COM 유지)
-# ═══════════════════════════════════════════════════════════════
-
-def excel_to_merged_pdf(xlsx_path: str, tmp_dir: str, file_index: int,
-                        xl_app=None) -> str:
-    """
-    xlsx 의 ESIGN_TARGET 시트(원래 Visible인 것)만 PDF 로 내보낸다.
-    반환: PDF 경로 (대상 시트 없으면 "")
-
-    워크북 단위 ExportAsFixedFormat 1회 호출:
-      - 비대상 시트를 일시적으로 VeryHidden 처리 → workbook 전체 export
-      - Close(False) 로 디스크 파일은 변경하지 않음
-      - RenameFile 발생 횟수: 파일당 1회 (기존 시트 수만큼 → 1회로 감소)
-
-    xl_app: 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
-    """
-    import fitz
-
-    out_pdf = os.path.join(tmp_dir, f"tmp_{file_index:03d}.pdf")
-
-    def _process(app) -> str:
-        wb = app.Workbooks.Open(xlsx_path, ReadOnly=False, UpdateLinks=0, AddToMru=False)
-        try:
-            target_set = set(SheetName.ESIGN_TARGET)
-            to_hide = []
-
-            # 원래 Visible 이면서 ESIGN_TARGET에 속하는 시트만 유지
-            has_visible_target = False
-            for ws in wb.Worksheets:
-                is_target  = ws.Name in target_set
-                was_visible = int(ws.Visible) == -1   # xlSheetVisible = -1
-                if is_target and was_visible:
-                    has_visible_target = True
-                else:
-                    to_hide.append(ws)
-
-            if not has_visible_target:
-                return ""
-
-            # 비대상 시트를 VeryHidden (xlVeryHidden = 2)
-            for ws in to_hide:
-                try:
-                    ws.Visible = 2
-                except Exception:
-                    pass
-
-            # 워크북 전체를 PDF 1회 export (ExportAsFixedFormat 1회 = RenameFile 1회)
-            wb.ExportAsFixedFormat(0, out_pdf)
-            return out_pdf if os.path.exists(out_pdf) else ""
-        finally:
-            _clear_clipboard()   # ExportAsFixedFormat 이 클립보드를 사용하는 경우 대비
-            try:
-                wb.Close(False)   # 디스크 파일 변경 없음
-            except Exception:
-                pass
-
-    if xl_app is not None:
-        return _process(xl_app)
-
-    with ExcelCOM() as xl:
-        return _process(xl.app)
-
-
-def _print_area_range(ws):
-    """PrintArea(R1C1 또는 A1 형식)를 Range 객체로 반환. 없으면 UsedRange."""
-    import re
-    pa = ws.PageSetup.PrintArea
-    if not pa:
-        return ws.UsedRange
-    if "!" in pa:
-        pa = pa.split("!")[-1]
-    # R1C1 형식 감지: "R숫자C숫자:R숫자C숫자" 또는 단일 "R숫자C숫자"
-    m = re.match(r'R(\d+)C(\d+)(?::R(\d+)C(\d+))?$', pa.strip())
-    if m:
-        r1, c1 = int(m.group(1)), int(m.group(2))
-        r2 = int(m.group(3)) if m.group(3) else r1
-        c2 = int(m.group(4)) if m.group(4) else c1
-        return ws.Range(ws.Cells(r1, c1), ws.Cells(r2, c2))
-    # A1 형식
-    try:
-        return ws.Range(pa)
-    except Exception:
-        return ws.UsedRange
-
-
-def excel_capture_sheets_to_pngs(xlsx_path: str, tmp_dir: str, file_index: int,
-                                  xl_app=None, progress_cb=None,
-                                  should_cancel=None, blob_sink=None) -> List[str]:
-    """
-    xlsx ESIGN_TARGET 가시 시트를 클립보드로 캡처 → PNG 저장.
-    ExportAsFixedFormat/PrintOut 미사용 → RenameFile 없음.
-
-    xl_app       : 공유 Excel.Application COM 객체. None이면 자체 ExcelCOM 사용.
-    progress_cb  : (완료 시트수, 전체 시트수, 시트명) 콜백. 시트 캡처가 끝날 때마다 호출.
-    should_cancel: 인자 없이 bool 반환하는 콜백. True 면 남은 시트를 건너뛰고 지금까지
-                   캡처한 것만 반환한다 (파일 단위보다 촘촘한 취소 체크).
-    blob_sink    : dict 를 넘기면 PNG 를 파일로 쓰지 않고 이 dict 에 bytes 로 담는다
-                   ({키: PNG bytes}). 반환 리스트에는 경로 대신 그 키가 들어간다.
-                   캡처 결과는 이미 메모리(PIL Image)에 있는데 굳이 네트워크
-                   드라이브에 썼다가 다시 읽을 이유가 없어서 만든 경로다
-                   — 실측상 저장 구간이 전체의 20%(장당 ~90ms)였다.
-                   None 이면 기존처럼 tmp_dir 에 파일로 저장한다.
-    반환: PNG 경로(또는 blob_sink 키) 리스트 (순서 = ESIGN_TARGET 순서)
-    """
-    try:
-        from PIL import ImageGrab
-    except ImportError:
-        logger.error("Pillow(PIL) 없음 — pip install pillow")
-        return []
-
-    png_paths: List[str] = []
-
-    def _process(app) -> List[str]:
-        # 구간별 시간을 로그에 남긴다. 이 경로는 전부 Excel COM 왕복이라
-        # 개발 PC 에서 재현·측정할 수가 없어서, 실제 사용 환경의
-        # quote_app.log 를 보고 어디가 느린지 판단하기 위한 계측이다.
-        t_open = time.perf_counter()
-        wb = app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
-        ms_open = (time.perf_counter() - t_open) * 1000
-        ms_prep = ms_cap = ms_save = 0.0
-        bytes_saved = 0
-        try:
-            # ESIGN_TARGET 시트 우선, 없으면 보이는 시트 전체 캡처.
-            # 이름 조회 + Visible 확인을 한 번만 하고 ws 프록시를 그대로 들고 있는다
-            # (기존엔 이 목록을 만들 때 한 번, 캡처 루프에서 또 한 번 조회했다).
-            target_sheets = []   # [(name, ws), ...]
-            for name in SheetName.ESIGN_TARGET:
-                try:
-                    ws = wb.Worksheets(name)
-                    if int(ws.Visible) == -1:
-                        target_sheets.append((name, ws))
-                except Exception:
-                    continue
-            if not target_sheets:
-                for ws in wb.Worksheets:
-                    try:
-                        if int(ws.Visible) == -1:
-                            target_sheets.append((ws.Name, ws))
-                    except Exception:
-                        continue
-
-            total = len(target_sheets)
-            for idx, (name, ws) in enumerate(target_sheets):
-                if should_cancel is not None:
-                    try:
-                        if should_cancel():
-                            break
-                    except Exception:
-                        pass
-                safe_name = "".join(c if c not in r'\/:*?"<>|' else "_" for c in name)
-                png_path = os.path.join(
-                    tmp_dir, f"cap_{file_index:03d}_{idx:02d}_{safe_name}.png")
-                try:
-                    _t = time.perf_counter()
-                    ws.Activate()
-                    # 페이지 나누기 미리보기 → 기본 보기로 전환 후 캡처.
-                    # [주의] View 는 창 속성이지만, 시트마다 마지막 저장 시점의
-                    # 보기 모드를 따로 기억하고 있어 Activate() 로 다른 시트로
-                    # 넘어가면 그 시트의 저장된 모드(페이지 나누기 미리보기)가
-                    # 되살아날 수 있다. 워크북당 1회로 줄였다가 "1 페이지"
-                    # 워터마크가 다시 나타나는 회귀가 있었다 — 반드시 시트마다
-                    # 매번 설정해야 한다.
-                    try:
-                        app.ActiveWindow.View = 1  # xlNormalView
-                    except Exception:
-                        pass
-                    rng = _print_area_range(ws)
-                    ms_prep += (time.perf_counter() - _t) * 1000
-                    _t = time.perf_counter()
-                    rng.CopyPicture(Appearance=1, Format=2)  # xlScreen, xlBitmap
-                    img = ImageGrab.grabclipboard()
-                    # ── 클립보드 즉시 해제 ──────────────────────────────────────
-                    # CopyPicture 후 Windows 클립보드에 CF_ENHMETAFILE(EMF) 핸들이
-                    # 남아 있는 상태에서 COM 세션(xl.Quit)이 종료되면 stale 핸들이
-                    # 발생한다. 이후 사용자가 별도 Excel에서 Ctrl+C를 시도하면
-                    # Windows가 이 핸들을 해제하려다 액세스 위반 → Excel 전체 종료.
-                    # 이미지를 읽은 직후 클립보드를 비워 이 경로를 차단한다.
-                    _clear_clipboard()
-                    ms_cap += (time.perf_counter() - _t) * 1000
-                    _t = time.perf_counter()
-                    if img is not None:
-                        # compress_level=1: 잠깐 쓰고 버릴 이미지라 압축률보다
-                        # 인코딩 속도가 낫다(기본값 6 대비 체감 저하 없음).
-                        if blob_sink is not None:
-                            key = f"mem://{os.path.basename(png_path)}"
-                            buf = io.BytesIO()
-                            img.save(buf, "PNG", compress_level=1)
-                            blob_sink[key] = buf.getvalue()
-                            png_paths.append(key)
-                            bytes_saved += len(blob_sink[key])
-                        else:
-                            # 이전 세션 잠금 파일이 남아 있으면 삭제 시도 후 저장
-                            _dst = png_path
-                            if os.path.exists(_dst):
-                                try:
-                                    os.remove(_dst)
-                                except OSError:
-                                    _dst = unique_path(_dst)
-                            img.save(_dst, "PNG", compress_level=1)
-                            png_paths.append(_dst)
-                            try:
-                                bytes_saved += os.path.getsize(_dst)
-                            except OSError:
-                                pass
-                    else:
-                        logger.warning("클립보드 캡처 실패 (%s / %s)", xlsx_path, name)
-                    ms_save += (time.perf_counter() - _t) * 1000
-                except Exception as e:
-                    logger.warning("시트 캡처 실패 (%s / %s): %s", xlsx_path, name, e)
-                if progress_cb is not None:
-                    try:
-                        progress_cb(idx + 1, total, name)
-                    except Exception:
-                        pass
-        finally:
-            _clear_clipboard()   # 워크북 닫기 전 최종 클립보드 해제
-            try:
-                wb.Close(False)
-            except Exception:
-                pass
-            logger.info(
-                "시트 캡처 %s: 총 %.0fms (열기 %.0f / 준비 %.0f / 캡처 %.0f / 인코딩 %.0f, "
-                "시트 %d개, PNG %.1fMB)",
-                os.path.basename(xlsx_path), ms_open + ms_prep + ms_cap + ms_save,
-                ms_open, ms_prep, ms_cap, ms_save, len(png_paths),
-                bytes_saved / 1024 / 1024)
-        return png_paths
-
-    if xl_app is not None:
-        return _process(xl_app)
-
-    with ExcelCOM() as xl:
-        return _process(xl.app)

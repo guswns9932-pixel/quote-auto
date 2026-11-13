@@ -38,10 +38,14 @@ logger = logging.getLogger("QuoteApp")
 
 TMP_PREFIX = "~esign_tmp_"
 
-# 서명 한 개의 크기(pt). 예전 캡처 방식에서 170x40px(96DPI 화면 기준)이던 것과
-# 같은 비율이 되도록 환산한 값이다(px × 0.75).
-SIGN_W_PT = 127.5
-SIGN_H_PT = 30.0
+# 서명 한 개의 기본 크기 — "엑셀 시트를 100% 로 봤을 때"의 포인트.
+# 실제 PDF 위의 크기는 여기에 그 시트의 인쇄 배율(PageRef.scale)을 곱한다.
+# 시트마다 인쇄 배율이 달라서(갑지 73%, 사양서 62%, 입고검수확인서 95% …)
+# 쪽 크기 기준 고정값으로 두면 축소 인쇄되는 시트에서 서명이 칸을 넘친다.
+# 값은 예전 캡처 방식에서 서명(170x40px)이 사인 칸에 차지하던 비율에 맞췄다.
+# 화면의 "서명 크기 %" 로 조절할 수 있다.
+SIGN_W_PT = 96.0
+SIGN_H_PT = 22.6
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class PageRef:
     sheet: str
     index_in_sheet: int
     pages_in_sheet: int
+    scale: float = 1.0          # 이 시트의 인쇄 배율 (0.62 = 62% 로 축소 인쇄)
 
 
 @dataclass
@@ -73,6 +78,12 @@ class Placement:
     y: float
     w: float = SIGN_W_PT
     h: float = SIGN_H_PT
+
+
+def sign_size(page_scale: float, pct: float = 100.0) -> Tuple[float, float]:
+    """인쇄 배율 page_scale 인 쪽에 놓을 서명의 크기(pt). pct = 사용자가 고른 크기 %."""
+    k = page_scale * pct / 100.0
+    return SIGN_W_PT * k, SIGN_H_PT * k
 
 
 PageKey = Tuple[int, int]            # (파일 순번, 쪽 번호)
@@ -115,8 +126,8 @@ def cleanup_stale_temp(folder: str) -> int:
 def export_workbook(xl_app, xlsx_path: str, target_sheets: Sequence[str],
                     progress_cb: Optional[Callable[[int, int, str], None]] = None,
                     should_cancel: Optional[Callable[[], bool]] = None,
-                    ) -> List[Tuple[str, bytes]]:
-    """xlsx 의 대상 시트를 시트별 PDF 로 내보내 [(시트이름, PDF bytes)] 로 돌려준다.
+                    ) -> List[Tuple[str, bytes, dict]]:
+    """xlsx 의 대상 시트를 시트별 PDF 로 내보내 [(시트이름, PDF bytes, 인쇄설정)] 로 돌려준다.
 
     target_sheets 중 보이는 시트만 내보낸다. 하나도 없으면 보이는 시트 전부
     (예전 캡처 방식과 같은 규칙). 시트별로 따로 내보내는 이유는 "몇 쪽이 어느
@@ -124,7 +135,7 @@ def export_workbook(xl_app, xlsx_path: str, target_sheets: Sequence[str],
     """
     folder = os.path.dirname(os.path.abspath(xlsx_path))
     tag = "%d_%s" % (os.getpid(), uuid.uuid4().hex[:8])
-    parts: List[Tuple[str, bytes]] = []
+    parts: List[Tuple[str, bytes, dict]] = []
 
     t0 = time.perf_counter()
     wb = xl_app.Workbooks.Open(xlsx_path, ReadOnly=True, UpdateLinks=0, AddToMru=False)
@@ -156,7 +167,7 @@ def export_workbook(xl_app, xlsx_path: str, target_sheets: Sequence[str],
             try:
                 ws.ExportAsFixedFormat(0, tmp)             # 0 = xlTypePDF
                 with open(tmp, "rb") as f:
-                    parts.append((name, f.read()))
+                    parts.append((name, f.read(), _page_setup_info(ws)))
             except Exception as e:
                 # 인쇄할 내용이 없는 시트 등 — 그 시트만 건너뛴다
                 logger.warning("시트 PDF 저장 실패 (%s / %s): %s", xlsx_path, name, e)
@@ -175,20 +186,65 @@ def export_workbook(xl_app, xlsx_path: str, target_sheets: Sequence[str],
             pass
     logger.info("PDF 변환 %s: 열기 %.0fms / 저장·읽기 %.0fms, 시트 %d개, %.1fMB",
                 os.path.basename(xlsx_path), ms_open, ms_export, len(parts),
-                sum(len(b) for _, b in parts) / 1024 / 1024)
+                sum(len(p[1]) for p in parts) / 1024 / 1024)
     return parts
+
+
+def _page_setup_info(ws) -> dict:
+    """인쇄 배율 계산에 필요한 시트의 인쇄 설정을 Excel 에서 읽는다(단위 pt).
+    못 읽으면 빈 dict — 그러면 배율은 100% 로 본다."""
+    try:
+        ps = ws.PageSetup
+        info = {"zoom": ps.Zoom, "wide": ps.FitToPagesWide, "tall": ps.FitToPagesTall,
+                "left": float(ps.LeftMargin), "right": float(ps.RightMargin),
+                "top": float(ps.TopMargin), "bottom": float(ps.BottomMargin)}
+        area = ps.PrintArea
+        rng = ws.Range(area) if area else ws.UsedRange
+        info["area_w"] = float(rng.Width)       # 숨긴 행·열은 0 으로 계산된다
+        info["area_h"] = float(rng.Height)
+        return info
+    except Exception as e:
+        logger.warning("인쇄 설정을 읽지 못했습니다 (%s): %s", getattr(ws, "Name", "?"), e)
+        return {}
+
+
+def print_scale(info: dict, page_w: float, page_h: float) -> float:
+    """시트의 인쇄 배율(1.0 = 100%)을 구한다.
+
+    배율을 직접 지정한 시트는 그 값을 쓴다. "한 쪽에 맞춤"인 시트는 Excel 이
+    배율을 알려주지 않으므로 같은 방식으로 계산한다: 여백을 뺀 종이에
+    인쇄영역이 들어가도록 줄이되(늘리지는 않음) 1% 단위로 내림.
+    """
+    def num(v):
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0.0
+    if not info:
+        return 1.0
+    zoom = num(info.get("zoom"))
+    if zoom:
+        return zoom / 100.0
+    cands = [1.0]
+    wide, tall = num(info.get("wide")), num(info.get("tall"))
+    aw, ah = num(info.get("area_w")), num(info.get("area_h"))
+    if wide and aw:
+        cands.append((page_w - info.get("left", 0.0) - info.get("right", 0.0)) * wide / aw)
+    if tall and ah:
+        cands.append((page_h - info.get("top", 0.0) - info.get("bottom", 0.0)) * tall / ah)
+    scale = int(min(cands) * 100) / 100.0
+    return scale if scale >= 0.1 else 1.0
 
 
 # ──────────────────────────────────────────────
 # 2. 시트별 PDF → 파일 하나의 PDF
 # ──────────────────────────────────────────────
-def merge_sheet_pdfs(parts: Sequence[Tuple[str, bytes]]) -> Tuple[bytes, List[PageRef]]:
-    """[(시트이름, PDF bytes)] 를 하나로 합친다. 반환: (PDF bytes, 쪽별 PageRef)."""
+def merge_sheet_pdfs(parts: Sequence[tuple]) -> Tuple[bytes, List[PageRef]]:
+    """[(시트이름, PDF bytes[, 인쇄설정])] 를 하나로 합친다. 반환: (PDF bytes, 쪽별 PageRef)."""
     import fitz
     out = fitz.open()
     pages: List[PageRef] = []
     try:
-        for sheet, data in parts:
+        for part in parts:
+            sheet, data = part[0], part[1]
+            info = part[2] if len(part) > 2 else {}
             try:
                 src = fitz.open(stream=data, filetype="pdf")
             except Exception as e:
@@ -196,8 +252,9 @@ def merge_sheet_pdfs(parts: Sequence[Tuple[str, bytes]]) -> Tuple[bytes, List[Pa
                 continue
             try:
                 n = src.page_count
+                scale = print_scale(info, src[0].rect.width, src[0].rect.height) if n else 1.0
                 out.insert_pdf(src)
-                pages.extend(PageRef(sheet, i, n) for i in range(n))
+                pages.extend(PageRef(sheet, i, n, scale) for i in range(n))
             finally:
                 src.close()
         if not pages:
@@ -241,35 +298,6 @@ def render_page(doc, page_no: int, zoom: float = 2.0) -> Tuple[int, int, int, by
     import fitz
     pix = doc[page_no].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     return pix.width, pix.height, pix.stride, bytes(pix.samples)
-
-
-# ──────────────────────────────────────────────
-# 서명 위치 복사
-# ──────────────────────────────────────────────
-def copy_placements(files: Sequence[SignFile],
-                    placements: Dict[PageKey, List[Placement]],
-                    src_file: int) -> Dict[PageKey, List[Placement]]:
-    """src_file 의 서명 위치를 다른 파일의 '같은 시트·같은 쪽'에 그대로 놓는다.
-
-    이미 서명이 있는 쪽은 건드리지 않는다(사람이 따로 맞춘 위치를 덮어쓰지 않기
-    위해). 반환: 새로 추가된 것만 {(파일, 쪽): [Placement]}.
-    """
-    by_sheet: Dict[Tuple[str, int], List[Placement]] = {}
-    for pno, ref in enumerate(files[src_file].pages):
-        got = placements.get((src_file, pno))
-        if got:
-            by_sheet[(ref.sheet, ref.index_in_sheet)] = list(got)
-    added: Dict[PageKey, List[Placement]] = {}
-    if not by_sheet:
-        return added
-    for fi, f in enumerate(files):
-        if fi == src_file:
-            continue
-        for pno, ref in enumerate(f.pages):
-            src = by_sheet.get((ref.sheet, ref.index_in_sheet))
-            if src and not placements.get((fi, pno)):
-                added[(fi, pno)] = list(src)
-    return added
 
 
 # ──────────────────────────────────────────────

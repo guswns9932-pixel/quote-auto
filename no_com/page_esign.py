@@ -21,13 +21,13 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (
-    Qt, QBuffer, QByteArray, QIODevice, QPointF, QSize, QThread, QTimer, Signal,
+    Qt, QBuffer, QByteArray, QIODevice, QPointF, QSize, QThread, QTimer, QUrl, Signal,
 )
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QProgressDialog,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 import app_settings
@@ -41,6 +41,8 @@ logger = logging.getLogger("QuoteApp")
 RENDER_ZOOM = 3.0        # 화면용 쪽 그림 배율 (72dpi × 3 = 216dpi)
 THUMB_ZOOM = 0.2         # 쪽 미리보기 배율
 PAGE_CACHE_MAX = 8       # 쪽 그림을 몇 장까지 기억할지 (장당 십수 MB)
+SIGN_PX_PER_PT = 6       # 화면용 서명 그림 해상도 (확대해도 깨지지 않게 넉넉히)
+SIGN_PCT_MIN, SIGN_PCT_MAX = 30, 300
 
 
 class _ExcelWorkerThread(QThread):
@@ -173,7 +175,7 @@ class ESignPage(QWidget):
         # 값을 세션(메모리)에만 기억해 다음 창에 미리 채운다. 그래도 창은
         # 매번 뜨고 확인은 필요하다. 저장하지 않으므로 앱을 끄면 사라진다.
         self._last_password : str = ""
-        self._signs         : List[QPixmap] = []     # 화면에 올릴 서명 그림 (RENDER_ZOOM 배)
+        self._signs         : List[QPixmap] = []     # 화면에 올릴 서명 그림
         self._sign_bytes    : List[bytes]   = []     # PDF 에 넣을 서명 그림 (PNG)
         self._files         : List[engine.SignFile] = []
         self._docs          : Dict[int, object] = {}             # 파일 순번 → 열린 PDF
@@ -182,7 +184,9 @@ class ESignPage(QWidget):
         self._cur_file      : int = 0
         self._cur_page      : int = 0
         self._sign_items    : Dict[Tuple[int, int], List[SignatureItem]] = {}
-        self._last_bulk     : List[SignatureItem] = []           # 방금 일괄 적용으로 놓은 것
+        pct = app_settings.get_int(app_settings.Key.ESIGN_SIGN_PCT, 100)
+        self._sign_pct      : int = max(SIGN_PCT_MIN, min(SIGN_PCT_MAX, pct or 100))
+        self._last_out      : str = ""                           # 마지막으로 저장한 PDF
         self._bg_item                                 = None
         self._shown_key     : Optional[Tuple[int, int]] = None
         self._worker        : Optional[_ExcelWorkerThread] = None
@@ -262,6 +266,8 @@ class ESignPage(QWidget):
             return
         self._clear_documents()
         self._code = ""
+        self._last_out = ""
+        self._base_folder = ""
         self._last_password = ""
         self._signs = []
         self._sign_bytes = []
@@ -290,7 +296,10 @@ class ESignPage(QWidget):
         tint_button(self.btn_save,  "#FFE0B2")   # 연주황
         top.addWidget(self.btn_code); top.addSpacing(8)
         top.addWidget(self.btn_excel); top.addSpacing(8)
-        top.addWidget(self.btn_save)
+        top.addWidget(self.btn_save); top.addSpacing(8)
+        self.btn_open = self._action_btn("결과 폴더 열기", self._open_folder)
+        self.btn_open.setToolTip("서명한 PDF 가 저장되는 폴더를 엽니다.")
+        top.addWidget(self.btn_open)
         top.addStretch(1)
         self.lbl_status = QLabel("준비")
         top.addWidget(self.lbl_status)
@@ -317,17 +326,19 @@ class ESignPage(QWidget):
             csf.addWidget(cap); csf.addWidget(lbl)
             self.lbl_sign_previews.append(lbl)
         code_row.addWidget(self.code_status_frame)
+        code_row.addSpacing(12)
+        code_row.addWidget(QLabel("서명 크기"))
+        self.spin_size = QSpinBox()
+        self.spin_size.setRange(SIGN_PCT_MIN, SIGN_PCT_MAX)
+        self.spin_size.setSingleStep(5)
+        self.spin_size.setSuffix(" %")
+        self.spin_size.setFixedHeight(30)
+        self.spin_size.setValue(self._sign_pct)
+        self.spin_size.setToolTip("서명이 칸보다 크거나 작으면 여기서 조절합니다.\n"
+                                  "이미 놓은 서명도 함께 바뀌고, 다음에 켤 때도 기억합니다.")
+        self.spin_size.valueChanged.connect(self._on_size_changed)
+        code_row.addWidget(self.spin_size)
         code_row.addStretch(1)
-        self.btn_bulk = QPushButton("이 파일의 서명 위치를 나머지 파일에도 적용")
-        self.btn_bulk.setFixedHeight(34)
-        self.btn_bulk.setToolTip("지금 보고 있는 파일에 놓은 서명을, 다른 파일의 같은 시트 같은 자리에 놓습니다.\n"
-                                 "이미 서명이 있는 쪽은 건드리지 않습니다.")
-        self.btn_bulk.clicked.connect(self._apply_to_others)
-        self.btn_bulk_undo = QPushButton("일괄 적용 취소")
-        self.btn_bulk_undo.setFixedHeight(34)
-        self.btn_bulk_undo.clicked.connect(self._undo_bulk)
-        code_row.addWidget(self.btn_bulk)
-        code_row.addWidget(self.btn_bulk_undo)
         outer.addLayout(code_row)
 
         # 3행: 왼쪽(파일 목록 + 쪽 미리보기) / 오른쪽(문서)
@@ -382,10 +393,7 @@ class ESignPage(QWidget):
         self.btn_code.setEnabled(not busy)
         self.btn_excel.setEnabled(not busy)
         self.btn_save.setEnabled(not busy and has_pages)
-        cur_signed = any(self._sign_items.get((self._cur_file, p))
-                         for p in range(len(self._cur_pages())))
-        self.btn_bulk.setEnabled(not busy and cur_signed and len(self._files) > 1)
-        self.btn_bulk_undo.setVisible(bool(self._last_bulk))
+        self.btn_open.setEnabled(bool(self._result_folder()))
 
     # ── ① 서명 Load ─────────────────────────────────────────
     def _load_code(self) -> None:
@@ -437,7 +445,7 @@ class ESignPage(QWidget):
         if len(images) < 2 or any(im.isNull() for im in images):
             self._signs = []; self._sign_bytes = []
             return False
-        w = int(round(engine.SIGN_W_PT * RENDER_ZOOM)); h = int(round(engine.SIGN_H_PT * RENDER_ZOOM))
+        w = int(round(engine.SIGN_W_PT * SIGN_PX_PER_PT)); h = int(round(engine.SIGN_H_PT * SIGN_PX_PER_PT))
         signs, blobs = [], []
         for im in images[:2]:
             # 서명 칸 크기에 맞춰 늘린다(예전과 같은 동작 — 가로세로 비율 무시)
@@ -592,7 +600,6 @@ class ESignPage(QWidget):
         self._bg_item = None
         self._shown_key = None
         self._sign_items = {}
-        self._last_bulk = []
         self._page_cache.clear()
         self._close_docs()
         self._files = []
@@ -763,11 +770,16 @@ class ESignPage(QWidget):
         self._last_password = self._code   # 다음 서명부터는 미리 채워서 뜬다
         return True
 
-    def _make_item(self, sign_idx: int, pno: int, x: float, y: float) -> SignatureItem:
-        item = SignatureItem(self._signs[sign_idx], pno, on_delete=self._remove_sign)
+    def sign_size(self, fi: int, pno: int) -> Tuple[float, float]:
+        """(fi, pno) 쪽에 놓이는 서명의 크기(pt) — 그 시트의 인쇄 배율 × 사용자가 고른 %."""
+        return engine.sign_size(self._files[fi].pages[pno].scale, self._sign_pct)
+
+    def _make_item(self, sign_idx: int, fi: int, pno: int, x: float, y: float) -> SignatureItem:
+        pm = self._signs[sign_idx]
+        item = SignatureItem(pm, pno, on_delete=self._remove_sign)
         item.sign_idx = sign_idx
         item.setTransformationMode(Qt.SmoothTransformation)
-        item.setScale(1.0 / RENDER_ZOOM)
+        item.setScale(self.sign_size(fi, pno)[0] / max(1, pm.width()))   # 씬 좌표 = pt
         item.setZValue(10)
         item.setPos(QPointF(x, y))
         return item
@@ -775,7 +787,7 @@ class ESignPage(QWidget):
     def place_sign(self, sign_idx: int, x: float, y: float) -> None:
         """지금 보고 있는 쪽의 (x, y)pt 에 서명을 놓는다. (x, y) 는 서명의 왼쪽 위."""
         key = (self._cur_file, self._cur_page)
-        item = self._make_item(sign_idx, self._cur_page, x, y)
+        item = self._make_item(sign_idx, self._cur_file, self._cur_page, x, y)
         self.scene.addItem(item)
         self._sign_items.setdefault(key, []).append(item)
         self.scene.update()
@@ -787,7 +799,26 @@ class ESignPage(QWidget):
         if not self._cur_pages(): return
         if not self._confirm_password(): return
         idx = min(1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 0, len(self._signs) - 1)
-        self.place_sign(idx, scene_pos.x() - engine.SIGN_W_PT / 2, scene_pos.y() - engine.SIGN_H_PT / 2)
+        w, h = self.sign_size(self._cur_file, self._cur_page)
+        self.place_sign(idx, scene_pos.x() - w / 2, scene_pos.y() - h / 2)
+
+    def _on_size_changed(self, pct: int) -> None:
+        """서명 크기 % 변경 — 이미 놓은 서명도 가운데를 기준으로 함께 바꾼다."""
+        self._sign_pct = int(pct)
+        app_settings.set_int(app_settings.Key.ESIGN_SIGN_PCT, self._sign_pct)
+        for (fi, pno), items in self._sign_items.items():
+            w_new = self.sign_size(fi, pno)[0]
+            for it in items:
+                try:
+                    pm = it.pixmap()
+                    old, new = it.scale(), w_new / max(1, pm.width())
+                    cx = it.pos().x() + pm.width() * old / 2
+                    cy = it.pos().y() + pm.height() * old / 2
+                    it.setScale(new)
+                    it.setPos(QPointF(cx - pm.width() * new / 2, cy - pm.height() * new / 2))
+                except RuntimeError:
+                    continue
+        self.scene.update()
 
     def _remove_sign(self, item) -> None:
         """서명 우클릭 삭제 콜백 — 보관 목록에서도 뺀다.
@@ -801,8 +832,6 @@ class ESignPage(QWidget):
                 if not lst:
                     self._sign_items.pop(key, None)
                 break
-        if item in self._last_bulk:
-            self._last_bulk.remove(item)
         self._refresh_marks()
 
     def placements(self) -> Dict[Tuple[int, int], List[engine.Placement]]:
@@ -812,52 +841,15 @@ class ESignPage(QWidget):
             got = []
             for it in items:
                 try:
+                    pm, k = it.pixmap(), it.scale()
                     got.append(engine.Placement(int(getattr(it, "sign_idx", 0)),
-                                                float(it.pos().x()), float(it.pos().y())))
+                                                float(it.pos().x()), float(it.pos().y()),
+                                                pm.width() * k, pm.height() * k))
                 except RuntimeError:
                     continue
             if got:
                 out[key] = got
         return out
-
-    def _apply_to_others(self) -> None:
-        if not self._signs:
-            QMessageBox.information(self, "안내", "서명 Load 후 서명 이미지가 필요합니다."); return
-        added = engine.copy_placements(self._files, self.placements(), self._cur_file)
-        if not added:
-            QMessageBox.information(self, "안내", "적용할 곳이 없습니다.\n"
-                                    "(다른 파일에 같은 시트가 없거나, 이미 서명이 있습니다)")
-            return
-        if not self._confirm_password(): return
-        n = self.apply_placements(added)
-        self.lbl_status.setText(f"{len({k[0] for k in added})}개 파일 · {len(added)}쪽에 서명 {n}개를 놓았습니다")
-
-    def apply_placements(self, added: Dict[Tuple[int, int], List[engine.Placement]]) -> int:
-        """주어진 위치에 서명을 놓는다(일괄 적용). 반환: 놓은 서명 수."""
-        self._last_bulk = []
-        for (fi, pno), pls in added.items():
-            for pl in pls:
-                item = self._make_item(min(pl.sign, len(self._signs) - 1), pno, pl.x, pl.y)
-                self._sign_items.setdefault((fi, pno), []).append(item)
-                self._last_bulk.append(item)
-                if (fi, pno) == self._shown_key:
-                    self.scene.addItem(item)
-        self._refresh_marks()
-        return len(self._last_bulk)
-
-    def _undo_bulk(self) -> None:
-        items, self._last_bulk = self._last_bulk, []
-        for item in items:
-            for key, lst in list(self._sign_items.items()):
-                if item in lst:
-                    lst.remove(item)
-                    if not lst:
-                        self._sign_items.pop(key, None)
-            try:
-                if item.scene() is self.scene: self.scene.removeItem(item)
-            except RuntimeError: pass
-        self.lbl_status.setText(f"일괄 적용한 서명 {len(items)}개를 취소했습니다")
-        self._refresh_marks()
 
     # ── ③ PDF 저장 ──────────────────────────────────────────
     def _save_pdf(self) -> None:
@@ -914,5 +906,25 @@ class ESignPage(QWidget):
             user_msg, hint = _friendly_error_msg(result)
             _ScrollableErrorDialog(self, tb, user_msg=user_msg, hint=hint).exec()
             return
+        self._last_out = out
+        self._update_buttons()
         self.lbl_status.setText("제출용 견적(PDF) Print 완료")
         QMessageBox.information(self, "완료", f"저장 완료:\n{out}")
+
+    # ── 결과 폴더 ───────────────────────────────────────────
+    def _result_folder(self) -> str:
+        """서명한 PDF 가 저장되는(된) 폴더. 아직 아무것도 불러오지 않았으면 ''."""
+        folder = os.path.dirname(self._last_out) if self._last_out else self._base_folder
+        return folder if folder and os.path.isdir(folder) else ""
+
+    def _open_folder(self) -> None:
+        folder = self._result_folder()
+        if not folder:
+            QMessageBox.information(self, "안내", "먼저 엑셀을 LOAD 하세요."); return
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(folder)                       # Windows 탐색기
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        except Exception as e:
+            QMessageBox.warning(self, "안내", f"폴더를 열지 못했습니다.\n{folder}\n\n{e}")

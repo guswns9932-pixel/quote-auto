@@ -14,7 +14,6 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import esign_engine as eng
-from test_esign_engine import _file
 
 
 @pytest.fixture()
@@ -51,10 +50,17 @@ def _signs():
     return out
 
 
+def _scaled(name, sheets):
+    """(시트, 쪽수, 인쇄배율) 로 파일을 만든다."""
+    from test_esign_engine import _pdf
+    pdf, pages = eng.merge_sheet_pdfs([(s, _pdf(n, "S%d" % k), {"zoom": z}) for k, (s, n, z) in enumerate(sheets)])
+    return eng.SignFile(path=name, pdf=pdf, pages=pages)
+
+
 def _files():
-    return [_file("/x/갑지.xlsx", [("견적서 갑지", 1)]),
-            _file("/x/1호기.xlsx", [("사양서", 1), ("현업 사인용 사양서", 1), ("입고검수확인서", 1)]),
-            _file("/x/2호기.xlsx", [("사양서", 1), ("현업 사인용 사양서", 1), ("입고검수확인서", 1)]),
+    three = [("사양서", 1, 62), ("현업 사인용 사양서", 1, 62), ("입고검수확인서", 1, 95)]
+    return [_scaled("/x/갑지.xlsx", [("견적서 갑지", 1, 73)]),
+            _scaled("/x/1호기.xlsx", three), _scaled("/x/2호기.xlsx", three),
             eng.SignFile(path="/x/깨진파일.xlsx", error="열 수 없음")]
 
 
@@ -98,20 +104,29 @@ def test_full_flow(page, tmp_path):
     page._prev_page(); page._prev_page(); page._prev_page()
     assert (page._cur_file, page._cur_page) == (1, 2)
 
-    # 1호기의 서명 위치를 2호기에 적용 → 취소 → 다시 적용
-    added = eng.copy_placements(page._files, page.placements(), 1)
-    assert sorted(added) == [(2, 0), (2, 2)]
-    assert page.apply_placements(added) == 2
-    assert "서명 2" in page.file_list.item(2).text() and page.btn_bulk_undo.isVisibleTo(page)
-    page._undo_bulk()
-    assert (2, 0) not in page.placements() and "서명" not in page.file_list.item(2).text()
-    page.apply_placements(added)
+    # 서명 크기는 시트의 인쇄 배율을 따른다 (사양서 62%, 입고검수확인서 95%)
+    pl = page.placements()
+    assert round(pl[(1, 0)][0].w, 2) == round(eng.SIGN_W_PT * 0.62, 2)
+    assert round(pl[(1, 2)][0].w, 2) == round(eng.SIGN_W_PT * 0.95, 2)
+
+    # 서명 크기 % 를 바꾸면 이미 놓은 서명도 가운데를 지키며 바뀌고, 설정에 기억된다
+    before = pl[(1, 0)][0]
+    page.spin_size.setValue(150)
+    after = page.placements()[(1, 0)][0]
+    assert round(after.w, 2) == round(eng.SIGN_W_PT * 0.62 * 1.5, 2)
+    assert round(after.x + after.w / 2, 2) == round(before.x + before.w / 2, 2)
+    assert round(after.y + after.h / 2, 2) == round(before.y + before.h / 2, 2)
+    import app_settings
+    assert app_settings.get_int(app_settings.Key.ESIGN_SIGN_PCT) == 150
+    page.spin_size.setValue(100)
 
     # 서명 하나를 끌어 옮기면 저장 위치도 따라간다
-    page.file_list.setCurrentRow(2)
-    moved = page._sign_items[(2, 0)][0]
+    page.file_list.setCurrentRow(1)
+    moved = page._sign_items[(1, 0)][0]
     moved.setPos(50, 60)
-    assert page.placements()[(2, 0)][0] == eng.Placement(0, 50.0, 60.0)
+    w0, h0 = eng.sign_size(0.62)
+    got = page.placements()[(1, 0)][0]
+    assert (got.sign, got.x, got.y) == (0, 50.0, 60.0) and round(got.w, 2) == round(w0, 2)
 
     # 저장
     out = str(tmp_path / "out.pdf")
@@ -119,10 +134,11 @@ def test_full_flow(page, tmp_path):
     _wait(page._pdf_thread)
     doc = fitz.open(out)
     assert doc.page_count == 7                                   # 1 + 3 + 3 (실패 파일 제외)
-    assert [len(p.get_image_info()) for p in doc] == [0, 1, 0, 1, 1, 0, 1]
-    box = doc[4].get_image_info()[0]["bbox"]
-    assert [round(v, 1) for v in box] == [50.0, 60.0, 50.0 + eng.SIGN_W_PT, 60.0 + eng.SIGN_H_PT]
-    assert doc[1].get_pixmap(clip=fitz.Rect(110, 705, 120, 715)).pixel(2, 2)[:3] == (208, 0, 0)
+    assert [len(p.get_image_info()) for p in doc] == [0, 1, 0, 1, 0, 0, 0]
+    box = doc[1].get_image_info()[0]["bbox"]
+    # 화면용 서명 그림이 정수 픽셀이라 높이에 0.1pt 안쪽의 반올림 차이가 있을 수 있다
+    assert all(abs(a - b) < 0.2 for a, b in zip(box, (50.0, 60.0, 50.0 + w0, 60.0 + h0)))
+    assert doc[1].get_pixmap(clip=fitz.Rect(55, 62, 60, 66)).pixel(2, 2)[:3] == (208, 0, 0)
     doc.close()
     assert page.btn_save.isEnabled() is True
 
@@ -146,6 +162,23 @@ def test_remove_sign_and_reset(page):
     assert page.file_list.count() == 0 and page.page_list.count() == 0
     assert page._signs == [] and page.btn_save.isEnabled() is False
     assert page.lbl_code_state.text() == "서명 미로드"
+
+
+def test_open_result_folder(page, tmp_path, monkeypatch):
+    """결과 폴더 열기 — 불러오기 전에는 꺼져 있고, 저장하면 그 PDF 의 폴더를 연다."""
+    import page_esign
+    opened = []
+    monkeypatch.setattr(page_esign.os, "startfile", opened.append, raising=False)
+    assert page.btn_open.isEnabled() is False
+    page.set_sign_images(_signs())
+    page.show_files(_files())
+    out_dir = tmp_path / "결과"
+    out_dir.mkdir()
+    page.save_to(str(out_dir / "out.pdf"))
+    _wait(page._pdf_thread)
+    assert page.btn_open.isEnabled() is True
+    page.btn_open.click()
+    assert opened == [str(out_dir)]
 
 
 def test_close_does_not_wait_for_cleanup(page):

@@ -116,5 +116,6 @@ class Key:
     REQUEST_PATH    = "paths/request"
     OUTPUT_DIR      = "paths/output_dir"
     ESIGN_DIR       = "paths/esign_dir"
+    ESIGN_SIGN_PCT  = "esign/sign_size_pct"
     AUTOLOAD_TEMPLATE = "quote/autoload_template"
     LAST_SEEN_UPDATE  = "app/last_seen_update"

@@ -54,16 +54,30 @@ def test_render_page_size_follows_zoom():
     doc.close()
 
 
-def test_copy_placements_matches_sheet_and_keeps_existing():
-    files = [_file("1.xlsx", [("사양서", 1), ("입고검수확인서", 1)]),
-             _file("2.xlsx", [("입고검수확인서", 1), ("사양서", 1)]),      # 시트 순서가 달라도
-             _file("3.xlsx", [("사양서", 1)])]
-    a, b = eng.Placement(0, 100, 700), eng.Placement(1, 300, 650)
-    mine = eng.Placement(0, 10, 10)
-    placements = {(0, 0): [a], (0, 1): [b], (2, 0): [mine]}
-    added = eng.copy_placements(files, placements, 0)
-    assert added == {(1, 0): [b], (1, 1): [a]}          # 3번 파일은 이미 서명이 있어 그대로
-    assert eng.copy_placements(files, {}, 0) == {}
+def test_print_scale():
+    # 배율을 직접 지정한 시트 (갑지 73%)
+    assert eng.print_scale({"zoom": 73}, 595, 842) == 0.73
+    # 한 쪽 너비에 맞춤, 높이는 자동 — 여백 뺀 너비 / 인쇄영역 너비, 1% 단위 내림
+    info = {"zoom": False, "wide": 1, "tall": False, "left": 50.4, "right": 50.4,
+            "top": 54, "bottom": 54, "area_w": 797.0, "area_h": 600.0}
+    assert eng.print_scale(info, 595, 842) == 0.62
+    # 너비·높이 모두 맞춤이면 더 많이 줄여야 하는 쪽을 따른다
+    assert eng.print_scale(dict(info, tall=1, area_h=1500.0), 595, 842) == 0.48
+    # 맞춤이어도 늘리지는 않는다 / 설정을 못 읽으면 100%
+    assert eng.print_scale(dict(info, area_w=100.0), 595, 842) == 1.0
+    assert eng.print_scale({}, 595, 842) == 1.0
+
+
+def test_sign_size_follows_sheet_scale_and_user_percent():
+    assert eng.sign_size(1.0) == (eng.SIGN_W_PT, eng.SIGN_H_PT)
+    w, h = eng.sign_size(0.62, 110)
+    assert round(w, 2) == round(eng.SIGN_W_PT * 0.62 * 1.1, 2) and round(h / w, 4) == round(eng.SIGN_H_PT / eng.SIGN_W_PT, 4)
+
+
+def test_merge_records_scale_per_sheet():
+    pdf, pages = eng.merge_sheet_pdfs([("갑지", _pdf(1, "A"), {"zoom": 73}), ("사양서", _pdf(2, "B"), {"zoom": 62}),
+                                       ("기타", _pdf(1, "C"))])
+    assert [p.scale for p in pages] == [0.73, 0.62, 0.62, 1.0]
 
 
 def test_build_signed_pdf_puts_image_where_placed(tmp_path):
@@ -96,9 +110,20 @@ def test_build_with_nothing_to_save_leaves_no_file(tmp_path):
     assert not os.path.exists(out)
 
 
+class _FakeSetup:
+    Zoom, FitToPagesWide, FitToPagesTall = 62, False, False
+    LeftMargin = RightMargin = TopMargin = BottomMargin = 50.0
+    PrintArea = ""
+
+
+class _FakeRange:
+    Width, Height = 800.0, 600.0
+
+
 class _FakeSheet:
     def __init__(self, name, visible=True, fail=False):
         self.Name, self.Visible, self._fail = name, (-1 if visible else 0), fail
+        self.PageSetup, self.UsedRange = _FakeSetup(), _FakeRange()
 
     def ExportAsFixedFormat(self, kind, path):
         assert kind == 0
@@ -147,6 +172,7 @@ def test_export_reads_then_deletes_temp_pdfs(tmp_path):
     targets = ["견적서 갑지", "사양서", "현업 사인용 사양서", "입고검수확인서"]
     sf = eng.load_workbook_pdf(xl, str(xlsx), targets)
     assert sf.error == "" and [p.sheet for p in sf.pages] == ["사양서", "입고검수확인서"]
+    assert [p.scale for p in sf.pages] == [0.62, 0.62]          # 시트의 인쇄 배율을 함께 읽는다
     assert xl.opened[1]["ReadOnly"] is True and book.closed is False
     assert os.listdir(tmp_path) == ["견적.xlsx"]
 

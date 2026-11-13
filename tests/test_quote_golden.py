@@ -101,3 +101,20 @@ def test_template_checks(quote_template):
     import excel_io
     assert excel_io.inspect_template_losses(quote_template) == []
     assert excel_io.check_pump_price_consistency(quote_template) == []
+
+
+def test_cover_skips_excel_for_current_quotes(env, tmp_path):
+    """지금 버전이 만든 견적서는 값이 이미 들어 있어 갑지 생성 때 Excel 이 필요 없다.
+    수식만 있고 계산값이 없는 예전 파일만 Excel 이 필요하다."""
+    import shutil
+    from openpyxl import load_workbook
+    io = env["io"]
+    path = io.generate_quote(env["state"], "국내", env["items"], env["rd"])
+    assert io._needs_excel_values(path) is False
+
+    old = str(tmp_path / "old.xlsx")
+    shutil.copy(path, old)
+    wb = load_workbook(old)
+    wb["견적의뢰복사본"].cell(2, 19).value = "=사양서!F43"     # 예전 버전처럼 수식으로
+    wb.save(old)
+    assert io._needs_excel_values(old) is True

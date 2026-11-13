@@ -1323,6 +1323,45 @@ def generate_quote_multi(
     return results
 
 
+_COVER_FORMULA_COLS = (15, 16, 17, 19, 20, 21)   # 견적의뢰복사본 O/P/Q/S/T/U
+
+
+def _needs_excel_values(path: str) -> bool:
+    """이 견적서의 견적의뢰복사본 O/P/Q/S/T/U 값을 Excel 로 계산해야만 알 수 있는가.
+
+    지금 버전이 만든 견적서는 이 칸들에 계산값을 직접 써 두므로(_fill_domestic ⑤-a)
+    파일만 읽으면 된다. Excel 이 필요한 것은 칸이 수식인데 저장된 계산값이 없는
+    경우뿐이다 — 예전 버전이 만들고 Excel 에서 한 번도 저장하지 않은 파일.
+
+    Excel 을 띄웠다 끄는 데 환경에 따라 수십 초가 걸리므로(실측: 종료에만 50초),
+    필요 없는 파일 때문에 띄우지 않으려고 미리 가려낸다. 판단할 수 없으면
+    True(Excel 사용)로 돌려 예전 동작을 유지한다.
+    """
+    try:
+        wb = load_workbook(path, read_only=True)
+        try:
+            if SheetName.REQ_COPY not in wb.sheetnames:
+                return False            # 어차피 읽을 수 없는 파일 — 뒤에서 누락으로 보고된다
+            row = next(wb[SheetName.REQ_COPY].iter_rows(min_row=2, max_row=2, max_col=21,
+                                                         values_only=True), ())
+        finally:
+            wb.close()
+        formula_cols = [c for c in _COVER_FORMULA_COLS
+                        if len(row) >= c and isinstance(row[c - 1], str) and row[c - 1].startswith("=")]
+        if not formula_cols:
+            return False
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            cached = next(wb[SheetName.REQ_COPY].iter_rows(min_row=2, max_row=2, max_col=21,
+                                                            values_only=True), ())
+        finally:
+            wb.close()
+        return any(len(cached) < c or cached[c - 1] is None for c in formula_cols)
+    except Exception as e:
+        logger.warning("Excel 필요 여부 판단 실패 (%s): %s — Excel 로 읽는다", path, e)
+        return True
+
+
 def _generate_cover_impl(
     template_path : str,
     folder        : str,
@@ -1363,13 +1402,14 @@ def _generate_cover_impl(
     # data_only=True 로 열면 O/P/Q/S/T/U 열(15,16,17,19,20,21)이 None 반환.
     # COM 세션을 열어 Excel 이 fullCalcOnLoad 재계산한 값을 직접 읽는다.
     # {abs_path.lower(): {col: value}}
-    _FORMULA_COLS = (15, 16, 17, 19, 20, 21)
+    _FORMULA_COLS = _COVER_FORMULA_COLS
+    _need_excel = [p for p in clean if _needs_excel_values(p)]
     _com_vals: Dict[str, Dict[int, Any]] = {}
 
     # 구간별 소요시간 — Excel 을 쓰는 경로라 개발 PC 에서 재현할 수 없어,
     # 느리다는 제보가 오면 로그의 이 한 줄로 어디가 느린지 가린다.
     _t0 = time.perf_counter()
-    _com_ok = excel_com._ensure_com()
+    _com_ok = bool(_need_excel) and excel_com._ensure_com()
     _ms_load = (time.perf_counter() - _t0) * 1000
     _ms_start = _ms_open = _ms_wbopen = _ms_read = _ms_close = _ms_quit = 0.0
     if _com_ok:
@@ -1383,7 +1423,7 @@ def _generate_cover_impl(
             _t = time.perf_counter()
             _xl.Visible = False
             _xl.DisplayAlerts = False
-            for _p in clean:
+            for _p in _need_excel:
                 _pkey = os.path.abspath(_p).lower()
                 _row: Dict[int, Any] = {}
                 try:
@@ -1520,6 +1560,7 @@ def _generate_cover_impl(
     restore_header_footer_images(template_path, out_path)
     logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
                 out_path, write_row - 2, len(failed))
+    logger.info("갑지: Excel 로 값을 읽은 원본 %d건 / 전체 %d건", len(_need_excel), len(clean))
     logger.info("갑지 소요: COM 로드 %.0fms / Excel 기동 %.0fms / 원본 열기·종료 %.0fms "
                 "(파일 열기 %.0f, 값 읽기 %.0f, 파일 닫기 %.0f, Excel 종료 %.0f) / "
                 "갑지 작성·저장 %.0fms", _ms_load, _ms_start, _ms_open,

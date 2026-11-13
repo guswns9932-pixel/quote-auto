@@ -1366,12 +1366,21 @@ def _generate_cover_impl(
     _FORMULA_COLS = (15, 16, 17, 19, 20, 21)
     _com_vals: Dict[str, Dict[int, Any]] = {}
 
-    if excel_com._ensure_com():
+    # 구간별 소요시간 — Excel 을 쓰는 경로라 개발 PC 에서 재현할 수 없어,
+    # 느리다는 제보가 오면 로그의 이 한 줄로 어디가 느린지 가린다.
+    _t0 = time.perf_counter()
+    _com_ok = excel_com._ensure_com()
+    _ms_load = (time.perf_counter() - _t0) * 1000
+    _ms_start = _ms_open = 0.0
+    if _com_ok:
         _xl = None
         _wb_c = _ws_c = None
         try:
+            _t = time.perf_counter()
             excel_com.pythoncom.CoInitialize()
             _xl = excel_com.win32.DispatchEx("Excel.Application")
+            _ms_start = (time.perf_counter() - _t) * 1000
+            _t = time.perf_counter()
             _xl.Visible = False
             _xl.DisplayAlerts = False
             for _p in clean:
@@ -1422,6 +1431,8 @@ def _generate_cover_impl(
                 excel_com.pythoncom.CoUninitialize()
             except Exception:
                 pass
+            _ms_open = (time.perf_counter() - _t0) * 1000 - _ms_load - _ms_start
+    _t_fill = time.perf_counter()
 
     # 템플릿 복사 후 openpyxl 로 편집
     _copy_template(template_path, out_path)
@@ -1501,6 +1512,9 @@ def _generate_cover_impl(
     restore_header_footer_images(template_path, out_path)
     logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
                 out_path, write_row - 2, len(failed))
+    logger.info("갑지 소요: COM 로드 %.0fms / Excel 기동 %.0fms / 원본 열기·종료 %.0fms / "
+                "갑지 작성·저장 %.0fms", _ms_load, _ms_start, _ms_open,
+                (time.perf_counter() - _t_fill) * 1000)
     return out_path, failed
 
 

@@ -147,6 +147,100 @@ def inspect_template_losses(path: str) -> List[str]:
     return out
 
 
+# ──────────────────────────────────────────────
+# 그림 보존 안전장치
+# ──────────────────────────────────────────────
+# openpyxl 은 Pillow(PIL)가 없으면 파일을 읽을 때 그림을 전부 버리고, 아무 경고 없이
+# 그림 없는 파일을 저장한다. 실제로 빌드에서 Pillow 를 뺐다가 로고가 빠진 견적서가
+# 나갔다. 두 겹으로 막는다:
+#   ① 시작 전에  Pillow 를 쓸 수 없으면 만들지 않는다 (_require_image_support)
+#   ② 저장한 뒤  그림 수가 양식과 같은지 센다 — 원인이 무엇이든 빠지면 멈춘다 (_verify_images)
+_VECTOR_IMAGE_EXT = (".emf", ".wmf")     # openpyxl 이 원래 못 살리는 형식 — 양식 점검에서 따로 경고한다
+
+
+def _require_image_support() -> None:
+    try:
+        from openpyxl.drawing import image as _img
+        ok = bool(_img.PILImage)
+    except Exception:
+        ok = False
+    if not ok:
+        raise RuntimeError(
+            "그림 처리 모듈(Pillow)을 쓸 수 없어 작업을 중단했습니다.\n"
+            "이대로 저장하면 로고 등 그림이 모두 빠진 파일이 만들어집니다.\n"
+            "프로그램을 다시 빌드/설치해야 합니다 (빌드에 Pillow 포함 필요).")
+
+
+def count_sheet_images(path: str) -> Dict[str, int]:
+    """xlsx 의 시트별 그림 수 (벡터 그림 제외). 파일을 압축 풀지 않고 구조만 읽는다."""
+    import posixpath
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    rel_tag = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+    rid_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+    out: Dict[str, int] = {}
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+
+        def rels(part: str) -> List[Tuple[str, str]]:
+            """part 가 가리키는 대상들: [(관계 id, 절대 경로)]"""
+            rp = posixpath.join(posixpath.dirname(part), "_rels", posixpath.basename(part) + ".rels")
+            if rp not in names:
+                return []
+            got = []
+            for r in ET.fromstring(z.read(rp)).iter(rel_tag):
+                tgt = r.get("Target") or ""
+                if r.get("TargetMode") == "External":
+                    continue
+                full = tgt.lstrip("/") if tgt.startswith("/") else posixpath.normpath(
+                    posixpath.join(posixpath.dirname(part), tgt))
+                got.append((r.get("Id"), full))
+            return got
+
+        wb_rels = dict(rels("xl/workbook.xml"))
+        for sh in ET.fromstring(z.read("xl/workbook.xml")).iter(main + "sheet"):
+            part = wb_rels.get(sh.get(rid_attr), "")
+            n = 0
+            for _rid, drawing in rels(part):
+                if "/drawings/drawing" not in "/" + drawing:
+                    continue
+                n += sum(1 for _r, media in rels(drawing)
+                         if "/media/" in "/" + media and not media.lower().endswith(_VECTOR_IMAGE_EXT))
+            out[sh.get("name")] = n
+    return out
+
+
+_image_count_cache: Dict[str, Tuple[Tuple[float, int], Dict[str, int]]] = {}
+
+
+def _template_image_counts(path: str) -> Dict[str, int]:
+    st = os.stat(path)
+    stamp = (st.st_mtime, st.st_size)
+    hit = _image_count_cache.get(path)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    counts = count_sheet_images(path)
+    _image_count_cache[path] = (stamp, counts)
+    return counts
+
+
+def _verify_images(src_path: str, out_path: str) -> None:
+    """out_path 에 남은 시트마다 그림 수가 src_path(양식)와 같은지 확인한다. 다르면 오류."""
+    want = _template_image_counts(src_path)
+    got = count_sheet_images(out_path)
+    lost = [f"{name}: {want[name]}개 → {n}개" for name, n in got.items()
+            if name in want and n != want[name]]
+    if lost:
+        raise RuntimeError(
+            "저장한 파일에서 그림이 빠졌습니다 — 파일을 쓰지 마세요.\n  "
+            + "\n  ".join(lost)
+            + "\n(양식의 그림이 생성물로 옮겨지지 않았습니다. 프로그램 빌드에 Pillow 가 "
+              "들어 있는지 확인이 필요합니다.)")
+
+
 def _at(row: tuple, col: int) -> Any:
     """values_only 로 읽은 한 행에서 col 번째(1부터) 값. 행이 짧으면 None."""
     return row[col - 1] if 0 < col <= len(row) else None
@@ -353,6 +447,7 @@ def append_code_map_rows(
 
     반환: (added, skipped) — 실제로 추가된 (품목,수량) 목록 / 중복이라 건너뛴 목록.
     """
+    _require_image_support()        # 통합양식을 다시 저장한다 — 그림이 빠지면 양식이 망가진다
     wb = load_workbook(template_path)
     cfg = quote_config.from_workbook(wb)
     ws = wb[cfg["sheet.code_map"]]
@@ -404,6 +499,12 @@ def append_code_map_rows(
         raise
     wb.close()
     restore_header_footer_images(backup_path, template_path)
+    try:
+        _verify_images(backup_path, template_path)
+    except Exception:
+        # 통합양식 자체가 망가진 채로 남으면 이후 모든 견적서에서 그림이 빠진다 → 되돌린다
+        shutil.copy2(backup_path, template_path)
+        raise
     return added, skipped
 
 
@@ -1077,6 +1178,7 @@ def _fill_domestic(state: QuoteState,
     if wb_cache is None:
         wb.close()          # 재사용 워크북은 호출자가 닫는다
     restore_header_footer_images(state.template_path, path)
+    _verify_images(state.template_path, path)
     logger.info("국내 견적서 생성: %s", path)
     return path
 
@@ -1172,6 +1274,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     wb.save(path)
     wb.close()
     restore_header_footer_images(state.template_path, path)
+    _verify_images(state.template_path, path)
     logger.info("중국 견적서 생성: %s", path)
     return path
 
@@ -1233,6 +1336,7 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     wb.save(path)
     wb.close()
     restore_header_footer_images(state.template_path, path)
+    _verify_images(state.template_path, path)
     logger.info("미국 견적서 생성: %s", path)
     return path
 
@@ -1248,6 +1352,7 @@ def generate_quote(
     rd      : Dict[str, Any],
 ) -> str:
     """견적서 1건 생성 → 저장 → 경로 반환."""
+    _require_image_support()
     try:
         if qtype == "중국":
             out = _fill_china(state, items)
@@ -1274,6 +1379,7 @@ def generate_quote_multi(
     반환: [(rd, saved_path, error), ...]
       성공: error="" / 실패: saved_path="" 이고 error 에 사유
     """
+    _require_image_support()
     results: List[Tuple[Dict[str, Any], str, str]] = []
     total = len(request_rows)
 
@@ -1587,6 +1693,7 @@ def _generate_cover_impl(
     wb.save(out_path)
     wb.close()
     restore_header_footer_images(template_path, out_path)
+    _verify_images(template_path, out_path)
     logger.info("갑지 생성: %s (원본 %d건, 누락 %d건)",
                 out_path, write_row - data_start, len(failed))
     logger.info("갑지: Excel 로 값을 읽은 원본 %d건 / 전체 %d건", len(_need_excel), len(clean))
@@ -1651,6 +1758,7 @@ def _export_cover_data_sheet_impl(src_path: str, template_path: Optional[str] = 
 
 def generate_cover(*args, **kwargs) -> Tuple[str, List[Tuple[str, str]]]:
     """generate_cover 래퍼 — 실패 시 미완성 갑지 파일을 지운다."""
+    _require_image_support()
     try:
         out = _generate_cover_impl(*args, **kwargs)
     except BaseException:
@@ -1662,6 +1770,7 @@ def generate_cover(*args, **kwargs) -> Tuple[str, List[Tuple[str, str]]]:
 
 def export_cover_data_sheet(*args, **kwargs) -> str:
     """export_cover_data_sheet 래퍼 — 실패 시 미완성 파일을 지운다."""
+    _require_image_support()
     try:
         out = _export_cover_data_sheet_impl(*args, **kwargs)
     except BaseException:

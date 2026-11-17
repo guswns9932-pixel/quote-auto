@@ -205,13 +205,33 @@ def test_profile_matches_what_the_app_really_imports(key):
     assert entry in seen
 
 
-def test_quote_app_no_longer_ships_unused_libraries():
-    """견적서작성이 무거웠던 이유 — 쓰지 않는 PDF·그림·브라우저 자동화 라이브러리를 싣고 있었다."""
-    calls, profiles = _run_spec("quote")
+# 우리 코드가 직접 부르지 않아 위의 검사로는 안 보이는 것 — 라이브러리가 안에서 필요로 한다.
+#   우리 모듈 → 그 모듈이 든 빌드에 반드시 들어가야 하는 라이브러리
+# excel_io 는 openpyxl 로 엑셀을 '다시 저장'한다. openpyxl 은 PIL 이 없으면 그림을 전부 버린다.
+INDIRECT_NEEDS = {"excel_io": ["PIL"]}
+
+
+@pytest.mark.parametrize("only", ["", "quote"])
+def test_builds_that_rewrite_excel_files_ship_the_image_library(only):
+    """Pillow 를 '안 쓰는 것'으로 보고 뺐다가 로고 없는 견적서가 나갔다 — 다시는 빠지지 않게 한다."""
+    calls, _profiles = _run_spec(only)
     a = next(c for c in calls if c.kind == "Analysis")
-    for lib in ("fitz", "PIL", "selenium", "webdriver_manager", "pyautogui"):
+    entry = "app_main" if not only else "run_quote"
+    seen, _third, _by = _closure(entry)
+    for mod, libs in INDIRECT_NEEDS.items():
+        assert mod in seen
+        for lib in libs:
+            assert not any(lib == e or lib.startswith(e + ".") for e in a.kw["excludes"]), lib
+            assert ("b:" + lib, ".") in a.kw["binaries"] and ("d:" + lib, ".") in a.kw["datas"], lib
+            assert "h:" + lib in a.kw["hiddenimports"], lib
+
+
+def test_quote_app_does_not_ship_browser_automation_or_pdf():
+    """견적서작성이 정말로 쓰지 않는 것만 뺀다 (브라우저 자동화, PDF)."""
+    calls, _profiles = _run_spec("quote")
+    a = next(c for c in calls if c.kind == "Analysis")
+    for lib in ("fitz", "selenium", "webdriver_manager", "pyautogui"):
         assert lib in a.kw["excludes"], lib
-        assert not any(lib in str(x) for x in a.kw["hiddenimports"]), lib
         assert not any(("b:" + lib) == b[0] for b in a.kw["binaries"]), lib
     assert ("b:openpyxl", ".") in a.kw["binaries"]
 

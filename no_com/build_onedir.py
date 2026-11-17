@@ -108,8 +108,11 @@ ICON = r"@ICON@" or None
 
 openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
 fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
-# PIL·selenium·webdriver_manager 는 이제 어느 앱도 쓰지 않는다(전자서명은 PDF 방식,
-# 결재상신 자동화는 보관함으로). 예전에는 견적서작성에 통째로 실려 무거웠다.
+# PIL(Pillow): 우리 코드는 직접 부르지 않지만 openpyxl 이 그림을 읽을 때 쓴다. 없으면
+# openpyxl 은 경고도 없이 그림을 전부 버리고 저장한다 — 견적서·갑지의 로고가 사라진다.
+# 한 번 빼 봤다가 실제로 그림 없는 견적서가 나갔다. 엑셀을 다시 저장하는 앱에는 반드시 넣는다.
+pil_d,      pil_b,      pil_h      = collect_all("PIL")
+# selenium·webdriver_manager·pyautogui 는 어느 앱도 쓰지 않는다(결재상신 자동화는 보관함으로).
 
 # MSVC 런타임 DLL 명시적 수집 (side-by-side 구성 오류 방지)
 _py_dir = os.path.dirname(sys.executable)
@@ -189,15 +192,15 @@ _PROFILES = [
             "widgets", "core", "excel_io", "excel_com",
             "quote_config", "quote_calc", "quote_review", "quote_panels",
             "openpyxl.cell._writer",
-            *openpyxl_h,
+            *openpyxl_h, *pil_h,
         ],
-        # 견적서작성은 엑셀(openpyxl)과 Excel COM 만 쓴다 — PDF·그림·브라우저 자동화 없음
+        # 견적서작성은 엑셀(openpyxl + 그림용 PIL)과 Excel COM 을 쓴다 — PDF·브라우저 자동화 없음
         excludes=_COMMON_EXCLUDES + _NO_TK + [
             "content_search", "csp_order_maker", "csp_core", "page_esign", "esign_engine",
-            "fitz", "PIL", "selenium", "webdriver_manager", "pyautogui",
+            "fitz", "selenium", "webdriver_manager", "pyautogui",
         ],
-        binaries=[*openpyxl_b, *_pywin32_dlls],
-        datas=[*openpyxl_d],
+        binaries=[*openpyxl_b, *pil_b, *_pywin32_dlls],
+        datas=[*openpyxl_d, *pil_d],
     ),
     dict(
         key="esign", script="run_esign.py", exe=APP_NAME + "_esign",
@@ -261,7 +264,7 @@ else:
         _merged["datas"] += [d for d in _p["datas"] if d not in _merged["datas"]]
     # 앱마다 제외 목록이 다르다(한 앱이 안 쓰는 것을 다른 앱은 쓴다) → 아무도 안 쓰는 것만 제외
     _merged["excludes"] = list(_COMMON_EXCLUDES) + [
-        "PIL", "selenium", "webdriver_manager", "pyautogui"]
+        "selenium", "webdriver_manager", "pyautogui"]
     _PROFILES = [_merged]
     COLLECT_NAME = APP_NAME
 

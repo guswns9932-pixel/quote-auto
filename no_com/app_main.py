@@ -1,7 +1,7 @@
 """
 app_main.py
 ===========
-단일 exe 빌드(build_onedir.py --single)의 진입점.
+기본 빌드(build_onedir.py <이름>)의 진입점 — exe 하나에 런처와 앱 전부가 들어간다.
 
 exe 하나(해시 하나)로 런처와 4개 앱을 모두 실행한다. 런처가 이 exe 를
 `--quote` 등의 인자로 다시 실행하면 해당 앱만 띄운다. [중요] 인자를 보기 전에
@@ -29,6 +29,7 @@ def main() -> None:
             importlib.import_module(mod_name).main()
             return
     import main as launcher
+    launcher.ALL_IN_ONE = True      # 앱을 띄울 때 이 exe 를 --<앱> 으로 다시 실행하게 한다
     launcher.main()
 
 

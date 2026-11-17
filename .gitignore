@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+# 통합양식·출력물 등 대외비 자료 (테스트용 로컬 보관, 저장소에 올리지 않는다)
+tests/_local/

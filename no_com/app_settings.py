@@ -116,5 +116,7 @@ class Key:
     REQUEST_PATH    = "paths/request"
     OUTPUT_DIR      = "paths/output_dir"
     ESIGN_DIR       = "paths/esign_dir"
+    # v2: 기본 크기를 바꾸면서 키를 새로 했다(예전 값에 다시 곱해지지 않도록)
+    ESIGN_SIGN_PCT  = "esign/sign_size_pct_v2"
     AUTOLOAD_TEMPLATE = "quote/autoload_template"
     LAST_SEEN_UPDATE  = "app/last_seen_update"

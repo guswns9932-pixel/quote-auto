@@ -45,6 +45,14 @@ def _find_templates():
             continue
         if {"사양서", "견적의뢰복사본", "품목"} <= sheets:
             found.setdefault("quote", path)
+            # 중국 갑지가 목록형(15행이 머리글)으로 바뀐 양식(ver.2.1~)은 따로 기억한다
+            try:
+                wb2 = load_workbook(path, read_only=True)
+                if "중국 견적서 갑지" in wb2.sheetnames and wb2["중국 견적서 갑지"]["B15"].value == "Process":
+                    found.setdefault("quote_cn_cover", path)
+                wb2.close()
+            except Exception:
+                pass
         elif {"Sheet1", "FSC매핑", "CIP"} <= sheets:
             found.setdefault("csp", path)
     return found
@@ -63,6 +71,12 @@ def _template(kind):
 @pytest.fixture(scope="session")
 def quote_template():
     return _template("quote")
+
+
+@pytest.fixture(scope="session")
+def quote_template_cn_cover():
+    """중국 갑지 시트가 목록형인 견적서 통합양식 (ver.2.1 이후)."""
+    return _template("quote_cn_cover")
 
 
 @pytest.fixture(scope="session")

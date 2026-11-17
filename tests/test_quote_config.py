@@ -86,7 +86,7 @@ def test_every_key_is_used_by_the_code():
     for name in ("excel_io.py", "page_quote.py", "quote_review.py"):
         with open(os.path.join(NO_COM, name), encoding="utf-8") as f:
             src += f.read()
-    prefixes = set(re.findall(r'"((?:codemap|copy)\.col_)" \+', src))       # 조립해서 쓰는 키
+    prefixes = set(re.findall(r'"((?:codemap|copy|cncover)\.col_)" \+', src))       # 조립해서 쓰는 키
     prefixes |= {m + "." for m in re.findall(r'_write_lines\(ws, cfg, "(\w+)"', src)}
     unused = [k for k in qc.DEFAULTS
               if f'"{k}"' not in src and not any(k.startswith(p) for p in prefixes)]

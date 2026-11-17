@@ -11,10 +11,10 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QEvent, QPoint, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QDate, QEvent, QPoint, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QDateEdit, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit,
@@ -175,27 +175,55 @@ class ChinaOptionsDialog(QDialog):
         self._tool    = QLineEdit(cn.get("tool", ""))
         self._line    = QLineEdit(cn.get("line", ""))
         self._quote_no = QLineEdit(cn.get("quote_no", ""))
-        self._delivery = QLineEdit(cn.get("delivery", ""))
         self._to       = QLineEdit(cn.get("to", ""))
-        for w in (self._quote_no, self._delivery, self._to):
+        for w in (self._quote_no, self._to):
             w.setPlaceholderText("비우면 양식에 적힌 그대로")
+        # Delivery date 는 날짜로 받는다. 체크를 끄면 '입력 안 함' — 양식의 빨간 '입력필요' 가 남는다.
+        saved = QDate.fromString(str(cn.get("delivery", "")), "yyyy-MM-dd")
+        self._delivery_on = QCheckBox("입력")
+        self._delivery_on.setChecked(saved.isValid())
+        self._delivery = QDateEdit(saved if saved.isValid() else QDate.currentDate())
+        self._delivery.setCalendarPopup(True)
+        self._delivery.setDisplayFormat("yyyy-MM-dd")
+        self._delivery.setEnabled(saved.isValid())
+        self._delivery_on.toggled.connect(self._delivery.setEnabled)
+        date_row = QWidget()
+        dh = QHBoxLayout(date_row); dh.setContentsMargins(0, 0, 0, 0)
+        dh.addWidget(self._delivery_on); dh.addWidget(self._delivery, 1)
         form.addRow("Maker",    self._maker)
         form.addRow("Process",  self._process)
         form.addRow("설비호기", self._tool)
         form.addRow("라인",     self._line)
         form.addRow("Quote number",  self._quote_no)
-        form.addRow("Delivery date", self._delivery)
+        form.addRow("Delivery date", date_row)
         form.addRow("받는 사람(To)", self._to)
         root.addLayout(form)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
-        root.addWidget(bb)
+
+        # 아래 줄: [중국갑지] ......... [OK] [Cancel] 순서를 직접 잡는다
+        # (버튼 상자에 맡기면 운영체제마다 순서가 달라진다)
+        self.on_cover = None                    # 중국갑지 버튼을 눌렀을 때 부를 함수
+        self.btn_cover = QPushButton("중국갑지")
+        self.btn_cover.setToolTip("중국 견적서 파일들을 골라 '중국 견적서 갑지' 한 장으로 모읍니다.")
+        self.btn_cover.setAutoDefault(False)
+        self.btn_cover.clicked.connect(self._on_cover_clicked)
+        self.btn_ok = QPushButton("OK"); self.btn_ok.setDefault(True)
+        self.btn_cancel = QPushButton("Cancel"); self.btn_cancel.setAutoDefault(False)
+        self.btn_ok.clicked.connect(self.accept); self.btn_cancel.clicked.connect(self.reject)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.btn_cover); row.addWidget(self.btn_ok); row.addWidget(self.btn_cancel)
+        root.addLayout(row)
+
+    def _on_cover_clicked(self) -> None:
+        if self.on_cover is not None:
+            self.on_cover(self)
 
     def apply(self) -> None:
         self.state.cn_info = {
             "maker": self._maker.text().strip(), "process": self._process.text().strip(),
             "tool":  self._tool.text().strip(),  "line":    self._line.text().strip(),
-            "quote_no": self._quote_no.text().strip(), "delivery": self._delivery.text().strip(),
+            "quote_no": self._quote_no.text().strip(),
+            "delivery": self._delivery.date().toString("yyyy-MM-dd") if self._delivery_on.isChecked() else "",
             "to": self._to.text().strip(),
         }
 
@@ -1716,6 +1744,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _open_options(self, focus: str = "credit") -> None:
         if focus == "cn":
             dlg = ChinaOptionsDialog(self, self.state)
+            dlg.on_cover = self._generate_cn_cover
         elif focus == "us":
             dlg = USOptionsDialog(self, self.state)
         else:
@@ -2105,6 +2134,46 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             )
         else:
             QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
+
+    def _generate_cn_cover(self, parent: Optional[QWidget] = None) -> None:
+        """중국 갑지: 중국 견적서 파일들을 골라 '중국 견적서 갑지' 한 장으로 모은다."""
+        parent = parent or self
+        if not self.state.template_path:
+            QMessageBox.warning(parent, "오류", "통합양식을 먼저 LOAD 하세요."); return
+        start = self.state.last_output_dir or exe_dir()
+        paths, _ = QFileDialog.getOpenFileNames(
+            parent, "중국 갑지에 넣을 중국 견적서 (다중)", start, "Excel Files (*.xlsx)")
+        if not paths:
+            return
+        folder = os.path.commonpath(paths)
+        if os.path.isfile(folder):
+            folder = os.path.dirname(folder)
+        self._log(f"중국 갑지 생성 시작 ({len(paths)}건) …")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            import excel_io
+            out, failed = excel_io.generate_cn_cover(self.state.template_path, folder, paths)
+        except Exception as e:
+            logger.error("중국 갑지 생성 실패", exc_info=True)
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(parent, "오류", f"중국 갑지 생성 실패:\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.state.last_output_dir = os.path.dirname(out)
+        app_settings.set_str(app_settings.Key.OUTPUT_DIR, self.state.last_output_dir)
+        self._add_done_cover(out)
+        self._log(f"중국 갑지 생성 완료: {out} (누락 {len(failed)}건)")
+        if failed:
+            # 읽지 못한 견적서는 갑지에서 빠진다 — 조용히 넘어가면 한 건 모자란 갑지가 정상으로 보인다
+            detail = "\n".join(f"  • {name}: {why}" for name, why in failed[:15])
+            if len(failed) > 15:
+                detail += f"\n  … 외 {len(failed) - 15}건"
+            QMessageBox.warning(
+                parent, "일부 누락",
+                f"중국 갑지 생성 완료\n{os.path.basename(out)}\n\n"
+                f"다음 {len(failed)}건은 읽지 못해 갑지에서 제외되었습니다:\n\n{detail}")
+        else:
+            QMessageBox.information(parent, "완료", f"중국 갑지 생성 완료\n{os.path.basename(out)}")
 
     def _export_submit_excel(self) -> None:
         """갑지DATA 시트만 추출해 제출용 엑셀 파일로 저장."""

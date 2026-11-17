@@ -22,11 +22,28 @@ def test_us_and_china_option_dialogs_round_trip():
     again = page_quote.USOptionsDialog(None, st)
     assert again._quote_no.text() == "LOT-01" and again._pr.text() == "7300001234"
 
+    from PySide6.QtCore import QDate
     c = page_quote.ChinaOptionsDialog(None, st)
-    c._quote_no.setText("CN-01"); c._delivery.setText("2026-12-20"); c._to.setText("Wang")
+    # 날짜는 처음에 '입력 안 함' — 그대로 확인하면 비어 있다
+    assert c._delivery_on.isChecked() is False and c._delivery.isEnabled() is False
+    c.apply()
+    assert st.cn_info["delivery"] == ""
+    c._quote_no.setText("CN-01"); c._to.setText("Wang")
+    c._delivery_on.setChecked(True); c._delivery.setDate(QDate(2026, 12, 20))
     c.apply()
     assert (st.cn_info["quote_no"], st.cn_info["delivery"], st.cn_info["to"]) == ("CN-01", "2026-12-20", "Wang")
-    assert page_quote.ChinaOptionsDialog(None, st)._delivery.text() == "2026-12-20"
-    for w in (d, again, c):
+    again_cn = page_quote.ChinaOptionsDialog(None, st)
+    assert again_cn._delivery_on.isChecked() and again_cn._delivery.date() == QDate(2026, 12, 20)
+
+    # 아래 줄 버튼 순서: 중국갑지 — OK — Cancel (중국갑지가 OK 의 왼쪽)
+    c.show(); app.processEvents()
+    assert c.btn_cover.text() == "중국갑지"
+    assert c.btn_cover.x() < c.btn_ok.x() < c.btn_cancel.x() and c.btn_cover.y() == c.btn_ok.y()
+    called = []
+    c.on_cover = called.append
+    c.btn_cover.click()
+    assert called == [c] and c.result() == 0            # 갑지 버튼은 창을 닫지 않는다
+    c.hide()
+    for w in (d, again, c, again_cn):
         w.deleteLater()
     app.processEvents()

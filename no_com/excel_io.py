@@ -1221,6 +1221,39 @@ def _write_text(ws, cfg: quote_config.QuoteConfig, cell_key: str, text_key: str,
     ws[cfg[cell_key]] = cfg.text(text_key, **{k: s(v) for k, v in values.items()})
 
 
+def _parse_date(value: Any) -> Optional[datetime]:
+    """'2026-12-20' 같은 글자나 날짜 값을 날짜로. 날짜가 아니면 None."""
+    if isinstance(value, datetime):
+        return value
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        return datetime(value.year, value.month, value.day)
+    text = s(value)
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _write_delivery_date(ws, cfg: quote_config.QuoteConfig, value: Any) -> None:
+    """중국 견적서의 Delivery date. 비어 있으면 양식의 빨간 '입력필요' 를 그대로 둔다.
+    입력했으면 날짜 값으로 넣고(칸의 날짜 서식이 적용된다) 글자색을 검정으로 바꾼다 —
+    빨간색은 '아직 안 넣었다'는 표시이므로 넣은 뒤에는 남기지 않는다."""
+    if s(value) == "":
+        return
+    from copy import copy
+    cell = ws[cfg["cn.cell_delivery"]]
+    when = _parse_date(value)
+    if when is not None:
+        cell.value = when
+    else:
+        cell.value = cfg.text("cn.delivery_text", 납기=s(value))      # 날짜로 읽히지 않으면 적은 그대로
+    font = copy(cell.font)
+    font.color = "FF000000"
+    cell.font = font
+
+
 def _credit_line(cr: Dict[str, Any]) -> Dict[str, Any]:
     return {"spec": cr["spec"], "qty": 0.0, "price": cr["amt"]}
 
@@ -1246,7 +1279,7 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     ws[cfg["cn.cell_tool"]]    = info.get("tool", "")
     _write_text(ws, cfg, "cn.cell_to", "cn.to_text", 받는사람=info.get("to"))
     _write_text(ws, cfg, "cn.cell_quote_no", "cn.quote_no_text", 견적번호=info.get("quote_no"))
-    _write_text(ws, cfg, "cn.cell_delivery", "cn.delivery_text", 납기=info.get("delivery"))
+    _write_delivery_date(ws, cfg, info.get("delivery"))
     _write_text(ws, cfg, "cn.cell_warranty", "cn.warranty_text", 보증=state.warranty_years)
 
     pump    = [r for r in items if r["role"] != "CREDIT" and r["cat"] == "PUMP"]
@@ -1703,6 +1736,156 @@ def _generate_cover_impl(
                 _ms_wbopen, _ms_read, _ms_close, _ms_quit,
                 (time.perf_counter() - _t_fill) * 1000)
     return out_path, failed
+
+
+def _cn_line_of(filename: str, cfg: quote_config.QuoteConfig) -> str:
+    """중국 견적서 파일 이름에서 라인을 읽는다(파일 이름 규칙 name.cn_file 기준).
+    예) 대외비_260702_중국_SCS_X2_TAAL01.xlsx → 'X2'. 규칙과 안 맞으면 ''."""
+    pattern = re.escape(cfg["name.cn_file"])
+    for name, group in (("날짜", "d"), ("라인", "line"), ("호기", "tool")):
+        pattern = pattern.replace(re.escape("{" + name + "}"), f"(?P<{group}>.+?)", 1)
+    pattern = pattern.replace(re.escape(".xlsx"), r"(?:_\d+)?\.xlsx")     # 같은 이름이 있어 _2 가 붙은 경우
+    m = re.fullmatch(pattern, filename, flags=re.IGNORECASE)
+    return m.group("line") if m and "line" in m.groupdict() else ""
+
+
+def _read_cn_quote(path: str, cfg: quote_config.QuoteConfig) -> Dict[str, Any]:
+    """중국 견적서 한 건에서 갑지에 옮길 값(공정·설비호기·수량·단가)을 읽는다.
+
+    단가 등은 수식이다. Excel 에서 저장한 파일이면 계산 결과가 들어 있으니 그것을 쓰고,
+    이 프로그램이 만든 채 그대로인 파일이면(계산 결과 없음) 수식을 따라가 직접 계산한다.
+    """
+    import formula_eval
+    sheet = cfg["sheet.quote_cn"]
+    refs = {"process": cfg["cn.cell_process"], "tool": cfg["cn.cell_tool"],
+            "qty": cfg.at("cn.col_qty", cfg["cn.pump_start"]), "price": cfg["cn.cell_unit_price"]}
+    cached = load_workbook(path, read_only=True, data_only=True)
+    try:
+        if sheet not in cached.sheetnames:
+            raise KeyError(f"'{sheet}' 시트 없음")
+        cws = cached[sheet]
+        got = {k: cws[ref].value for k, ref in refs.items()}
+    finally:
+        cached.close()
+    if any(got[k] is None for k in ("qty", "price")):
+        wb = load_workbook(path)
+        try:
+            ws = wb[sheet]
+            for k, ref in refs.items():
+                if got[k] is None:
+                    got[k] = formula_eval.cell_value(ws, ref)
+        finally:
+            wb.close()
+    if got["price"] is None or got["qty"] is None:
+        raise ValueError("단가 또는 수량이 비어 있습니다")
+    return got
+
+
+def _generate_cn_cover_impl(template_path: str, folder: str, source_files: List[str],
+                            progress_cb: Optional[Callable[[int, int, str], None]] = None
+                            ) -> Tuple[str, List[Tuple[str, str]]]:
+    """중국 갑지: 중국 견적서 여러 건의 공정·설비호기·수량·단가를 한 장에 모은다.
+
+    반환: (저장 경로, 읽기 실패 목록[(파일명, 사유)]) — 실패한 파일은 갑지에서 빠지므로
+    호출한 쪽이 반드시 알려야 한다.
+    """
+    cfg = quote_config.load(template_path)
+    row_start, row_end = cfg["cncover.row_start"], cfg["cncover.row_end"]
+    capacity = row_end - row_start + 1
+    folder_name = os.path.basename(folder.rstrip("\\/"))
+    out_path = unique_path(os.path.join(folder, cfg.text("name.cn_cover_file", 폴더=folder_name)))
+    out_base = os.path.basename(out_path).lower()
+
+    def _natural_key(text: str):
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", text)]
+
+    clean = sorted([p for p in source_files if os.path.basename(p).lower() != out_base],
+                   key=lambda p: _natural_key(os.path.basename(p)))
+    if not clean:
+        raise RuntimeError("처리할 엑셀 파일이 없습니다.")
+    if len(clean) > capacity:
+        raise ValueError(
+            f"중국 갑지 칸({capacity}행)을 초과했습니다: 견적서 {len(clean)}건. "
+            f"나눠서 만들거나 양식의 행을 늘려주세요.")
+
+    rows: List[Dict[str, Any]] = []
+    lines: List[str] = []
+    failed: List[Tuple[str, str]] = []
+    for idx, path in enumerate(clean):
+        name = os.path.basename(path)
+        if progress_cb:
+            progress_cb(idx + 1, len(clean), name)
+        try:
+            rows.append(_read_cn_quote(path, cfg))
+            line = _cn_line_of(name, cfg)
+            if line and line not in lines:
+                lines.append(line)
+        except Exception as e:
+            logger.warning("중국 갑지 원본 읽기 실패 (%s): %s", path, e)
+            failed.append((name, str(e)))
+    if not rows:
+        raise ValueError("중국 갑지에 기록할 견적서가 없습니다.\n" + "\n".join(f"{n}: {w}" for n, w in failed[:5]))
+
+    _copy_template(template_path, out_path)
+    wb = load_workbook(out_path)
+    ws = wb[cfg["sheet.cover_cn"]]
+    cols = {k: cfg["cncover.col_" + k] for k in ("process", "tool", "qty", "price")}
+
+    from openpyxl.cell.cell import MergedCell
+
+    def put(ref: str, value: Any) -> None:
+        """칸에 값을 적는다. 병합된 칸의 일부면 비우기는 건너뛰고, 값을 적어야 하면 알린다."""
+        cell = ws[ref]
+        if isinstance(cell, MergedCell):
+            if value is None:
+                return
+            raise ValueError(
+                f"'{ws.title}' 시트의 {ref} 칸이 병합돼 있어 값을 적을 수 없습니다. "
+                f"양식의 목록 칸({row_start}~{row_end}행) 병합을 풀거나 설정의 칸 위치를 확인하세요.")
+        cell.value = value
+
+    for r in range(row_start, row_end + 1):               # 양식에 들어 있던 예시 값을 비운다
+        for col in cols.values():
+            put(f"{col}{r}", None)
+    for i, got in enumerate(rows):
+        r = row_start + i
+        for key, col in cols.items():
+            put(f"{col}{r}", got[key])
+
+    # Quote number: LOT + 오늘 날짜 + SCS - 라인 - Q1~건수. 라인을 못 읽었으면 그 부분은 뺀다.
+    number = "Q1" if len(rows) == 1 else f"Q1~{len(rows)}"
+    quote_no = cfg.text("cncover.quote_no_text", 날짜=datetime.now().strftime("%y%m%d"),
+                        라인="/".join(lines), 번호=number)
+    ws[cfg["cncover.cell_quote_no"]] = re.sub(r"-{2,}", "-", quote_no).strip("-")
+
+    # 공정(B열)이 처음 비는 줄부터 마지막 줄까지 숨긴다
+    first_blank = next((r for r in range(row_start, row_end + 1)
+                        if s(ws[f"{cols['process']}{r}"].value) == ""), row_end + 1)
+    for r in range(row_start, row_end + 1):
+        ws.row_dimensions[r].hidden = (r >= first_blank)
+
+    wb.calculation.fullCalcOnLoad = True
+    _keep_only_sheets(wb, [cfg["sheet.cover_cn"]])
+    wb.active = wb[cfg["sheet.cover_cn"]]
+    _reset_sheet_selections(wb)
+    wb.save(out_path)
+    wb.close()
+    restore_header_footer_images(template_path, out_path)
+    _verify_images(template_path, out_path)
+    logger.info("중국 갑지 생성: %s (견적서 %d건, 누락 %d건)", out_path, len(rows), len(failed))
+    return out_path, failed
+
+
+def generate_cn_cover(*args, **kwargs) -> Tuple[str, List[Tuple[str, str]]]:
+    """중국 갑지 생성 — 실패 시 미완성 파일을 지운다."""
+    _require_image_support()
+    try:
+        out = _generate_cn_cover_impl(*args, **kwargs)
+    except BaseException:
+        _discard_inflight()
+        raise
+    _clear_inflight()
+    return out
 
 
 def _export_cover_data_sheet_impl(src_path: str, template_path: Optional[str] = None) -> str:

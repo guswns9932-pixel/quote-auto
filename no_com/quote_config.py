@@ -45,6 +45,7 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     ("sheet.quote_us",   "견적서_미국",        "sheet", "미국 견적서 시트"),
     ("sheet.cover_data", "갑지DATA",           "sheet", "갑지 원본 데이터 시트"),
     ("sheet.cover",      "견적서 갑지",         "sheet", "갑지 시트"),
+    ("sheet.cover_cn",   "중국 견적서 갑지",    "sheet", "중국 갑지 시트"),
     ("sheet.pump_price", "Pump 단가표",        "sheet", "PUMP 단가표 시트"),
     ("sheet.acc_price",  "악세서리 단가표",     "sheet", "악세서리 단가표 시트"),
 
@@ -134,6 +135,7 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     ("cn.cell_delivery", "G10", "cell", "중국: Delivery date 칸 (비우면 양식 그대로)"),
     ("cn.delivery_text", "{납기}", "name", "중국: Delivery date 문구"),
     ("cn.cell_warranty", "G7",  "cell", "중국: 보증기간 칸"),
+    ("cn.cell_unit_price", "F46", "cell", "중국: 단가 칸 (중국 갑지가 읽어 간다)"),
     ("cn.warranty_text", "{보증} Year after delivery", "name", "중국: 보증기간 문구"),
     ("cn.pump_start", 17, "row", "중국: PUMP 첫 행"),
     ("cn.pump_end",   19, "row", "중국: PUMP 마지막 행"),
@@ -142,6 +144,17 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     ("cn.col_spec",  "C", "col", "중국: 규격 열"),
     ("cn.col_price", "F", "col", "중국: 단가 열"),
     ("cn.col_qty",   "G", "col", "중국: 수량 열"),
+
+    # ── 중국 갑지 (중국 견적서 여러 건을 한 장에 모은다) ──────────
+    ("cncover.row_start", 16, "row", "중국 갑지: 견적 목록 첫 행"),
+    ("cncover.row_end",   45, "row", "중국 갑지: 견적 목록 마지막 행"),
+    ("cncover.col_process", "B", "col", "중국 갑지: 공정 열 (← 중국 견적서의 공정 칸)"),
+    ("cncover.col_tool",    "C", "col", "중국 갑지: 설비호기 열 (← 설비호기 칸)"),
+    ("cncover.col_qty",     "D", "col", "중국 갑지: 수량 열 (← PUMP 첫 줄의 수량)"),
+    ("cncover.col_price",   "E", "col", "중국 갑지: 단가 열 (← 단가 칸)"),
+    ("cncover.cell_quote_no", "C9", "cell", "중국 갑지: Quote number 칸"),
+    ("cncover.quote_no_text", "LOT{날짜}SCS-{라인}-{번호}", "name",
+     "중국 갑지 Quote number ({라인}=파일 이름의 라인, {번호}=Q1~건수)"),
 
     # ── 미국 견적서 ────────────────────────────────────────────
     ("us.cell_maker",    "A17", "cell", "미국: 설비사 칸"),
@@ -197,6 +210,7 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     ("name.us_folder",   "{날짜}_미국_{사이트}", "name", "미국 견적서 폴더 이름"),
     ("name.us_file",     "대외비_{날짜}_{사이트}_{호기}_Quotation.xlsx", "name", "미국 견적서 파일 이름"),
     ("name.cover_file",  "대외비_{폴더}{갑지표시}.xlsx", "name", "갑지 파일 이름"),
+    ("name.cn_cover_file", "대외비_{폴더}_중국갑지.xlsx", "name", "중국 갑지 파일 이름"),
     ("name.cover_mark",  "_갑지", "text", "갑지 파일 이름 끝에 붙는 표시 (제출용 엑셀은 이걸 뗀 이름)"),
 ]
 
@@ -216,6 +230,8 @@ _PLACEHOLDERS = {
     "name.us_folder":  ("날짜", "사이트", "호기"),
     "name.us_file":    ("날짜", "사이트", "호기"),
     "name.cover_file": ("폴더", "갑지표시"),
+    "name.cn_cover_file": ("폴더",),
+    "cncover.quote_no_text": ("날짜", "라인", "번호"),
 }
 
 DEFAULTS: Dict[str, Any] = {k: v for k, v, _, _ in _SPEC}
@@ -371,6 +387,7 @@ class QuoteConfig:
                            ("dom.sign_start", "dom.sign_end", "현업 사인용 사양서 품목 행"),
                            ("cn.pump_start", "cn.pump_end", "중국 PUMP 행"),
                            ("cn.rack_start", "cn.rack_end", "중국 RACK 행"),
+                           ("cncover.row_start", "cncover.row_end", "중국 갑지 목록 행"),
                            ("us.rack_start", "us.rack_end", "미국 RACK 행")):
             if self._values[a] > self._values[b]:
                 out.append(f"{what}의 첫 행이 마지막 행보다 큽니다 ({a}={self._values[a]}, {b}={self._values[b]})")

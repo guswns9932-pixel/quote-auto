@@ -144,8 +144,16 @@ def test_us_and_china_header_fields(env):
     assert (us["B3"].value, us["G6"].value, us["F8"].value, us["F7"].value) == (
         "홍길동 님 / 설비구매그룹", "LOT-2611-01", "PR : 7300001234", "Warranty : 3 Years after delivery")
     cn = load_workbook(io.generate_quote(st, "중국", env["items"], {}))["견적서_중국"]
+    import datetime as _dt
     assert (cn["B3"].value, cn["G6"].value, cn["G10"].value, cn["G7"].value) == (
-        "Wang / Purchasing", "CN-01", "2026-12-20", "3 Year after delivery")
+        "Wang / Purchasing", "CN-01", _dt.datetime(2026, 12, 20), "3 Year after delivery")
+    # 날짜는 글자가 아니라 날짜 값으로 들어가고(칸의 날짜 서식 적용), 빨간 글씨가 검정으로 바뀐다
+    assert cn["G10"].is_date and cn["G10"].font.color.rgb == "FF000000"
+
+    # 날짜를 안 넣으면 양식의 빨간 '입력필요' 가 그대로 남는다
+    st.cn_info = dict(blank_cn)
+    keep = load_workbook(io.generate_quote(st, "중국", env["items"], {}))["견적서_중국"]["G10"]
+    assert keep.value == "입력필요" and keep.font.color.rgb == "FFFF0000"
 
 
 def test_pump_only_hides_rack_rows_of_incoming_sheet(env):

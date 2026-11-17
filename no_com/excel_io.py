@@ -1781,6 +1781,121 @@ def _read_cn_quote(path: str, cfg: quote_config.QuoteConfig) -> Dict[str, Any]:
     return got
 
 
+def _dedupe_media(path: str) -> int:
+    """xlsx 안에 똑같은 그림이 여러 번 들어 있으면 하나만 남기고 나머지는 그것을 가리키게 한다.
+
+    견적서 시트를 여러 장 실으면 같은 로고가 시트 수만큼 따로 저장된다(30건이면 8MB).
+    그림 내용이 완전히 같은 것끼리만 합치므로 보이는 것은 달라지지 않는다.
+    반환: 없앤 그림 파일 수.
+    """
+    import hashlib
+    import zipfile
+
+    with zipfile.ZipFile(path) as z:
+        infos = z.infolist()
+        data = {i.filename: z.read(i.filename) for i in infos}
+    keep_of: Dict[str, str] = {}          # 내용 해시 → 남길 파일
+    replace: Dict[str, str] = {}          # 없앨 파일 이름(경로 없이) → 남길 파일 이름
+    for name in sorted(n for n in data if n.startswith("xl/media/")):
+        h = hashlib.sha1(data[name]).hexdigest() + os.path.splitext(name)[1].lower()
+        if h in keep_of:
+            replace[name.rsplit("/", 1)[-1]] = keep_of[h].rsplit("/", 1)[-1]
+        else:
+            keep_of[h] = name
+    if not replace:
+        return 0
+    for name in list(data):
+        if not (name.startswith("xl/drawings/_rels/") and name.endswith(".rels")):
+            continue
+        text = data[name].decode("utf-8")
+        for old, new in replace.items():
+            text = text.replace(f'media/{old}"', f'media/{new}"')
+        data[name] = text.encode("utf-8")
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        for i in infos:
+            if i.filename.startswith("xl/media/") and i.filename.rsplit("/", 1)[-1] in replace:
+                continue
+            out.writestr(i, data[i.filename])
+    os.replace(tmp, path)
+    return len(replace)
+
+
+_SHEET_TITLE_BAD = re.compile(r"[\[\]:*?/\\]")
+
+
+def _unique_sheet_title(wb, wanted: str) -> str:
+    """엑셀 시트 이름으로 쓸 수 있게 다듬고(금지 문자 제거, 31자), 이미 있으면 _2, _3 … 을 붙인다."""
+    base = _SHEET_TITLE_BAD.sub("_", wanted).strip().strip("'")[:31] or "Sheet"
+    title, n = base, 2
+    existing = {name.lower() for name in wb.sheetnames}
+    while title.lower() in existing:
+        tail = f"_{n}"
+        title = base[:31 - len(tail)] + tail
+        n += 1
+    return title
+
+
+def _add_sheet_like(wb, layout_ws, src_ws, title: str):
+    """wb 에 새 시트를 만든다: 틀(열 너비·병합·인쇄 설정·그림)은 layout_ws 에서, 내용은 src_ws 에서.
+
+    openpyxl 은 다른 파일의 시트를 통째로 옮겨 오지 못한다. 그래서 같은 파일 안에 있는
+    양식 시트를 복사해 틀을 잡고, 그 위에 원본 견적서의 칸(값·수식·서식)과 행 숨김을
+    옮겨 적는다. 시트 복사가 빠뜨리는 것(그림, 인쇄영역, 조건부 서식, 보기 설정)은 따로 옮긴다.
+    """
+    import io as _io
+    from copy import copy, deepcopy
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.drawing.image import Image
+
+    ws = wb.copy_worksheet(layout_ws)
+    ws.title = title
+
+    # 원본의 칸: 값·수식과 서식 (사람이 고친 내용, 검정으로 바뀐 날짜 글씨 등)
+    for row in src_ws.iter_rows():
+        for c in row:
+            if isinstance(c, MergedCell) or (c.value is None and not c.has_style):
+                continue
+            tgt = ws.cell(c.row, c.column)
+            if isinstance(tgt, MergedCell):
+                continue
+            tgt.value = c.value
+            if c.has_style:
+                tgt.font = copy(c.font); tgt.fill = copy(c.fill); tgt.border = copy(c.border)
+                tgt.alignment = copy(c.alignment); tgt.protection = copy(c.protection)
+                tgt.number_format = c.number_format
+    # 원본에는 없는데 틀(양식)에만 값이 있는 칸은 비운다 — 양식의 예시 값이 섞이지 않게
+    for row in ws.iter_rows():
+        for c in row:
+            if isinstance(c, MergedCell) or c.value is None:
+                continue
+            if src_ws.cell(c.row, c.column).value is None:
+                c.value = None
+    for r, dim in src_ws.row_dimensions.items():          # 원본의 행 숨김·높이
+        ws.row_dimensions[r].hidden = dim.hidden
+        if dim.height is not None:
+            ws.row_dimensions[r].height = dim.height
+
+    # 시트 복사가 옮기지 않는 것들
+    if layout_ws.print_area:
+        ws.print_area = layout_ws.print_area.split("!")[-1].replace("$", "")
+    ws.conditional_formatting = deepcopy(layout_ws.conditional_formatting)
+    ws.sheet_view.view = layout_ws.sheet_view.view
+    ws.sheet_view.zoomScale = layout_ws.sheet_view.zoomScale
+    ws.sheet_view.zoomScaleNormal = layout_ws.sheet_view.zoomScaleNormal
+    ws.sheet_view.zoomScaleSheetLayoutView = layout_ws.sheet_view.zoomScaleSheetLayoutView
+    ws.sheet_view.showGridLines = layout_ws.sheet_view.showGridLines
+    ws.sheet_view.tabSelected = False
+    for img in getattr(layout_ws, "_images", []):
+        data = img._data()
+        new = Image(_io.BytesIO(data))
+        new._data = lambda _d=data: _d                    # 저장을 여러 번 해도 읽히도록 고정
+        new.anchor = deepcopy(img.anchor)
+        new.width, new.height = img.width, img.height
+        ws.add_image(new)
+    return ws
+
+
 def _generate_cn_cover_impl(template_path: str, folder: str, source_files: List[str],
                             progress_cb: Optional[Callable[[int, int, str], None]] = None
                             ) -> Tuple[str, List[Tuple[str, str]]]:
@@ -1816,7 +1931,9 @@ def _generate_cn_cover_impl(template_path: str, folder: str, source_files: List[
         if progress_cb:
             progress_cb(idx + 1, len(clean), name)
         try:
-            rows.append(_read_cn_quote(path, cfg))
+            got = _read_cn_quote(path, cfg)
+            got["path"] = path
+            rows.append(got)
             line = _cn_line_of(name, cfg)
             if line and line not in lines:
                 lines.append(line)
@@ -1852,6 +1969,19 @@ def _generate_cn_cover_impl(template_path: str, folder: str, source_files: List[
         for key, col in cols.items():
             put(f"{col}{r}", got[key])
 
+    # 견적서들도 같은 파일에 싣는다 — 시트 이름은 호기명. 갑지 한 파일로 전부 볼 수 있게.
+    _pin_images(wb)                                   # 같은 그림을 시트마다 다시 쓰려면 먼저 고정
+    tpl_quote = wb[cfg["sheet.quote_cn"]]
+    quote_sheets: List[str] = []
+    for i, got in enumerate(rows):
+        title = _unique_sheet_title(wb, s(got["tool"]) or f"견적서{i + 1}")
+        src_wb = load_workbook(got["path"])
+        try:
+            _add_sheet_like(wb, tpl_quote, src_wb[cfg["sheet.quote_cn"]], title)
+        finally:
+            src_wb.close()
+        quote_sheets.append(title)
+
     # Quote number: LOT + 오늘 날짜 + SCS - 라인 - Q1~건수. 라인을 못 읽었으면 그 부분은 뺀다.
     number = "Q1" if len(rows) == 1 else f"Q1~{len(rows)}"
     quote_no = cfg.text("cncover.quote_no_text", 날짜=datetime.now().strftime("%y%m%d"),
@@ -1865,13 +1995,23 @@ def _generate_cn_cover_impl(template_path: str, folder: str, source_files: List[
         ws.row_dimensions[r].hidden = (r >= first_blank)
 
     wb.calculation.fullCalcOnLoad = True
-    _keep_only_sheets(wb, [cfg["sheet.cover_cn"]])
+    n_quote_images = len(getattr(tpl_quote, "_images", []))
+    _keep_only_sheets(wb, [cfg["sheet.cover_cn"]] + quote_sheets)
+    for _sn in wb.sheetnames:                          # 갑지만 선택된 상태로 열리게 (여럿이면 '그룹' 으로 열린다)
+        wb[_sn].sheet_view.tabSelected = (_sn == cfg["sheet.cover_cn"])
     wb.active = wb[cfg["sheet.cover_cn"]]
     _reset_sheet_selections(wb)
     wb.save(out_path)
     wb.close()
     restore_header_footer_images(template_path, out_path)
+    _dedupe_media(out_path)                              # 시트마다 같은 로고 → 한 번만 저장
     _verify_images(template_path, out_path)
+    got_images = count_sheet_images(out_path)
+    lost = [f"{name}: {n_quote_images}개 → {got_images.get(name, 0)}개"
+            for name in quote_sheets if got_images.get(name, 0) != n_quote_images]
+    if lost:
+        raise RuntimeError("갑지에 실은 견적서 시트에서 그림이 빠졌습니다 — 파일을 쓰지 마세요.\n  "
+                           + "\n  ".join(lost))
     logger.info("중국 갑지 생성: %s (견적서 %d건, 누락 %d건)", out_path, len(rows), len(failed))
     return out_path, failed
 

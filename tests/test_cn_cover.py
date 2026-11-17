@@ -33,7 +33,8 @@ def test_values_are_collected_in_file_name_order(env):
     assert failed == [] and os.path.basename(out) == f"대외비_{os.path.basename(folder)}_중국갑지.xlsx"
 
     wb = load_workbook(out)
-    assert wb.sheetnames == ["중국 견적서 갑지"]                      # 단가표 등 다른 시트는 실리지 않는다
+    # 갑지 + 견적서들(시트 이름 = 호기명, 갑지의 줄 순서대로). 단가표 등 다른 시트는 실리지 않는다
+    assert wb.sheetnames == ["중국 견적서 갑지", "T2", "T10"]
     ws = wb["중국 견적서 갑지"]
 
     # 단가 = 견적서_중국!F46 = ROUNDDOWN(((PUMP + RACK) × 1.014) / 수량, -3) — 파일에 계산 결과가 없어도 구한다
@@ -50,7 +51,29 @@ def test_values_are_collected_in_file_name_order(env):
     # 공정(B열)이 비는 첫 줄부터 45행까지 숨김, 채운 줄과 합계 줄은 보인다
     hidden = [r for r in range(14, 48) if ws.row_dimensions[r].hidden]
     assert hidden == list(range(18, 46))
-    assert io.count_sheet_images(out) == {"중국 견적서 갑지": 3}      # 양식의 그림 3개 유지
+    # 양식의 그림 유지: 갑지 3개, 견적서 시트마다 3개
+    assert io.count_sheet_images(out) == {"중국 견적서 갑지": 3, "T2": 3, "T10": 3}
+
+    # 견적서 시트는 원본 견적서와 같은 내용이다 — 값·수식, 서식, 숨긴 행, 병합, 열 너비, 인쇄 설정
+    for path, title in ((a, "T2"), (b, "T10")):
+        src = load_workbook(path)["견적서_중국"]
+        dst = wb[title]
+        cells = lambda w: {c.coordinate: (str(c.value), c.number_format, c.font.b, c.font.color.rgb if c.font.color and c.font.color.type == "rgb" else None,
+                                          c.fill.fgColor.rgb if c.fill.fill_type else None, c.alignment.horizontal, c.border.bottom.style)
+                           for row in w.iter_rows() for c in row if c.value is not None}
+        assert cells(dst) == cells(src), title
+        assert dst["B51"].value == title and dst["F46"].value == src["F46"].value == "=ROUNDDOWN((H42/D46),-3)"
+        hid = lambda w: sorted(r for r, d in w.row_dimensions.items() if d.hidden)
+        assert hid(dst) == hid(src) and hid(dst), title
+        assert sorted(map(str, dst.merged_cells.ranges)) == sorted(map(str, src.merged_cells.ranges))
+        assert {k: round(v.width or 0, 2) for k, v in dst.column_dimensions.items()} == \
+               {k: round(v.width or 0, 2) for k, v in src.column_dimensions.items()}
+        assert dst.print_area.split("!")[-1] == src.print_area.split("!")[-1]
+        assert (dst.page_setup.orientation, dst.page_setup.scale, dst.page_setup.paperSize) == \
+               (src.page_setup.orientation, src.page_setup.scale, src.page_setup.paperSize)
+        assert len(dst.conditional_formatting) == len(src.conditional_formatting)
+    # 열면 갑지가 선택돼 있다 (여러 시트가 함께 선택되면 Excel 이 '그룹' 으로 연다)
+    assert [n for n in wb.sheetnames if wb[n].sheet_view.tabSelected] == ["중국 견적서 갑지"]
 
 
 def test_quote_number_follows_count_and_lines(env):
@@ -157,3 +180,48 @@ def test_older_template_with_merged_cells_does_not_crash(quote_template, tmp_pat
         assert not [f for f in os.listdir(tmp_path) if f.endswith("_중국갑지.xlsx")]
     else:
         assert failed == [] and load_workbook(out)["중국 견적서 갑지"]["C9"].value.endswith("-X2-Q1")
+
+
+def test_quote_sheets_get_safe_unique_names(env):
+    """시트 이름: 호기명이 같으면 _2 를 붙이고, 엑셀이 못 쓰는 글자는 바꾸고, 비어 있으면 번호로."""
+    io, st, tmp = env
+    files = [_make(io, st, "SAME", "CVD", 1, 1000000, 0), _make(io, st, "SAME", "CVD", 1, 2000000, 0),
+             _make(io, st, "A/B:1", "CVD", 1, 3000000, 0)]
+    # 호기 칸을 비운 견적서
+    blank = _make(io, st, "ZZ", "CVD", 1, 4000000, 0)
+    wb = load_workbook(blank); wb["견적서_중국"]["B51"] = None; wb.save(blank)
+    out, failed = io.generate_cn_cover(st.template_path, os.path.dirname(files[0]), files + [blank])
+    names = load_workbook(out).sheetnames
+    assert failed == [] and names[0] == "중국 견적서 갑지"
+    assert sorted(names[1:]) == sorted(["A_B_1", "SAME", "SAME_2", names[-1]])
+    assert names[-1].startswith("견적서") and len(set(n.lower() for n in names)) == 5
+
+    # 수식만 있고 사람이 고친 값도 그대로 따라온다
+    edited = _make(io, st, "EDIT", "CVD", 2, 5000000, 0)
+    wb = load_workbook(edited); wb["견적서_중국"]["A50"] = "사람이 적은 메모"; wb.save(edited)
+    out2, _ = io.generate_cn_cover(st.template_path, str(tmp), [edited])
+    assert load_workbook(out2)["EDIT"]["A50"].value == "사람이 적은 메모"
+
+
+def test_same_logo_is_stored_once(env):
+    """견적서 시트마다 같은 로고가 따로 저장되지 않는다 — 그림은 그대로 보이되 파일은 작게."""
+    import zipfile
+    io, st, tmp = env
+    files = [_make(io, st, "T%d" % i, "CVD", 1, 1000000, 0) for i in range(6)]
+    out, _ = io.generate_cn_cover(st.template_path, os.path.dirname(files[0]), files)
+    counts = io.count_sheet_images(out)
+    assert counts["중국 견적서 갑지"] == 3 and all(counts["T%d" % i] == 3 for i in range(6))
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        media = [n for n in names if n.startswith("xl/media/")]
+        assert len(media) <= 6                                   # 21개(7시트 × 3)가 아니라 서로 다른 그림 수만큼
+        # 모든 시트의 그림 연결이 실제로 있는 파일을 가리킨다
+        import re
+        for n in names:
+            if n.startswith("xl/drawings/_rels/"):
+                for target in re.findall(r'Target="\\.\\./media/([^"]+)"', z.read(n).decode("utf8")):
+                    assert "xl/media/" + target in names, (n, target)
+        assert z.testzip() is None
+    assert os.path.getsize(out) < 1024 * 1024                    # 1MB 미만
+    wb = load_workbook(out)                                      # 다시 읽어도 그림이 그대로다
+    assert len(wb["T3"]._images) == 3 and len(wb["중국 견적서 갑지"]._images) == 3

@@ -63,24 +63,24 @@ def test_default_build_is_one_exe_and_internal_only():
     # exe 하나가 모든 앱을 돌려야 한다: 어느 앱이든 쓰는 것은 들어 있고, 제외돼 있지 않다
     hidden, excludes = set(a.kw["hiddenimports"]), a.kw["excludes"]
     seen, third, by_string = _closure("app_main")
-    assert {"main", "run_quote", "run_esign", "run_search", "run_csp"} <= hidden
+    assert {"main", "run_quote", "run_esign"} <= hidden
     assert not sorted(m for m in by_string if m not in hidden)
     used = {m.split(".")[0] for m in seen} | third
     assert not sorted(u for u in used if any(u == e or u.startswith(e + ".") for e in excludes))
-    for lib in ("openpyxl", "fitz"):                       # 견적서작성·CSP 는 openpyxl, 전자서명·검색기는 fitz
+    for lib in ("openpyxl", "fitz"):                       # 견적서작성은 openpyxl, 전자서명은 fitz
         assert ("b:" + lib, ".") in a.kw["binaries"]
 
 
-def test_split_build_makes_five_exes_in_one_folder():
+def test_split_build_makes_three_exes_in_one_folder():
     calls, profiles = _run_spec("split")
     exes = [c.kw["name"] for c in calls if c.kind == "EXE"]
-    assert exes == ["견적자동화", "견적자동화_quote", "견적자동화_esign", "견적자동화_search", "견적자동화_csp"]
+    assert exes == ["견적자동화", "견적자동화_quote", "견적자동화_esign"]
     assert [c.kw["name"] for c in calls if c.kind == "COLLECT"] == ["견적자동화"]
     assert [p["key"] for p in profiles] == list(build_onedir.APP_KEYS)
     assert build_onedir.output_names("견적자동화", "split") == ("견적자동화", [e + ".exe" for e in exes])
 
 
-@pytest.mark.parametrize("key", ["launcher", "quote", "esign", "search", "csp"])
+@pytest.mark.parametrize("key", ["launcher", "quote", "esign"])
 def test_single_app_build_is_a_folder_of_its_own(key):
     calls, profiles = _run_spec(key)
     exes = [c.kw["name"] for c in calls if c.kind == "EXE"]
@@ -96,6 +96,28 @@ def test_command_line_parsing(monkeypatch):
     assert build_onedir._split_args(["이름", "--split"]) == (["이름"], "split")
     with pytest.raises(SystemExit):
         build_onedir._split_args(["이름", "--app", "없는앱"])
+    for retired in ("search", "csp"):                       # 쓰지 않아 _archive 로 옮긴 앱
+        with pytest.raises(SystemExit):
+            build_onedir._split_args(["이름", "--app", retired])
+
+
+RETIRED = ("run_search", "run_csp", "content_search", "csp_order_maker", "csp_core")
+
+
+@pytest.mark.parametrize("only", ["", "split", "launcher", "quote", "esign"])
+def test_retired_apps_are_not_built(only):
+    """키워드 검색기·CSP UPLOAD 는 빌드에 들어가지 않는다 — 소스도 no_com 에 없다."""
+    calls, profiles = _run_spec(only)
+    for p in profiles:
+        assert p["key"] not in ("search", "csp")
+    for c in calls:
+        if c.kind == "Analysis":
+            assert not [h for h in c.kw["hiddenimports"] if h.split(".")[0] in RETIRED]
+            assert not [s for s in c.args[0] if os.path.basename(s)[:-3] in RETIRED]
+        if c.kind == "EXE":
+            assert not c.kw["name"].endswith(("_search", "_csp"))
+    for mod in RETIRED:
+        assert _module_path(mod) is None, mod
 
 
 # ── 앱의 코드가 실제로 불러오는 것 ───────────────────────────────
@@ -170,7 +192,7 @@ def _closure(entry, stop=()):
     return seen, third, by_string
 
 
-@pytest.mark.parametrize("key", ["launcher", "quote", "esign", "search", "csp"])
+@pytest.mark.parametrize("key", ["launcher", "quote", "esign"])
 def test_profile_matches_what_the_app_really_imports(key):
     _calls, profiles = _run_spec("split")
     prof = next(p for p in profiles if p["key"] == key)
@@ -178,7 +200,7 @@ def test_profile_matches_what_the_app_really_imports(key):
     entry = prof["script"][:-3]
     assert _module_path(entry), prof["script"]
     # 런처는 다른 앱을 '파일 이름'으로 실행할 뿐 불러오지 않는다 → 그 스크립트는 따라가지 않는다
-    stop = ("run_quote", "run_esign", "run_search", "run_csp") if key == "launcher" else ()
+    stop = ("run_quote", "run_esign") if key == "launcher" else ()
     seen, third, by_string = _closure(entry, stop)
 
     hidden = set(prof["hidden"])
@@ -255,13 +277,15 @@ def test_launcher_finds_apps_next_to_it_or_in_a_sibling_folder(tmp_path, monkeyp
     apart.parent.mkdir(); apart.write_bytes(b"")
     assert launcher._app_command("esign") == ([str(apart)], str(apart))        # 옆 폴더(따로 빌드)
 
-    cmd, must = launcher._app_command("csp")                                    # 없으면 없는 경로를 돌려준다
+    (root / "견적자동화_esign" / "견적자동화_esign.exe").unlink()
+    cmd, must = launcher._app_command("esign")                                  # 없으면 없는 경로를 돌려준다
     assert not os.path.exists(must) and cmd == [must]
 
     # 기본 빌드(exe 하나에 전부): 같은 exe 를 --<앱> 인자로 다시 실행한다
     monkeypatch.setattr(launcher, "ALL_IN_ONE", True)
     assert launcher._app_command("quote") == ([str(exe), "--quote"], str(exe))
-    assert launcher._app_command("csp") == ([str(exe), "--csp"], str(exe))
+    assert launcher._app_command("esign") == ([str(exe), "--esign"], str(exe))
+    assert set(launcher._APPS) == {"quote", "esign"}            # 검색기·CSP 버튼은 없다
 
 
 def test_app_main_picks_the_app_from_the_argument(monkeypatch):
@@ -281,8 +305,8 @@ def test_app_main_picks_the_app_from_the_argument(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", fake_import)
     fake_launcher = types.SimpleNamespace(main=lambda: started.append("main"), ALL_IN_ONE=False)
     monkeypatch.setitem(sys.modules, "main", fake_launcher)
-    for argv, want in ((["x.exe", "--csp"], "run_csp"), (["x.exe", "--quote"], "run_quote"),
-                       (["x.exe", "--esign"], "run_esign"), (["x.exe", "--search"], "run_search"),
+    for argv, want in ((["x.exe", "--quote"], "run_quote"), (["x.exe", "--esign"], "run_esign"),
+                       (["x.exe", "--csp"], "main"), (["x.exe", "--search"], "main"),   # 뺀 앱은 런처로
                        (["x.exe"], "main")):
         monkeypatch.setattr(sys, "argv", argv)
         app_main.main()

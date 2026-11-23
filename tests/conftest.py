@@ -53,8 +53,6 @@ def _find_templates():
                 wb2.close()
             except Exception:
                 pass
-        elif {"Sheet1", "FSC매핑", "CIP"} <= sheets:
-            found.setdefault("csp", path)
     return found
 
 
@@ -77,11 +75,6 @@ def quote_template():
 def quote_template_cn_cover():
     """중국 갑지 시트가 목록형인 견적서 통합양식 (ver.2.1 이후)."""
     return _template("quote_cn_cover")
-
-
-@pytest.fixture(scope="session")
-def csp_template():
-    return _template("csp")
 
 
 class Baseline:

@@ -1,0 +1,17 @@
+{
+ "cases": {
+  "csp_master": "b3ab82ce8c480d692ae0639d123541627154c50ba3b1e874cfcee4baeb71eddb",
+  "csp_output": "975d5a1f965b9ba5195553b1ce7e9b077b6e9126d55cfa97e2ee206d0d542c3b",
+  "quote_china": "be46dad96987ffaaa9dfa0e754d889a164a90ac0f9166575d3b49c05522ea812",
+  "quote_cover": "f31790edb1ddde1a779c1c64ceb39648719f719496d4105b6b8235e9eefc227d",
+  "quote_domestic": "fefe40ea93c7bdcfeb10323224a432fc34b174bad68c7fd770d62ddaa7755f79",
+  "quote_domestic_batch3": "fefe40ea93c7bdcfeb10323224a432fc34b174bad68c7fd770d62ddaa7755f79",
+  "quote_domestic_credit": "a2413273b52844969c1bd008a111eedc20cf670db8de0913a8cdc6bdd2c8088f",
+  "quote_submit_sheet": "f94c6878385d0718e52c8c8354effe734828cc3040514664a6010183ee425a9e",
+  "quote_us": "008f1ec7c88916f3aa7b5bb1392716bceab879accf99a9df0208f589b5566ddf"
+ },
+ "templates": {
+  "csp": "7b25fa5f6b2a330f4b4847648d140f32ba9444398d52b98e7d1c10e800b7de57",
+  "quote": "8e2603f2f5d6739664d12100951b70622d764d798c2e64cc6a0454beaf37c4d3"
+ }
+}

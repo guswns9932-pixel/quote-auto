@@ -337,3 +337,154 @@ class PdfView(QGraphicsView):
         elif dy > 0 and self.on_prev:
             self.on_prev()
         event.accept()
+
+
+# ══════════════════════════════════════════════
+# 접히는 보조 창
+# ══════════════════════════════════════════════
+
+class FoldableWindow(QWidget):
+    """본 창 옆에 띄우는 보조 창. 최소화하면 사라지는 대신 '접혀서' 본 창의
+    왼쪽 아래에 작은 막대로 남고, 막대를 누르거나 다시 열면 원래 크기로 돌아온다.
+
+    [왜 진짜 최소화를 쓰지 않는가]
+    Windows 는 최소화된 보조 창을 화면 왼쪽 아래 구석에 작은 제목줄로 보내는데,
+    그 위치를 프로그램이 정할 수 없고 눈에 잘 띄지도 않는다. 게다가 최소화된
+    창은 show() 만으로는 다시 뜨지 않아, 여는 버튼을 눌러도 아무 일도 없는
+    것처럼 보였다. 그래서 최소화를 가로채 접힌 상태로 바꾼다.
+
+    내용은 self.body 에 배치한다.
+    """
+
+    FOLD_W, FOLD_H = 260, 34
+
+    def __init__(self, parent: Optional[QWidget], title: str) -> None:
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle(title)
+        self._title = title
+        self._folded = False
+        self._saved_geo = None
+        # 기준이 되는 본 창은 접는 순간에 찾는다. 이 창을 만드는 시점에는 부모가
+        # 아직 본 창에 올라가지 않았을 수 있어서(그러면 부모 자신이 '창'으로 잡혀
+        # 좌표가 어긋나고, 접힌 막대가 모니터 왼쪽 끝으로 갔다).
+        self._anchor = None
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        self.fold_bar = QPushButton(f"▸ {title} — 눌러서 펼치기")
+        self.fold_bar.setFixedHeight(self.FOLD_H)
+        self.fold_bar.setStyleSheet(
+            "QPushButton { background: #1F3864; color: white; border: none; font-weight: bold; }"
+            "QPushButton:hover { background: #2E4A7D; }")
+        self.fold_bar.clicked.connect(self.unfold)
+        self.fold_bar.hide()
+        self.body = QWidget()
+        outer.addWidget(self.fold_bar)
+        outer.addWidget(self.body, 1)
+
+    def _find_anchor(self) -> Optional[QWidget]:
+        """지금의 본 창. 바뀌었으면 움직임을 지켜볼 대상도 바꾼다."""
+        p = self.parentWidget()
+        top = p.window() if p is not None else None
+        if top is not self._anchor:
+            if self._anchor is not None:
+                self._anchor.removeEventFilter(self)
+            self._anchor = top
+            if top is not None:
+                top.installEventFilter(self)           # 본 창이 움직이면 막대도 따라간다
+        return top
+
+    # ── 상태 ────────────────────────────────────
+    @property
+    def folded(self) -> bool:
+        return self._folded
+
+    def open(self) -> None:
+        """창을 연다 — 접혀 있거나 최소화돼 있어도 원래 크기로 앞에 나온다."""
+        if self._folded:
+            self.unfold()
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show(); self.raise_(); self.activateWindow()
+
+    def fold(self) -> None:
+        if self._folded:
+            return
+        self._saved_geo = self.normalGeometry() if self.isMinimized() else self.geometry()
+        self._folded = True
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.body.hide()
+        self.fold_bar.show()
+        self.setFixedSize(self.FOLD_W, self.FOLD_H)
+        self.show()
+        self._place_folded()
+
+    def unfold(self) -> None:
+        if not self._folded:
+            return
+        self._folded = False
+        self.setMinimumSize(0, 0); self.setMaximumSize(16777215, 16777215)
+        self.fold_bar.hide()
+        self.body.show()
+        if self._saved_geo is not None:
+            self.setGeometry(self._saved_geo)
+        self.show(); self.raise_(); self.activateWindow()
+
+    def _place_folded(self) -> None:
+        """본 창의 왼쪽 아래 안쪽에 붙인다."""
+        anchor = self._find_anchor()
+        if anchor is None:
+            return
+        geo = anchor.geometry()
+        self.move(geo.left() + 8, geo.bottom() - self.frameGeometry().height() - 8)
+
+    # ── 이벤트 ──────────────────────────────────
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange and self.isMinimized() and not self._folded:
+            QTimer.singleShot(0, self.fold)      # 상태 변경 도중에 창을 건드리지 않도록 한 박자 늦춘다
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._anchor and self._folded and event.type() in (
+                event.Type.Move, event.Type.Resize):
+            self._place_folded()
+        return super().eventFilter(obj, event)
+
+
+# ══════════════════════════════════════════════
+# 정보 말풍선 (우클릭으로 띄우는 안내)
+# ══════════════════════════════════════════════
+
+class InfoPopup(QLabel):
+    """글만 보여주는 말풍선. 아무 곳이나 누르거나, 휠을 굴리거나, 키를 누르거나,
+    다른 창으로 가면 스스로 닫힌다 — 그리고 그 클릭·키는 원래 가던 곳으로 그대로 간다.
+
+    Qt.Popup 으로 만들면 마우스 입력을 독점해서, 닫으려고 누른 첫 클릭이 먹히고
+    프로그램이 멈춘 것처럼 보였다. 그래서 입력을 잡지 않는 창(ToolTip)으로 띄우고
+    닫는 시점은 직접 지켜본다.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setStyleSheet(
+            "QLabel { background: #1D2433; color: white; padding: 10px 14px; border: 1px solid #1D2433; }")
+        self._watching = False
+
+    def show_at(self, text: str, global_pos) -> None:
+        self.setText(text)
+        self.adjustSize()
+        self.move(global_pos)
+        self.show()
+        if not self._watching:
+            QApplication.instance().installEventFilter(self)
+            self._watching = True
+
+    def hideEvent(self, event) -> None:
+        if self._watching:
+            QApplication.instance().removeEventFilter(self)
+            self._watching = False
+        super().hideEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (event.Type.MouseButtonPress, event.Type.Wheel, event.Type.KeyPress,
+                            event.Type.WindowDeactivate, event.Type.ApplicationDeactivate):
+            self.hide()
+        return False                     # 입력을 가로채지 않는다

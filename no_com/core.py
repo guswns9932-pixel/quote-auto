@@ -106,73 +106,19 @@ def parse_invest_info(g_val: Any) -> str:
 
 
 # ──────────────────────────────────────────────
-# 시트 / 셀 상수
+# 시트 이름 (전자서명용)
 # ──────────────────────────────────────────────
+# 견적서작성이 쓰는 시트 이름·셀 위치·행 범위는 quote_config 로 옮겼다
+# (통합양식의 `설정` 시트에서 바꿀 수 있다). 여기 남은 것은 전자서명이
+# 견적서 파일에서 서명 대상 시트를 고를 때 쓰는 이름뿐이다 — 전자서명은
+# 통합양식 없이 견적서 파일만 받으므로 설정 시트를 볼 수 없다.
 class SheetName:
-    ITEMS       = "품목"
-    CODE_MAP    = "코드매핑"
-    REQ_COPY    = "견적의뢰복사본"
     SPEC        = "사양서"
     SIGN_SPEC   = "현업 사인용 사양서"
     INCOMING    = "입고검수확인서"
-    QUOTE_CN    = "견적서_중국"
-    QUOTE_US    = "견적서_미국"
-    COVER_DATA  = "갑지DATA"
     COVER       = "견적서 갑지"
 
-    REQUIRED = [
-        ITEMS, CODE_MAP, REQ_COPY, SPEC,
-        SIGN_SPEC, INCOMING, QUOTE_CN, QUOTE_US,
-    ]
     ESIGN_TARGET = [COVER, SPEC, SIGN_SPEC, INCOMING]
-
-
-@dataclass(frozen=True)
-class DomesticLayout:
-    SPEC_START  : int = 17
-    SPEC_END    : int = 41
-    SIGN_START  : int = 11
-    SIGN_END    : int = 35
-    COL_SPEC    : str = "B"
-    COL_QTY     : str = "E"
-    COL_PRICE   : str = "F"
-    COL_AMT     : str = "G"
-
-
-@dataclass(frozen=True)
-class ChinaLayout:
-    MAKER_CELL      : str = "A17"
-    PROCESS_CELL    : str = "B17"
-    TOOL_CELL       : str = "B51"
-    PUMP_START      : int = 17
-    PUMP_END        : int = 19
-    RACK_START      : int = 21
-    RACK_END        : int = 40
-    COL_SPEC        : str = "C"
-    COL_PRICE       : str = "F"
-    COL_QTY         : str = "G"
-
-
-@dataclass(frozen=True)
-class USLayout:
-    MAKER_CELL      : str = "A17"
-    PROCESS_CELL    : str = "B17"
-    TOOL_CELL       : str = "B54"
-    EXCHANGE_CELL   : str = "A53"
-    DATE_CELL       : str = "E53"
-    PUMP_SPEC       : str = "C17"
-    PUMP_PRICE      : str = "E17"
-    PUMP_QTY        : str = "G17"
-    RACK_START      : int = 21
-    RACK_END        : int = 40
-    COL_SPEC        : str = "C"
-    COL_PRICE       : str = "E"
-    COL_QTY         : str = "G"
-
-
-DOM = DomesticLayout()
-CN  = ChinaLayout()
-US  = USLayout()
 
 
 # ──────────────────────────────────────────────

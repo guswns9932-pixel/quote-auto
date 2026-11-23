@@ -90,10 +90,28 @@ def test_quote_number_follows_count_and_lines(env):
     assert ws["C9"].value.endswith("SCS-X1/X2-Q1~3")
     assert [ws.cell(r, 3).value for r in (16, 17, 18)] == ["B1", "A1", "A2"]
 
-    # 파일 이름이 규칙과 다르면 라인 부분을 뺀다
+    # 라인은 만들 때 파일 속성에 적어 둔 값을 쓴다 — 파일 이름을 바꿔도 그대로
     odd = str(tmp / "이름이다른파일.xlsx")
     os.replace(one, odd)
     ws = load_workbook(io.generate_cn_cover(st.template_path, str(tmp), [odd])[0])["중국 견적서 갑지"]
+    assert ws["C9"].value == f"LOT{dt.datetime.now():%y%m%d}SCS-X2-Q1"
+
+    # 속성이 없는 예전 파일: 이름이 규칙과 맞으면 이름에서, 아니면 라인 부분을 뺀다
+    import zipfile
+    def strip_props(src, dst):
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename != "docProps/custom.xml":
+                    data = zin.read(item.filename)
+                    if item.filename == "[Content_Types].xml":
+                        data = data.replace(b'<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>', b"")
+                    zout.writestr(item, data)
+    old_named = str(tmp / "old" / "대외비_260702_중국_SCS_X9_T1.xlsx"); os.makedirs(os.path.dirname(old_named))
+    strip_props(odd, old_named)
+    ws = load_workbook(io.generate_cn_cover(st.template_path, str(tmp / "old"), [old_named])[0])["중국 견적서 갑지"]
+    assert ws["C9"].value.endswith("SCS-X9-Q1")
+    renamed = str(tmp / "old" / "아무이름.xlsx"); os.replace(old_named, renamed)
+    ws = load_workbook(io.generate_cn_cover(st.template_path, str(tmp / "old"), [renamed])[0])["중국 견적서 갑지"]
     assert ws["C9"].value == f"LOT{dt.datetime.now():%y%m%d}SCS-Q1"
 
 

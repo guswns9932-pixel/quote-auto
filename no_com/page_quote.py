@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 import app_settings
 import quote_config
 import quote_review
+import review_rules
+
 from quote_panels import AmountPanel, CheckPanel, DiagramPanel, StepBar
 from core import (
     QuoteState,
@@ -888,7 +890,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         if not path.lower().endswith(".xlsx"):
             path += ".xlsx"
         try:
-            quote_config.export_settings_sheet(path, cfg)
+            quote_config.export_settings_sheet(path, cfg, review_rules.load(self.state.template_path))
         except Exception as e:
             QMessageBox.critical(self, "오류", f"설정 시트를 만들지 못했습니다.\n{e}"); return
         self._log(f"설정 시트 생성: {path}")
@@ -993,14 +995,17 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     def _make_review(self) -> quote_review.Review:
         st = self.state
         suggested = st.code_map.get((st.process, st.vendor, st.code_5d), []) if st.code_map else []
-        ch = self._pick_rd().get("H") if st.request_rows else None
+        rd = self._pick_rd() if st.request_rows else {}
         review = quote_review.analyze(
-            self._snapshot_items(), st.quote_type or "국내", ch,
+            self._snapshot_items(), st.quote_type or "국내", rd.get("H"),
             cfg=quote_config.load(st.template_path),
             class_of=self._class_of,
             known_specs=set(st.price_by_spec) if st.template_path else None,
             dup_price_specs=self._dup_price_specs,
-            suggested=suggested)
+            suggested=suggested,
+            rack_concept=rd.get("R"),
+            d5=st.code_5d,
+            rules=review_rules.load(st.template_path))
         review.checks.extend(quote_review.Check(quote_review.INFO, n) for n in self._notices)
         return review
 
@@ -1300,6 +1305,8 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             missing = [n for n in cfg.required_sheets if n not in sheetnames]
             # 설정 시트의 잘못된 값, 없는 시트 등 — 생성 도중이 아니라 지금 알려준다
             for w in cfg.check(sheetnames):
+                self._log(f"[설정 확인] {w}")
+            for w in review_rules.load(path).problems:
                 self._log(f"[설정 확인] {w}")
             if cfg.overridden:
                 self._log(f"양식의 '{quote_config.SETTINGS_SHEET}' 시트에서 설정 {len(cfg.overridden)}개를 읽었습니다")
@@ -2030,6 +2037,12 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             idx = self._pick_rd_index()
             rds = [self.state.request_rows[idx]] if (idx >= 0 and self.state.request_rows) else [{}]
             self._pending_req_indices = [idx] if idx >= 0 else []
+
+        # 호기와 내용이 완전히 같은 견적서가 이미 있으면 막는다 — '그래도 만들기' 를 고를 수 있다
+        rds, self._pending_req_indices = self._ask_about_duplicates(
+            qtype, items, rds, self._pending_req_indices)
+        if not rds:
+            return
         self._log(f"견적서 생성 시작 ({qtype}, {len(rds)}건) …")
         self._set_gen_buttons(False)
         self._gen_qt_thread = _GenQuoteThread(self.state, qtype, items, rds, self)
@@ -2134,6 +2147,59 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             )
         else:
             QMessageBox.information(self, "완료", f"갑지 생성 완료\n{os.path.basename(out)}")
+
+    def _ask_about_duplicates(self, qtype: str, items, rds: list, indices: list):
+        """이미 같은 견적서가 있는 의뢰를 골라 묻는다. 반환: (만들 의뢰들, 그 의뢰들의 행 번호).
+        아무것도 만들지 않기로 하면 ([], [])."""
+        import excel_io
+        try:
+            dups = [excel_io.find_duplicates(self.state, qtype, items, rd) for rd in rds]
+        except Exception:
+            logger.warning("중복 견적 확인 실패 — 확인 없이 진행", exc_info=True)
+            return rds, indices
+        if not any(dups):
+            return rds, indices
+        root = os.path.join(exe_dir(), quote_config.load(self.state.template_path)["name.out_dir"])
+
+        def where(path: str) -> str:
+            try:
+                return os.path.relpath(path, root)
+            except ValueError:
+                return path
+
+        if len(rds) == 1:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("같은 견적서가 있습니다")
+            box.setText("호기와 내용이 완전히 같은 견적서가 이미 있습니다.\n\n"
+                        + "\n".join("  • " + where(p) for p in dups[0][:5]))
+            make = box.addButton("그래도 만들기", QMessageBox.AcceptRole)
+            box.addButton("취소", QMessageBox.RejectRole)
+            box.setDefaultButton(box.buttons()[-1])
+            box.exec()
+            return (rds, indices) if box.clickedButton() is make else ([], [])
+
+        n_dup = sum(1 for d in dups if d)
+        lines = [f"  • {s(rd.get('Z')) or '-'}  →  {where(d[0])}" for rd, d in zip(rds, dups) if d]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("같은 견적서가 있습니다")
+        box.setText(f"{len(rds)}건 중 {n_dup}건은 호기와 내용이 완전히 같은 견적서가 이미 있습니다.\n\n"
+                    + "\n".join(lines[:12]) + (f"\n  … 외 {len(lines) - 12}건" if len(lines) > 12 else ""))
+        skip = box.addButton("중복은 건너뛰기", QMessageBox.AcceptRole)
+        make_all = box.addButton("중복도 모두 만들기", QMessageBox.DestructiveRole)
+        box.addButton("취소", QMessageBox.RejectRole)
+        box.setDefaultButton(skip)
+        box.exec()
+        if box.clickedButton() is make_all:
+            return rds, indices
+        if box.clickedButton() is skip:
+            keep = [i for i, d in enumerate(dups) if not d]
+            if not keep:
+                QMessageBox.information(self, "안내", "모두 이미 있는 견적서라 만들 것이 없습니다.")
+            self._log(f"중복 견적 {n_dup}건 건너뜀")
+            return [rds[i] for i in keep], [indices[i] for i in keep if i < len(indices)]
+        return [], []
 
     def _generate_cn_cover(self, parent: Optional[QWidget] = None) -> None:
         """중국 갑지: 중국 견적서 파일들을 골라 '중국 견적서 갑지' 한 장으로 모은다."""
@@ -2268,6 +2334,13 @@ class QuoteBuilderPage(Step5Manager, QWidget):
             return None, ""
         stem   = fn[:-5]
         folder = os.path.basename(os.path.dirname(full_path))
+        # 이 프로그램이 만든 파일에는 호기가 파일 속성에 적혀 있다(파일 이름 끝에 PUMP 모델이
+        # 붙으면서 '마지막 _ 뒤 = 호기' 로는 읽을 수 없게 됐다). 예전 파일은 이름에서 읽는다.
+        try:
+            import quote_fingerprint
+            props = quote_fingerprint.read_props(full_path)
+        except Exception:
+            props = {}
 
         # ── 갑지: tool='' 로 반환해 붉은색 음영 처리 신호 ───────────
         if _re.search(r'_갑지(?:_\d+)?$', stem):
@@ -2279,16 +2352,16 @@ class QuoteBuilderPage(Step5Manager, QWidget):
                 return "", f"중국_{m_cn.group(1)}_갑지"
             return "", "갑지"
 
-        # ── 미국 Quotation: ..._{tool}_Quotation ─────────────────────
+        # ── 미국 Quotation: ..._{tool}[_{PUMP}]_Quotation ─────────────
         m_us = _re.search(r'_([^_]+)_Quotation$', stem)
         if m_us:
-            tool = m_us.group(1)
+            tool = props.get("tool") or m_us.group(1)
             mf   = _re.match(r'^\d{6}_미국_(.+)$', folder)
             return tool, f"미국_{mf.group(1) if mf else '미국'}_{tool}"
 
-        # ── 국내·중국: 마지막 _구분자 이후 = 설비호기 ───────────────
+        # ── 국내·중국: 파일 속성의 호기, 없으면(예전 파일) 마지막 _ 뒤 ──
         parts = stem.split('_')
-        tool  = parts[-1] if parts else ""
+        tool  = props.get("tool") or (parts[-1] if parts else "")
         if not tool:
             return None, ""
 

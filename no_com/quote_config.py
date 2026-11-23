@@ -204,11 +204,12 @@ _SPEC: List[Tuple[str, Any, str, str]] = [
     # ── 파일 · 폴더 이름 ───────────────────────────────────────
     ("name.out_dir",     "견적서", "text", "생성물을 모으는 폴더 이름(프로그램 폴더 아래)"),
     ("name.dom_folder",  "{날짜}_LOT베큠_{라인}_{의뢰자}", "name", "국내 견적서 폴더 이름"),
-    ("name.dom_file",    "대외비_{PR}-{항번}_{날짜}_LOT베큠_{라인}_{의뢰자}_{호기}.xlsx", "name", "국내 견적서 파일 이름"),
+    ("name.dom_file",    "대외비_{PR}-{항번}_{날짜}_LOT베큠_{라인}_{의뢰자}_{호기}_{PUMP}.xlsx", "name",
+     "국내 견적서 파일 이름 ({PUMP}=담은 PUMP 모델, 없으면 빠진다)"),
     ("name.cn_folder",   "{날짜}_중국_SCS_{라인}", "name", "중국 견적서 폴더 이름"),
-    ("name.cn_file",     "대외비_{날짜}_중국_SCS_{라인}_{호기}.xlsx", "name", "중국 견적서 파일 이름"),
+    ("name.cn_file",     "대외비_{날짜}_중국_SCS_{라인}_{호기}_{PUMP}.xlsx", "name", "중국 견적서 파일 이름"),
     ("name.us_folder",   "{날짜}_미국_{사이트}", "name", "미국 견적서 폴더 이름"),
-    ("name.us_file",     "대외비_{날짜}_{사이트}_{호기}_Quotation.xlsx", "name", "미국 견적서 파일 이름"),
+    ("name.us_file",     "대외비_{날짜}_{사이트}_{호기}_{PUMP}_Quotation.xlsx", "name", "미국 견적서 파일 이름"),
     ("name.cover_file",  "대외비_{폴더}{갑지표시}.xlsx", "name", "갑지 파일 이름"),
     ("name.cn_cover_file", "대외비_{폴더}_중국갑지.xlsx", "name", "중국 갑지 파일 이름"),
     ("name.cover_mark",  "_갑지", "text", "갑지 파일 이름 끝에 붙는 표시 (제출용 엑셀은 이걸 뗀 이름)"),
@@ -224,11 +225,11 @@ _PLACEHOLDERS = {
     "us.investor_text": ("투자자",), "us.quote_no_text": ("견적번호",),
     "us.pr_text": ("PR",), "us.warranty_text": ("보증",),
     "name.dom_folder": ("날짜", "PR", "항번", "라인", "의뢰자", "호기"),
-    "name.dom_file":   ("날짜", "PR", "항번", "라인", "의뢰자", "호기"),
+    "name.dom_file":   ("날짜", "PR", "항번", "라인", "의뢰자", "호기", "PUMP"),
     "name.cn_folder":  ("날짜", "라인", "호기"),
-    "name.cn_file":    ("날짜", "라인", "호기"),
+    "name.cn_file":    ("날짜", "라인", "호기", "PUMP"),
     "name.us_folder":  ("날짜", "사이트", "호기"),
-    "name.us_file":    ("날짜", "사이트", "호기"),
+    "name.us_file":    ("날짜", "사이트", "호기", "PUMP"),
     "name.cover_file": ("폴더", "갑지표시"),
     "name.cn_cover_file": ("폴더",),
     "cncover.quote_no_text": ("날짜", "라인", "번호"),
@@ -475,11 +476,12 @@ def load(template_path: Optional[str]) -> QuoteConfig:
 # ──────────────────────────────────────────────
 # 설정 시트 만들기
 # ──────────────────────────────────────────────
-def export_settings_sheet(out_path: str, cfg: Optional[QuoteConfig] = None) -> str:
-    """지금 값으로 채운 `설정` 시트 한 장짜리 xlsx 를 만든다.
-    이 시트를 통합양식에 복사해 넣고 필요한 값만 고치면 된다."""
+def export_settings_sheet(out_path: str, cfg: Optional[QuoteConfig] = None, rules=None) -> str:
+    """지금 값으로 채운 `설정` 시트와 `검토규칙` 시트가 든 xlsx 를 만든다.
+    이 시트들을 통합양식에 복사해 넣고 필요한 값만 고치면 된다."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
+    import review_rules
     cfg = cfg or QuoteConfig()
     wb = Workbook()
     ws = wb.active
@@ -495,6 +497,8 @@ def export_settings_sheet(out_path: str, cfg: Optional[QuoteConfig] = None) -> s
     for row in ws.iter_rows(min_row=2, min_col=2, max_col=2):
         row[0].number_format = "@" if isinstance(row[0].value, str) else "0"
     ws.freeze_panes = "A2"
+    # 생성 전 점검 규칙도 같은 파일에 — 두 시트 모두 통합양식에 복사해 넣으면 된다
+    review_rules.write_sheet(wb, rules)
     wb.save(out_path)
     return out_path
 

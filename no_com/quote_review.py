@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import quote_calc
 import quote_config
+import review_rules
 
 # 상태: ok 정상 / diff 수량이 CH 와 다름 / bad 단가 0원 / miss 코드매핑에 있는데 안 담김 / blank 없음
 OK, DIFF, BAD, MISS, BLANK = "ok", "diff", "bad", "miss", "blank"
@@ -81,7 +82,10 @@ def analyze(items: List[Dict[str, Any]],
             class_of: Optional[Dict[str, str]] = None,
             known_specs: Optional[set] = None,
             dup_price_specs: Optional[set] = None,
-            suggested: Sequence[Tuple[str, float]] = ()) -> Review:
+            suggested: Sequence[Tuple[str, float]] = (),
+            rack_concept: Any = None,
+            d5: Any = None,
+            rules: Optional[review_rules.ReviewRules] = None) -> Review:
     """견적작성 대상(items)을 검토한다.
 
     ch              의뢰 행의 수량. 없으면 CH 대조를 하지 않는다.
@@ -89,6 +93,9 @@ def analyze(items: List[Dict[str, Any]],
     known_specs     품목 시트에 있는 규격 (없는 규격의 0원을 가려내는 데 쓴다)
     dup_price_specs 품목 시트에 단가가 둘 이상인 규격
     suggested       코드매핑이 이 조건에 제안하는 (규격, 수량)
+    rack_concept    의뢰의 Rack Concept (예: '3CH')
+    d5              5D 이름 (예: 'PUMP_DRY_LOT_XD1200_3RACK_…')
+    rules           Rack·CH당 규칙 (통합양식의 검토규칙 시트, 없으면 기본 규칙)
     """
     cfg = cfg or quote_config.QuoteConfig()
     class_of = class_of or {}
@@ -186,6 +193,76 @@ def analyze(items: List[Dict[str, Any]],
     for r in real:
         if dup_price_specs and r["spec"] in dup_price_specs:
             add(Check(YELLOW, f"품목 시트에 단가가 둘 이상인 규격: {r['spec']}", spec=r["spec"]))
+    _check_counts(rv, pumps, racks, ch_val, rack_concept, d5, rules or review_rules.defaults(), cfg)
     for sp, q in missing:
         add(Check(INFO, f"코드매핑에 있는데 안 담김: {sp} × {_fmt_qty(q)}", suggest=(sp, q)))
     return rv
+
+
+def _check_counts(rv: Review, pumps: List[Dict[str, Any]], racks: List[Dict[str, Any]],
+                  ch_val: Optional[float], rack_concept: Any, d5: Any,
+                  rules: review_rules.ReviewRules, cfg: quote_config.QuoteConfig) -> None:
+    """수량끼리 맞는지: PUMP·의뢰·Rack·Rack Concept·5D, CH당 품목, 같은 종류 중복."""
+    add = rv.checks.append
+    pump_qty = sum(r["qty"] for r in pumps)
+
+    # ── Rack 대수 ──
+    rack_ch, counted, unknown, by_n = 0, False, [], {}
+    for r in racks:
+        is_rack, n = rules.rack_ch(r["spec"])
+        if not is_rack:
+            continue
+        if n is None:
+            unknown.append(r)
+            continue
+        counted = True
+        rack_ch += n * r["qty"]
+        by_n.setdefault(n, []).append(r["spec"])
+    for r in unknown:
+        add(Check(YELLOW, f"확인 필요: {r['spec']} — 몇 CH 인지 알 수 없어 Rack 대수 계산에서 뺐습니다",
+                  spec=r["spec"]))
+
+    if pumps and ch_val is not None and pump_qty != ch_val:
+        add(Check(RED, f"PUMP 수량 {_fmt_qty(pump_qty)}대 ≠ 의뢰 수량 {_fmt_qty(ch_val)}",
+                  spec=pumps[0]["spec"]))
+    if counted and pumps and rack_ch != pump_qty:
+        add(Check(RED, f"Rack 합계 {_fmt_qty(rack_ch)}CH ≠ PUMP {_fmt_qty(pump_qty)}대 "
+                       f"(Rack System 등 이름의 숫자 × 수량)", spec=next(iter(by_n.values()))[0]))
+    concept = review_rules.ch_from_concept(rack_concept)
+    if counted and concept is not None and rack_ch != concept:
+        add(Check(YELLOW, f"Rack 합계 {_fmt_qty(rack_ch)}CH ≠ 의뢰의 Rack Concept {concept}CH"))
+    d5_ch = review_rules.ch_from_5d(d5)
+    if counted and d5_ch and rack_ch % d5_ch != 0:
+        add(Check(YELLOW, f"Rack 합계 {_fmt_qty(rack_ch)}CH 가 5D 의 {d5_ch}CH 의 배수가 아닙니다"))
+
+    # 같은 CH 수의 Rack 이 이름만 다르게 둘 (예: Rack System-3 과 Rack System-3 (전기공통 사양))
+    for n, specs in by_n.items():
+        if len(set(specs)) > 1:
+            add(Check(YELLOW, f"같은 {n}CH Rack 이 두 가지 담겼습니다: " + ", ".join(sorted(set(specs))),
+                      spec=specs[0]))
+
+    # ── CH 마다 들어가는 품목 ──
+    base = ch_val if ch_val is not None else (pump_qty or None)
+    if base:
+        seen_rule: Dict[str, float] = {}
+        first: Dict[str, str] = {}
+        rule_of: Dict[str, review_rules.PerChRule] = {}
+        for r in racks:
+            rule = rules.per_ch_rule(r["spec"])
+            if rule is None:
+                continue
+            seen_rule[rule.pattern] = seen_rule.get(rule.pattern, 0) + r["qty"]
+            first.setdefault(rule.pattern, r["spec"]); rule_of[rule.pattern] = rule
+        for pat, qty in seen_rule.items():
+            rule = rule_of[pat]
+            want = rule.per_ch * base
+            if qty != want:
+                add(Check(RED if rule.level == "red" else YELLOW,
+                          f"{first[pat]} 수량 {_fmt_qty(qty)} ≠ {_fmt_qty(want)} "
+                          f"(CH 마다 {_fmt_qty(rule.per_ch)}개 × {_fmt_qty(base)}CH)", spec=first[pat]))
+
+    # ── 같은 종류가 두 가지 (도식 칸 기준, 보조 품목 제외) ──
+    for s_ in rv.flow + rv.base:
+        names = sorted(set(s_.specs))
+        if len(names) > 1 and s_.label != "PUMP" and not any(rules.rack_ch(n)[0] for n in names):
+            add(Check(YELLOW, f"{s_.label} 이 두 가지 이상 담겼습니다: " + ", ".join(names), spec=names[0]))

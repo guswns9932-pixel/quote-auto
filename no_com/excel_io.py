@@ -35,6 +35,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 import excel_com
 import quote_calc
 import quote_config
+import quote_fingerprint
 from excel_com import _clear_clipboard
 from core import (
     QuoteState,
@@ -949,6 +950,106 @@ def _split_credits(credits: List[Dict[str, Any]], cfg: quote_config.QuoteConfig
     return pump, rack
 
 
+# ──────────────────────────────────────────────
+# 파일 이름
+# ──────────────────────────────────────────────
+_MAX_PATH = 259          # Windows 가 보통 다룰 수 있는 경로 길이(260자, 끝의 NUL 제외)
+
+
+def pump_label(items: List[Dict[str, Any]]) -> str:
+    """파일 이름에 붙일 PUMP 모델. 'LD105 / LD120' → 'LD105_LD120'. PUMP 가 없으면 ''."""
+    parts: List[str] = []
+    for r in items:
+        if r.get("cat") != "PUMP" or r.get("role") == "CREDIT":
+            continue
+        for p in re.split(r"\s*[/,+&]\s*", s(r.get("spec"))):
+            p = re.sub(r"\s+", "", p)
+            if p and p not in parts:
+                parts.append(p)
+    return safe_filename("_".join(parts)) if parts else ""
+
+
+def _file_name(cfg: quote_config.QuoteConfig, key: str, **names: Any) -> str:
+    """이름 규칙에 값을 채운다. 비어 있는 자리 때문에 생긴 '__' 나 끝의 '_' 는 정리한다
+    (PUMP 가 없으면 '…_호기_.xlsx' 가 아니라 '…_호기.xlsx')."""
+    text = cfg.text(key, **names)
+    text = re.sub(r"_{2,}", "_", text)
+    text = re.sub(r"_+(?=\.[A-Za-z0-9]+$)", "", text)
+    return text
+
+
+def _check_path_length(path: str) -> None:
+    full = os.path.abspath(path)
+    if len(full) > _MAX_PATH:
+        raise ValueError(
+            f"저장할 파일 경로가 너무 깁니다 ({len(full)}자, Windows 는 {_MAX_PATH}자까지).\n{full}\n"
+            "프로그램 폴더를 더 짧은 경로로 옮기거나, 설정의 파일 이름 규칙을 줄여주세요.")
+
+
+def _name_pattern(rule: str) -> Tuple["re.Pattern", List[str]]:
+    """이름 규칙 → (파일 이름을 읽는 정규식, 자리 이름들). 같은 이름이 있어 붙은 _2 도 허용."""
+    names: List[str] = []
+    out, pos = [], 0
+    for m in re.finditer(r"\{([^{}]+)\}", rule):
+        out.append(re.escape(rule[pos:m.start()]))
+        out.append(f"(?P<g{len(names)}>.+?)")
+        names.append(m.group(1))
+        pos = m.end()
+    tail = rule[pos:]
+    if tail.lower().endswith(".xlsx"):
+        out.append(re.escape(tail[:-5]) + r"(?:_\d+)?\.xlsx")
+    else:
+        out.append(re.escape(tail))
+    return re.compile("".join(out), re.IGNORECASE), names
+
+
+def parse_file_name(cfg: quote_config.QuoteConfig, key: str, filename: str) -> Optional[Dict[str, str]]:
+    """파일 이름을 이름 규칙(key)으로 읽어 {자리: 값} 을 돌려준다. 맞지 않으면 None.
+    {PUMP} 가 없던 예전 이름(또는 PUMP 가 비어 빠진 이름)도 읽는다."""
+    rule = cfg[key]
+    rules = [rule]
+    if "{PUMP}" in rule:
+        rules.append(re.sub(r"_?\{PUMP\}", "", rule))
+    for r in rules:
+        rx, names = _name_pattern(r)
+        m = rx.fullmatch(filename)
+        if m:
+            return {name: m.group(f"g{i}") for i, name in enumerate(names)}
+    return None
+
+
+# ──────────────────────────────────────────────
+# 중복 견적 확인 — 호기와 내용이 완전히 같은 견적서
+# ──────────────────────────────────────────────
+def quote_tool(state: QuoteState, qtype: str, rd: Dict[str, Any]) -> str:
+    """이 견적서의 호기 (중복을 찾을 때 파일 이름으로 1차로 걸러내는 데 쓴다)."""
+    if qtype == "중국":
+        return s((state.cn_info or {}).get("tool"))
+    if qtype == "미국":
+        return s((state.us_info or {}).get("tool"))
+    return s(rd.get("Z"))
+
+
+def find_duplicates(state: QuoteState, qtype: str, items: List[Dict[str, Any]],
+                    rd: Dict[str, Any]) -> List[str]:
+    """출력 폴더에서 이번에 만들 견적서와 호기·내용이 완전히 같은 파일들."""
+    cfg = quote_config.load(state.template_path)
+    root = os.path.join(exe_dir(), cfg["name.out_dir"])
+    tool = safe_filename(quote_tool(state, qtype, rd))
+    if not os.path.isdir(root) or not tool or tool == "-":
+        return []
+    want = quote_fingerprint.make(qtype, rd, items, state)
+    hits: List[str] = []
+    for folder, _dirs, files in os.walk(root):
+        for f in files:
+            if f.startswith("~$") or not f.lower().endswith(".xlsx") or tool.lower() not in f.lower():
+                continue
+            path = os.path.join(folder, f)
+            if quote_fingerprint.read(path) == want:
+                hits.append(path)
+    return sorted(hits)
+
+
 def _fill_domestic(state: QuoteState,
                    rd: Dict[str, Any],
                    items: List[Dict[str, Any]],
@@ -972,11 +1073,12 @@ def _fill_domestic(state: QuoteState,
         "라인":   safe_filename(s(rd.get("K"))),
         "의뢰자": safe_filename(s(rd.get("J"))),
         "호기":   safe_filename(s(rd.get("Z"))),
+        "PUMP":   pump_label(items),
     }
-    folder = ensure_dir(
-        os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.dom_folder", **names))
-    )
-    path = unique_path(os.path.join(folder, cfg.text("name.dom_file", **names)))
+    folder_path = os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.dom_folder", **names))
+    _check_path_length(os.path.join(folder_path, _file_name(cfg, "name.dom_file", **names)))
+    folder = ensure_dir(folder_path)
+    path = unique_path(os.path.join(folder, _file_name(cfg, "name.dom_file", **names)))
 
     # ① 템플릿 준비 — 재사용 워크북이 있으면 복사·로드를 건너뛴다
     if wb_cache is not None:
@@ -1174,6 +1276,8 @@ def _fill_domestic(state: QuoteState,
     ])
 
     _reset_sheet_selections(wb)
+    quote_fingerprint.write(wb, quote_fingerprint.make("국내", rd, items, state),
+                            tool=s(rd.get("Z")), line=s(rd.get("K")), pump=names["PUMP"])
     wb.save(path)
     if wb_cache is None:
         wb.close()          # 재사용 워크북은 호출자가 닫는다
@@ -1264,11 +1368,12 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     info   = state.cn_info
     names  = {"날짜": datetime.now().strftime("%y%m%d"),
               "라인": safe_filename(info.get("line", "")),
-              "호기": safe_filename(info.get("tool", ""))}
-    folder = ensure_dir(
-        os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.cn_folder", **names))
-    )
-    path = unique_path(os.path.join(folder, cfg.text("name.cn_file", **names)))
+              "호기": safe_filename(info.get("tool", "")),
+              "PUMP": pump_label(items)}
+    folder_path = os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.cn_folder", **names))
+    _check_path_length(os.path.join(folder_path, _file_name(cfg, "name.cn_file", **names)))
+    folder = ensure_dir(folder_path)
+    path = unique_path(os.path.join(folder, _file_name(cfg, "name.cn_file", **names)))
 
     _copy_template(state.template_path, path)
     wb = load_workbook(path)
@@ -1304,6 +1409,8 @@ def _fill_china(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _hide_rows(ws, rack_start, rack_end, len(out_list))
     _keep_only_sheets(wb, [cfg["sheet.quote_cn"]])
     _reset_sheet_selections(wb)
+    quote_fingerprint.write(wb, quote_fingerprint.make("중국", {}, items, state),
+                            tool=s(info.get("tool")), line=s(info.get("line")), pump=names["PUMP"])
     wb.save(path)
     wb.close()
     restore_header_footer_images(state.template_path, path)
@@ -1318,11 +1425,12 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     info   = state.us_info
     names  = {"날짜": datetime.now().strftime("%y%m%d"),
               "사이트": safe_filename(info.get("site", "")),
-              "호기": safe_filename(info.get("tool", ""))}
-    folder = ensure_dir(
-        os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.us_folder", **names))
-    )
-    path = unique_path(os.path.join(folder, cfg.text("name.us_file", **names)))
+              "호기": safe_filename(info.get("tool", "")),
+              "PUMP": pump_label(items)}
+    folder_path = os.path.join(exe_dir(), cfg["name.out_dir"], cfg.text("name.us_folder", **names))
+    _check_path_length(os.path.join(folder_path, _file_name(cfg, "name.us_file", **names)))
+    folder = ensure_dir(folder_path)
+    path = unique_path(os.path.join(folder, _file_name(cfg, "name.us_file", **names)))
 
     _copy_template(state.template_path, path)
     wb = load_workbook(path)
@@ -1366,6 +1474,8 @@ def _fill_us(state: QuoteState, items: List[Dict[str, Any]]) -> str:
     _hide_rows(ws, rack_start, rack_end, len(out_list))
     _keep_only_sheets(wb, [cfg["sheet.quote_us"]])
     _reset_sheet_selections(wb)
+    quote_fingerprint.write(wb, quote_fingerprint.make("미국", {}, items, state),
+                            tool=s(info.get("tool")), line=s(info.get("site")), pump=names["PUMP"])
     wb.save(path)
     wb.close()
     restore_header_footer_images(state.template_path, path)
@@ -1740,13 +1850,14 @@ def _generate_cover_impl(
 
 def _cn_line_of(filename: str, cfg: quote_config.QuoteConfig) -> str:
     """중국 견적서 파일 이름에서 라인을 읽는다(파일 이름 규칙 name.cn_file 기준).
-    예) 대외비_260702_중국_SCS_X2_TAAL01.xlsx → 'X2'. 규칙과 안 맞으면 ''."""
-    pattern = re.escape(cfg["name.cn_file"])
-    for name, group in (("날짜", "d"), ("라인", "line"), ("호기", "tool")):
-        pattern = pattern.replace(re.escape("{" + name + "}"), f"(?P<{group}>.+?)", 1)
-    pattern = pattern.replace(re.escape(".xlsx"), r"(?:_\d+)?\.xlsx")     # 같은 이름이 있어 _2 가 붙은 경우
-    m = re.fullmatch(pattern, filename, flags=re.IGNORECASE)
-    return m.group("line") if m and "line" in m.groupdict() else ""
+    예) 대외비_260702_중국_SCS_X2_TAAL01_XD1200.xlsx → 'X2'. 규칙과 안 맞으면 ''."""
+    got = parse_file_name(cfg, "name.cn_file", filename)
+    return (got or {}).get("라인", "")
+
+
+def _cn_line_of_file(path: str, cfg: quote_config.QuoteConfig) -> str:
+    """중국 견적서의 라인 — 만들 때 파일 속성에 적어 둔 값, 없으면(예전 파일) 파일 이름에서."""
+    return quote_fingerprint.read_props(path).get("line") or _cn_line_of(os.path.basename(path), cfg)
 
 
 def _read_cn_quote(path: str, cfg: quote_config.QuoteConfig) -> Dict[str, Any]:
@@ -1934,7 +2045,7 @@ def _generate_cn_cover_impl(template_path: str, folder: str, source_files: List[
             got = _read_cn_quote(path, cfg)
             got["path"] = path
             rows.append(got)
-            line = _cn_line_of(name, cfg)
+            line = _cn_line_of_file(path, cfg)
             if line and line not in lines:
                 lines.append(line)
         except Exception as e:

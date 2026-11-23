@@ -260,6 +260,11 @@ WHATS_NEW = [
         "app": "quote",
         "title": "중국 갑지 생성",
         "desc": "중국 옵션창의 '중국갑지'로 중국 견적서들을 갑지 한 장에 모읍니다.",
+    },    {
+        "id": "2026-11-23-quote-review-rules",
+        "app": "quote",
+        "title": "견적 검토 강화",
+        "desc": "PUMP·Rack 수량이 어긋나거나 같은 견적서를 다시 만들면 미리 알려줍니다.",
     },
 ]
 

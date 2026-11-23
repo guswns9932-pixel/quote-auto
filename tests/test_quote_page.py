@@ -68,7 +68,8 @@ def test_review_panels_follow_the_work(page, quote_template):
     pump = next(r for r in rows if r["A"].upper().startswith("Q") and r["C"] > 0)
     page._add_row("PUMP", pump["B"], 3, pump["C"])
     page._add_row("RACK", by_class["Gate Valve"]["B"], 2, by_class["Gate Valve"]["C"])      # 2 ≠ 3CH
-    page._add_row("RACK", by_class["Pump Rack"]["B"], 1, by_class["Pump Rack"]["C"])
+    rack3 = next(r for r in rows if r["B"] == "Rack System-3")             # 3CH 에 맞는 Rack (대수 검사 통과)
+    page._add_row("RACK", rack3["B"], 1, rack3["C"])
     page._add_row("RACK", "양식에 없는 품목", 1, 0)
     page._refresh_review()
     review = page._review

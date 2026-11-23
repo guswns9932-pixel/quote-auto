@@ -27,6 +27,11 @@ logger = logging.getLogger("QuoteApp")
 _ORG = "LOTVacuum"
 _APP = "QuoteAuto"
 
+# 프로그램 이름·버전 — 런처·스플래시·각 앱 창 제목에 쓴다. 배포할 때마다 버전을 올린다.
+APP_TITLE = "견적업무 자동화"
+APP_VERSION = "1.0"
+APP_TITLE_FULL = f"{APP_TITLE} ver.{APP_VERSION}"
+
 
 def _st() -> QSettings:
     return QSettings(QSettings.IniFormat, QSettings.UserScope, _ORG, _APP)

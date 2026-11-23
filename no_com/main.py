@@ -345,12 +345,14 @@ def _make_splash_pix() -> QPixmap:
     f = QFont("Malgun Gothic", 20)
     f.setBold(True)
     p.setFont(f)
-    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, "업무자동화 통합 시스템")
+    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, app_settings.APP_TITLE)
 
     p.setPen(QColor("#BBDEFB"))
     f2 = QFont("Malgun Gothic", 11)
     p.setFont(f2)
     p.drawText(QRect(0, 130, 520, 40), Qt.AlignCenter, "초기화 중…")
+    p.drawText(QRect(0, 165, 505, 28), Qt.AlignRight | Qt.AlignVCenter,
+               f"ver.{app_settings.APP_VERSION}")
 
     p.end()
     return pix
@@ -364,7 +366,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("업무자동화 통합 시스템")
+        self.setWindowTitle(app_settings.APP_TITLE_FULL)
         self.setFixedSize(340, 198)
         app_settings.restore_geometry("MainWindow", self)
 

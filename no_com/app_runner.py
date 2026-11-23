@@ -54,7 +54,7 @@ class _PageWindow(QMainWindow):
     def __init__(self, title: str, mod_name: str, cls_name: str,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.Window)
-        self.setWindowTitle(f"업무자동화 통합 시스템 — {title}")
+        self.setWindowTitle(f"{app_settings.APP_TITLE_FULL} — {title}")
         self._mod_name = mod_name
         self._cls_name = cls_name
 

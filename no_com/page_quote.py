@@ -739,14 +739,15 @@ class QuoteBuilderPage(Step5Manager, QWidget):
 
         # 마지막 통합양식이 그대로 있으면 자동으로 다시 읽는다.
         # (백그라운드 스레드이므로 창 표시를 막지 않는다)
-        tpl = app_settings.get_path(app_settings.Key.TEMPLATE_PATH)
+        # PC 마다 통합양식 위치가 다를 수 있어 PC 별로 따로 기억한다.
+        tpl = app_settings.get_pc_path(app_settings.Key.TEMPLATE_PATH)
         if tpl:
             self._log(f"이전 통합양식 자동 로드: {os.path.basename(tpl)}")
             QTimer.singleShot(0, lambda: self._start_template_load(tpl, silent=True))
         else:
             # 파일이 옮겨졌거나(버전 업) 네트워크 드라이브가 아직 안 붙은 경우.
             # 설정은 지우지 않는다 — 다음 실행에 드라이브가 붙으면 다시 쓴다.
-            prev = app_settings.get_str(app_settings.Key.TEMPLATE_PATH)
+            prev = app_settings.get_pc_str(app_settings.Key.TEMPLATE_PATH)
             if prev:
                 self._log(f"이전 통합양식을 찾을 수 없어 자동 로드 건너뜀: {prev}")
 
@@ -1283,7 +1284,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
     # ══════════════════════════════════════════
 
     def _load_template(self) -> None:
-        start = app_settings.get_path(app_settings.Key.TEMPLATE_PATH) or ""
+        start = app_settings.get_pc_path(app_settings.Key.TEMPLATE_PATH) or ""
         path, _ = QFileDialog.getOpenFileName(
             self, "통합양식 선택", start, "Excel Files (*.xlsx)")
         if not path:
@@ -1389,7 +1390,7 @@ class QuoteBuilderPage(Step5Manager, QWidget):
         self._apply_filter()
         self.btn_step2.setEnabled(True)
         self._step3_frame.setEnabled(True)
-        app_settings.set_str(app_settings.Key.TEMPLATE_PATH, path)
+        app_settings.set_pc_str(app_settings.Key.TEMPLATE_PATH, path)
         self._log(f"통합양식 LOAD 완료: {os.path.basename(path)}  (품목 {len(rows)}건, 코드매핑 키 {len(cmap)}개)")
         if not silent:
             QMessageBox.information(self, "완료", "통합양식 LOAD 완료")

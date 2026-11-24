@@ -222,6 +222,12 @@ WHATS_NEW = [
         "title": "견적 검토 강화",
         "desc": "PUMP·Rack 수량이 어긋나거나 같은 견적서를 다시 만들면 미리 알려줍니다.",
     },
+    {
+        "id": "2026-11-24-quote-template-per-pc",
+        "app": "quote",
+        "title": "PC별 통합양식 기억",
+        "desc": "PC마다 마지막에 쓴 통합양식을 따로 기억해 자동으로 불러옵니다.",
+    },
 ]
 
 

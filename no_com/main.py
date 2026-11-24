@@ -3,7 +3,7 @@ main.py
 =======
 런처 — 앱별 버튼만 가진 얇은 창.
 
-각 앱(견적서작성·전자서명·키워드 검색기·CSP UPLOAD 자동화)은 별도 exe
+각 앱(견적서작성·전자서명)은 별도 exe
 (`<런처이름>_quote.exe` 등)로 떠서 자기에게 필요한 모듈만 임포트한다.
 런처는 PySide6 와 업데이트 안내만 쓰므로 openpyxl·fitz·PIL·selenium 을 싣지
 않고, 그래서 첫 실행이 빠르다. 개발 환경(비 frozen)에서는 run_*.py 를 직접 실행한다.
@@ -43,8 +43,6 @@ logger = logging.getLogger("QuoteApp")
 _APPS = {
     "quote":  ("견적서작성",        "quote",  "run_quote.py"),
     "esign":  ("전자서명",          "esign",  "run_esign.py"),
-    "search": ("키워드 검색기",     "search", "run_search.py"),
-    "csp":    ("CSP UPLOAD 자동화", "csp",    "run_csp.py"),
 }
 
 # subprocess.Popen 은 자식이 창을 띄울 때까지 기다리지 않고 즉시 반환한다.
@@ -139,12 +137,6 @@ WHATS_NEW = [
         "desc": "Pump/Rack Credit이 사양서·갑지 금액에 정확히 반영되도록 계산 방식을 바로잡았습니다.",
     },
     {
-        "id": "2026-09-02-keyword-search",
-        "app": "search",
-        "title": "키워드 검색기 앱 추가",
-        "desc": "런처에서 폴더 안 파일명·내용을 검색하는 키워드 검색기를 바로 실행할 수 있습니다.",
-    },
-    {
         "id": "2026-09-02-esign-speed",
         "app": "esign",
         "title": "전자서명 속도·편의성 개선",
@@ -169,40 +161,10 @@ WHATS_NEW = [
         "desc": "STEP5에 담은 RACK 품목을 통합양식 코드매핑 시트에 바로 저장합니다.",
     },
     {
-        "id": "2026-09-06-csp-upload",
-        "app": "csp",
-        "title": "CSP UPLOAD 자동화 앱 추가",
-        "desc": "런처에서 CSP 주문접수 업로드 파일 생성기를 바로 실행할 수 있습니다.",
-    },
-    {
         "id": "2026-09-07-launcher-dedup",
         "app": "launcher",
         "title": "런처 버튼 중복 실행 방지",
         "desc": "런처 버튼을 여러 번 눌러도 창이 하나만 뜹니다.",
-    },
-    {
-        "id": "2026-09-09-csp-cip-alarm",
-        "app": "csp",
-        "title": "AS-IS FSC 검토 알람",
-        "desc": "옵션 조건이 CIP의 AS-IS 자재코드와 겹치면 검토 필요로 표시합니다.",
-    },
-    {
-        "id": "2026-09-10-csp-fsc-recommend",
-        "app": "csp",
-        "title": "FSC 추천 기능 추가",
-        "desc": "옵션 조건에 맞는 자재코드를 선택 창 맨 위에 추천하고, 규격으로 Q-code를 찾을 수 있습니다.",
-    },
-    {
-        "id": "2026-09-11-csp-fsc-map-writeback",
-        "app": "csp",
-        "title": "FSC매핑 시트 자동 갱신",
-        "desc": "엑셀 생성 시 새로 쓴 조합과 자재코드를 FSC매핑 시트에 자동으로 기록합니다.",
-    },
-    {
-        "id": "2026-09-15-csp-load-speed",
-        "app": "csp",
-        "title": "통합양식 로드 속도 개선",
-        "desc": "통합양식을 불러올 때 창이 멈추던 시간이 절반 이하로 줄었습니다.",
     },
     {
         "id": "2026-09-15-quote-output-slim",
@@ -227,12 +189,6 @@ WHATS_NEW = [
         "app": "launcher",
         "title": "앱별 분리로 빠른 실행",
         "desc": "각 앱이 따로 실행되어 첫 실행이 빨라졌습니다.",
-    },
-    {
-        "id": "2026-11-02-csp-column-fix",
-        "app": "csp",
-        "title": "고객설비·공정 열 바로잡음",
-        "desc": "주문접수 파일에서 고객설비와 고객공정 값이 서로 바뀌던 문제를 고쳤습니다.",
     },
     {
         "id": "2026-11-13-cover-speed",
@@ -266,6 +222,12 @@ WHATS_NEW = [
         "title": "견적 검토 강화",
         "desc": "PUMP·Rack 수량이 어긋나거나 같은 견적서를 다시 만들면 미리 알려줍니다.",
     },
+    {
+        "id": "2026-11-24-quote-template-per-pc",
+        "app": "quote",
+        "title": "PC별 통합양식 기억",
+        "desc": "PC마다 마지막에 쓴 통합양식을 따로 기억해 자동으로 불러옵니다.",
+    },
 ]
 
 
@@ -279,8 +241,6 @@ def _entry_date(entry: dict) -> str:
 _APP_TAB_LABELS = {
     "quote": "견적서작성",
     "esign": "전자서명",
-    "search": "키워드 검색기",
-    "csp": "CSP UPLOAD",
     "launcher": "런처",
 }
 
@@ -391,12 +351,14 @@ def _make_splash_pix() -> QPixmap:
     f = QFont("Malgun Gothic", 20)
     f.setBold(True)
     p.setFont(f)
-    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, "업무자동화 통합 시스템")
+    p.drawText(QRect(0, 55, 520, 65), Qt.AlignCenter, app_settings.APP_TITLE)
 
     p.setPen(QColor("#BBDEFB"))
     f2 = QFont("Malgun Gothic", 11)
     p.setFont(f2)
     p.drawText(QRect(0, 130, 520, 40), Qt.AlignCenter, "초기화 중…")
+    p.drawText(QRect(0, 165, 505, 28), Qt.AlignRight | Qt.AlignVCenter,
+               f"ver.{app_settings.APP_VERSION}")
 
     p.end()
     return pix
@@ -410,8 +372,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("업무자동화 통합 시스템")
-        self.setFixedSize(340, 354)
+        self.setWindowTitle(app_settings.APP_TITLE_FULL)
+        self.setFixedSize(340, 198)
         app_settings.restore_geometry("MainWindow", self)
 
         central = QWidget()
@@ -420,8 +382,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(30, 30, 30, 30)
         v.setSpacing(18)
 
-        for key, color in [("quote", "#BBDEFB"), ("esign", "#C8E6C9"),
-                           ("search", "#FFE0B2"), ("csp", "#D1C4E9")]:
+        for key, color in [("quote", "#BBDEFB"), ("esign", "#C8E6C9")]:
             btn = QPushButton(_APPS[key][0])
             btn.setMinimumHeight(60)
             f = btn.font(); f.setPointSize(14); f.setBold(True); btn.setFont(f)

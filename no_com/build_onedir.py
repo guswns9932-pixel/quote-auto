@@ -9,18 +9,20 @@ Python 미설치 환경에서도 동작 (Python 인터프리터 포함).
   python build_onedir.py                          # 이름 프롬프트
   python build_onedir.py 견적자동화               # 기본: dist/견적자동화/ 에 견적자동화.exe + _internal
   python build_onedir.py 견적자동화 icon.ico
-  python build_onedir.py 견적자동화 --split       # 한 폴더에 exe 5개(런처 + 앱 4개)
+  python build_onedir.py 견적자동화 --split       # 한 폴더에 exe 3개(런처 + 앱 2개)
   python build_onedir.py 견적자동화 --app quote   # 견적서작성만: dist/견적자동화_quote/
-      (--app 에 쓸 수 있는 이름: launcher, quote, esign, search, csp)
+      (--app 에 쓸 수 있는 이름: launcher, quote, esign)
 
 빌드 방식
 ---------
-  기본     exe 하나에 런처와 앱 4개가 모두 들어간다. 폴더에는 exe 1개와 _internal 뿐이다.
+  기본     exe 하나에 런처와 앱 2개가 모두 들어간다. 폴더에는 exe 1개와 _internal 뿐이다.
            런처에서 앱을 고르면 같은 exe 가 그 앱으로 다시 실행된다(--quote 등).
            해시는 exe 1개.
   --split  앱마다 exe 를 따로 만들어 한 폴더에 모은다. 각 exe 는 자기에게 필요한
-           라이브러리만 불러와 첫 실행이 가볍다. 해시는 exe 5개.
+           라이브러리만 불러와 첫 실행이 가볍다. 해시는 exe 3개.
   --app    그 앱 하나만 든 독립 폴더를 만든다.
+
+키워드 검색기·CSP UPLOAD 자동화는 쓰지 않아 _archive/ 로 옮겼고 빌드하지 않는다.
 
 배포 방법
 ---------
@@ -33,12 +35,12 @@ import sys
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-APP_KEYS = ("launcher", "quote", "esign", "search", "csp")
+APP_KEYS = ("launcher", "quote", "esign")
 
 
 def _split_args(argv):
     """명령줄을 (일반 인자들, 빌드 대상) 으로 나눈다.
-    빌드 대상: '' = 기본(exe 하나에 전부), 'split' = 한 폴더에 exe 5개, 앱 이름 = 그 앱만."""
+    빌드 대상: '' = 기본(exe 하나에 전부), 'split' = 한 폴더에 exe 3개, 앱 이름 = 그 앱만."""
     rest, only, i = [], "", 0
     split = False
     while i < len(argv):
@@ -95,7 +97,7 @@ from PyInstaller.utils.hooks import collect_all
 
 HERE = Path(r"@HERE@")
 APP_NAME = "@APP_NAME@"
-ONLY = "@ONLY@"     # '' = exe 하나에 전부(기본), 'split' = 한 폴더에 exe 5개, 앱 이름 = 그 앱만.
+ONLY = "@ONLY@"     # '' = exe 하나에 전부(기본), 'split' = 한 폴더에 exe 3개, 앱 이름 = 그 앱만.
 ICON = r"@ICON@" or None
 
 # 앱마다 별도 exe 를 만들되 한 폴더(onedir)에 모은다. 앱별로 필요한 의존성만
@@ -103,8 +105,7 @@ ICON = r"@ICON@" or None
 #   <APP_NAME>.exe         런처 (PySide6 만)
 #   <APP_NAME>_quote.exe   견적서작성   (Qt + openpyxl + win32com)
 #   <APP_NAME>_esign.exe   전자서명     (Qt + fitz + win32com)
-#   <APP_NAME>_search.exe  키워드 검색기 (Tk + fitz/openpyxl 파서)
-#   <APP_NAME>_csp.exe     CSP UPLOAD   (Tk + openpyxl)
+# (키워드 검색기·CSP UPLOAD 는 _archive/ 로 옮겨 빌드하지 않는다)
 
 openpyxl_d, openpyxl_b, openpyxl_h = collect_all("openpyxl")
 fitz_d,     fitz_b,     fitz_h     = collect_all("fitz")
@@ -161,14 +162,12 @@ _COMMON_EXCLUDES = [
     # ※ distutils, lib2to3, sqlite3, dbm 은 제외하지 않음:
     #   win32com → pkg_resources → distutils/lib2to3 의존 체인이 존재
 ]
-_NO_QT = ["PySide6", "shiboken6"]
 _NO_TK = ["tkinter", "_tkinter"]
 
 _QT_MODS = [
     "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
 ]
 _QT_PAGE_MODS = _QT_MODS + ["PySide6.QtSvg", "PySide6.QtPrintSupport"]
-_TK_MODS = ["tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk"]
 _WIN32_MODS = [
     "pythoncom", "pywintypes", "win32api", "win32com", "win32com.client",
     "win32con", "win32timezone",
@@ -196,7 +195,7 @@ _PROFILES = [
         ],
         # 견적서작성은 엑셀(openpyxl + 그림용 PIL)과 Excel COM 을 쓴다 — PDF·브라우저 자동화 없음
         excludes=_COMMON_EXCLUDES + _NO_TK + [
-            "content_search", "csp_order_maker", "csp_core", "page_esign", "esign_engine",
+            "page_esign", "esign_engine",
             "fitz", "selenium", "webdriver_manager", "pyautogui",
         ],
         binaries=[*openpyxl_b, *pil_b, *_pywin32_dlls],
@@ -212,38 +211,13 @@ _PROFILES = [
         # 전자서명은 Excel 이 만든 PDF 를 fitz 로만 다룬다 — openpyxl·PIL 을 쓰지 않는다
         # (예전 클립보드 캡처 방식에서만 PIL 이 필요했다).
         excludes=_COMMON_EXCLUDES + _NO_TK + [
-            "content_search", "csp_order_maker", "csp_core", "excel_io", "page_quote",
+            "excel_io", "page_quote",
             "quote_config", "quote_calc", "quote_review", "quote_panels",
             "openpyxl", "PIL",
             "selenium", "webdriver_manager", "pyautogui",
         ],
         binaries=[*fitz_b, *_pywin32_dlls],
         datas=[*fitz_d],
-    ),
-    dict(
-        key="search", script="run_search.py", exe=APP_NAME + "_search",
-        hidden=_ENCODINGS + _TK_MODS + [
-            "app_boot", "content_search", "content_search.gui",
-            "content_search.parsers", "content_search.scanner",
-            "content_search.text_utils",
-            "tarfile",  # pymupdf 동적 임포트 (정적 분석 불가)
-            *openpyxl_h, *fitz_h,
-        ],
-        excludes=_COMMON_EXCLUDES + _NO_QT + [
-            "PIL", "selenium", "webdriver_manager", "pyautogui", "win32com", "pythoncom",
-        ],
-        binaries=[*openpyxl_b, *fitz_b], datas=[*openpyxl_d, *fitz_d],
-    ),
-    dict(
-        key="csp", script="run_csp.py", exe=APP_NAME + "_csp",
-        hidden=_ENCODINGS + _TK_MODS + [
-            "app_boot", "csp_order_maker", "csp_core", "openpyxl.cell._writer", *openpyxl_h,
-        ],
-        excludes=_COMMON_EXCLUDES + _NO_QT + [
-            "fitz", "PIL", "selenium", "webdriver_manager", "pyautogui",
-            "win32com", "pythoncom", "content_search",
-        ],
-        binaries=[*openpyxl_b], datas=[*openpyxl_d],
     ),
 ]
 
@@ -263,7 +237,8 @@ else:
         _merged["binaries"] += [b for b in _p["binaries"] if b not in _merged["binaries"]]
         _merged["datas"] += [d for d in _p["datas"] if d not in _merged["datas"]]
     # 앱마다 제외 목록이 다르다(한 앱이 안 쓰는 것을 다른 앱은 쓴다) → 아무도 안 쓰는 것만 제외
-    _merged["excludes"] = list(_COMMON_EXCLUDES) + [
+    # 런처·견적·전자서명 모두 Qt 앱이라 tkinter 는 아무도 쓰지 않는다
+    _merged["excludes"] = list(_COMMON_EXCLUDES) + _NO_TK + [
         "selenium", "webdriver_manager", "pyautogui"]
     _PROFILES = [_merged]
     COLLECT_NAME = APP_NAME
@@ -307,7 +282,7 @@ coll = COLLECT(
 
 
 def _make_spec(app_name: str, icon: str, only: str = "") -> str:
-    """PyInstaller spec 을 만든다. only: '' = exe 하나에 전부, 'split' = exe 5개, 앱 이름 = 그 앱만."""
+    """PyInstaller spec 을 만든다. only: '' = exe 하나에 전부, 'split' = exe 3개, 앱 이름 = 그 앱만."""
     return (_SPEC_TEMPLATE
             .replace("@HERE@", HERE)
             .replace("@APP_NAME@", app_name)
@@ -460,7 +435,7 @@ def main():
     print(f"\n{'='*54}")
     print(f"  앱 이름 : {app_name}")
     print(f"  아이콘  : {icon or '없음'}")
-    print(f"  대상    : {'exe 하나에 전부 (런처 + 앱 4개)' if not only else '한 폴더에 exe 5개' if only == 'split' else only}")
+    print(f"  대상    : {'exe 하나에 전부 (런처 + 앱 2개)' if not only else '한 폴더에 exe 3개' if only == 'split' else only}")
     print(f"  출력    : {os.path.join(dist_dir, out_name)}/")
     print(f"  로그    : {log_path}")
     print(f"{'='*54}")

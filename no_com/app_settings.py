@@ -3,8 +3,11 @@ app_settings.py
 ===============
 사용자 설정 영속화 (QSettings 기반).
 
-레지스트리(HKCU\\Software\\LOTVacuum\\QuoteAuto)에 저장되므로
+사용자 폴더의 ini(%APPDATA%\\LOTVacuum\\QuoteAuto.ini)에 저장되므로
 EXE 폴더가 읽기 전용이어도 동작한다.
+
+%APPDATA% 는 로밍 폴더라 회사 PC 에서는 같은 계정의 다른 PC 와 공유될 수 있다.
+PC 마다 다른 값(통합양식 위치 등)은 get_pc_* / set_pc_* 로 PC 이름별로 따로 둔다.
 
 저장 대상
 ---------
@@ -18,6 +21,8 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import re
 from typing import Optional
 
 from PySide6.QtCore import QByteArray, QSettings
@@ -26,6 +31,11 @@ logger = logging.getLogger("QuoteApp")
 
 _ORG = "LOTVacuum"
 _APP = "QuoteAuto"
+
+# 프로그램 이름·버전 — 런처·스플래시·각 앱 창 제목에 쓴다. 배포할 때마다 버전을 올린다.
+APP_TITLE = "견적업무 자동화"
+APP_VERSION = "1.0"
+APP_TITLE_FULL = f"{APP_TITLE} ver.{APP_VERSION}"
 
 
 def _st() -> QSettings:
@@ -65,6 +75,36 @@ def get_dir(key: str, fallback: str = "") -> str:
     """저장된 폴더를 반환하되, 없으면 fallback."""
     p = get_str(key)
     return p if p and os.path.isdir(p) else fallback
+
+
+# ──────────────────────────────────────────────
+# PC 별 값 — 같은 계정이라도 PC 가 다르면 따로 기억한다
+# ──────────────────────────────────────────────
+def pc_name() -> str:
+    """이 PC 의 이름 (설정 키에 쓸 수 있게 정리). 알 수 없으면 빈 문자열."""
+    name = os.environ.get("COMPUTERNAME") or platform.node() or ""
+    return re.sub(r"[^0-9A-Za-z가-힣_.-]", "_", name.strip()).upper()
+
+
+def _pc_key(key: str) -> str:
+    name = pc_name()
+    return f"pc/{name}/{key}" if name else key
+
+
+def get_pc_str(key: str) -> str:
+    """이 PC 에서 저장한 값. 아직 없으면(업데이트 직후 첫 실행) 예전 공용 값을 쓴다."""
+    return get_str(_pc_key(key)) or get_str(key)
+
+
+def set_pc_str(key: str, value: Optional[str]) -> None:
+    set_str(_pc_key(key), value)
+
+
+def get_pc_path(key: str) -> str:
+    """이 PC 에서 저장한 경로를 반환하되, 더 이상 존재하지 않으면 빈 문자열.
+    (네트워크 드라이브가 아직 안 붙은 경우 등 — 다른 PC 의 경로로 대신하지 않는다)"""
+    p = get_pc_str(key)
+    return p if p and os.path.exists(p) else ""
 
 
 # ──────────────────────────────────────────────
@@ -112,7 +152,7 @@ def restore_geometry(key: str, widget) -> bool:
 # 키 상수
 # ──────────────────────────────────────────────
 class Key:
-    TEMPLATE_PATH   = "paths/template"
+    TEMPLATE_PATH   = "paths/template"    # PC 별 (get_pc_path / set_pc_str)
     REQUEST_PATH    = "paths/request"
     OUTPUT_DIR      = "paths/output_dir"
     ESIGN_DIR       = "paths/esign_dir"
